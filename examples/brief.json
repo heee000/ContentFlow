@@ -1,0 +1,23 @@
+{
+  "campaign_name": "星图夜游路线内容示例",
+  "product_name": "星图地图",
+  "goal": "帮助北京年轻用户把零散夜游地点整理成可执行路线",
+  "audience": "18-30 岁、周末临时决定出门、希望少做攻略的用户",
+  "platforms": [
+    "xiaohongshu",
+    "douyin",
+    "wechat"
+  ],
+  "tone": "实用、自然、不过度承诺",
+  "city": "北京",
+  "must_include": [
+    "地点整理",
+    "路线确认"
+  ],
+  "forbidden_phrases": [
+    "全网第一",
+    "百分百准确",
+    "绝对不会堵车"
+  ],
+  "call_to_action": "打开星图地图，规划适合自己的路线"
+}

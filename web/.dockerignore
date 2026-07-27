@@ -1,0 +1,10 @@
+.git
+.next
+.vinext
+dist
+node_modules
+.openai
+outputs
+work
+.env*
+npm-debug.log*

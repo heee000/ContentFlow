@@ -1,0 +1,27 @@
+[
+  {
+    "platform": "xiaohongshu",
+    "impressions": 12000,
+    "clicks": 540,
+    "likes": 620,
+    "comments": 74,
+    "shares": 116
+  },
+  {
+    "platform": "douyin",
+    "impressions": 18000,
+    "clicks": 380,
+    "likes": 760,
+    "comments": 55,
+    "shares": 82
+  },
+  {
+    "platform": "wechat",
+    "impressions": 4200,
+    "clicks": 210,
+    "likes": 130,
+    "comments": 18,
+    "shares": 46
+  }
+]
+

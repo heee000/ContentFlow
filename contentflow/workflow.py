@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .models import CampaignBrief, ContentItem
+from .providers import Provider
+from .rag import KnowledgeIndex
+from .review import RuleReviewer
+from .storage import Database
+
+
+def build_asset_tasks(
+    platform: str,
+    brief: CampaignBrief,
+    plan: dict[str, Any],
+    draft: dict[str, Any],
+) -> list[dict[str, Any]]:
+    base_prompt = (
+        f"{brief.city}城市出行场景，{plan['asset_direction']}，"
+        f"画面服务于主题“{draft['title']}”，避免展示虚构优惠或未确认功能"
+    )
+    tasks = [
+        {
+            "type": "image",
+            "model_input": base_prompt,
+            "ratio": "3:4" if platform == "xiaohongshu" else "16:9",
+            "status": "pending_generation",
+        }
+    ]
+    if platform == "douyin":
+        layout = draft.get("layout") if isinstance(draft.get("layout"), dict) else {}
+        generated_shots = layout.get("shots")
+        tasks.append(
+            {
+                "type": "video_storyboard",
+                "duration_seconds": 20,
+                "shots": generated_shots
+                if isinstance(generated_shots, list) and generated_shots
+                else [
+                    "0-3 秒：提出夜游路线选择困难",
+                    "3-12 秒：展示地点整理与路线调整",
+                    "12-17 秒：展示确认后的路线结果",
+                    "17-20 秒：CTA 与人工确认提示",
+                ],
+                "aspect_ratio": layout.get("aspect_ratio") or "9:16",
+                "status": "pending_generation",
+            }
+        )
+    return tasks
+
+
+class ContentMarketingWorkflow:
+    def __init__(
+        self,
+        workspace: Path,
+        provider: Provider,
+        reviewer: RuleReviewer | None = None,
+    ):
+        self.workspace = workspace
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.runs_dir = self.workspace / "runs"
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.database = Database(self.workspace / "contentflow.db")
+        self.index = KnowledgeIndex(self.database)
+        self.provider = provider
+        self.reviewer = reviewer or RuleReviewer()
+
+    def rebuild_knowledge(self, knowledge_dir: Path) -> int:
+        return self.index.rebuild(knowledge_dir)
+
+    def run(
+        self,
+        brief_raw: dict[str, Any],
+        knowledge_dir: Path,
+    ) -> dict[str, Any]:
+        brief = CampaignBrief.from_dict(brief_raw)
+        if not self.database.read_chunks():
+            self.rebuild_knowledge(knowledge_dir)
+
+        query = " ".join(
+            [
+                brief.product_name,
+                brief.goal,
+                brief.audience,
+                brief.city,
+                *brief.must_include,
+                *brief.product_facts,
+            ]
+        )
+        retrieved = self.index.search(query, limit=4)
+        knowledge_payload = [item.to_dict() for item in retrieved]
+        plan = self.provider.complete_json(
+            "plan",
+            {"brief": brief.to_dict(), "knowledge": knowledge_payload},
+        )
+
+        items: list[ContentItem] = []
+        for platform in brief.platforms:
+            draft = self.provider.complete_json(
+                "generate",
+                {
+                    "brief": brief.to_dict(),
+                    "platform": platform,
+                    "plan": plan,
+                    "knowledge": knowledge_payload,
+                },
+            )
+            review = self.reviewer.review(platform, draft, brief)
+            if not review.passed:
+                draft = self.reviewer.repair(platform, draft, brief)
+                review = self.reviewer.review(platform, draft, brief)
+
+            status = "ready_for_human_review" if review.passed else "blocked"
+            item = ContentItem(
+                platform=platform,
+                title=str(draft.get("title") or ""),
+                body=str(draft.get("body") or ""),
+                hashtags=[str(tag) for tag in draft.get("hashtags", [])],
+                call_to_action=brief.call_to_action,
+                layout_json=(
+                    draft.get("layout")
+                    if isinstance(draft.get("layout"), dict)
+                    else {}
+                ),
+                source_chunk_ids=[chunk.chunk_id for chunk in retrieved],
+                asset_tasks=build_asset_tasks(
+                    platform, brief, plan, draft
+                ),
+                review=review,
+                status=status,
+            )
+            items.append(item)
+
+        run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
+        created_at = datetime.now(timezone.utc).isoformat()
+        result = {
+            "run_id": run_id,
+            "created_at": created_at,
+            "mode": "dry-run",
+            "brief": brief.to_dict(),
+            "retrieved_knowledge": knowledge_payload,
+            "plan": plan,
+            "contents": [item.to_dict() for item in items],
+        }
+
+        for item in items:
+            if item.status == "ready_for_human_review":
+                self.database.enqueue(run_id, item.platform, item.to_dict())
+        result["publish_queue"] = self.database.queue_for_run(run_id)
+
+        self.database.save_run(run_id, created_at, result)
+        output_path = self.runs_dir / f"{run_id}.json"
+        output_path.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        result["output_path"] = str(output_path)
+        return result
