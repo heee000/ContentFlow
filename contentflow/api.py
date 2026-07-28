@@ -14,6 +14,7 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
+from .migrate import upgrade_database
 from .routers import (
     admin,
     assets,
@@ -51,6 +52,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if not settings.production:
+            upgrade_database(settings)
+            db.configure_database(settings.database_url)
             db.create_schema()
         logger.info(
             json.dumps(

@@ -8,10 +8,11 @@ ContentFlow 的运营工作台，基于 Next.js API 与 vinext/Vite 构建。
 
 ```bash
 npm ci
-npm run dev
+npm run dev:local
 ```
 
-默认连接 `http://localhost:8000/api/v1`。如需修改后端地址：
+本地工作台固定使用 `http://localhost:3001`，默认连接
+`http://localhost:8000/api/v1`。如需修改后端地址：
 
 ```dotenv
 NEXT_PUBLIC_CONTENTFLOW_API_BASE=http://localhost:8000/api/v1

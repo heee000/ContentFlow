@@ -57,9 +57,14 @@ docker-compose.yml  PostgreSQL、MinIO、API、Worker、Web
 ```powershell
 Copy-Item .env.example .env
 python -m pip install -e ".[test]"
-python -m alembic upgrade head
+python -m contentflow.migrate
 python -m uvicorn contentflow.api:app --reload
 ```
+
+开发环境启动 API 或 Worker 时也会自动执行安全的增量迁移。对于早期
+`create_all` 创建、尚未写入 Alembic 版本号的本地数据库，迁移器会先核对
+完整表结构，再补齐版本记录和新增字段；检测到缺表或半迁移状态时会停止并
+提示先备份，避免静默破坏数据。
 
 新开一个终端启动 Worker：
 
@@ -72,12 +77,12 @@ contentflow-worker
 ```powershell
 Set-Location web
 npm ci
-npm run dev
+npm run dev:local
 ```
 
 访问：
 
-- 工作台：`http://localhost:3000`（若端口被占用，可在 `.env` 中同时设置 `CONTENTFLOW_WEB_PORT=3300`，默认 CORS 已允许该备用端口）
+- 工作台：`http://localhost:3001`（专用本地开发端口，避免与其他常见的 `3000` 端口项目冲突）
 - API 文档：`http://localhost:8000/docs`
 - 健康检查：`http://localhost:8000/health/ready`
 

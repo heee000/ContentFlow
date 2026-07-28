@@ -135,6 +135,21 @@ class ApiV2Test(unittest.TestCase):
         self.assertEqual(channel.json()["status"], "export_only")
         self.assertNotIn("credential_ciphertext", channel.json())
 
+    def test_dedicated_local_frontend_origin_is_allowed(self):
+        response = self.client.options(
+            "/api/v1/auth/login",
+            headers={
+                "Origin": "http://localhost:3001",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "http://localhost:3001",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

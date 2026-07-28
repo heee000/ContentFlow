@@ -463,8 +463,14 @@ def main() -> None:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+    settings = get_settings()
+    if not settings.production:
+        from .migrate import upgrade_database
+
+        upgrade_database(settings)
+        db.configure_database(settings.database_url)
     db.create_schema()
-    worker = Worker()
+    worker = Worker(settings=settings)
     if args.once:
         worker.run_once()
     else:

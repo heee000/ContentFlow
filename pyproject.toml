@@ -35,6 +35,7 @@ test = [
 
 [project.scripts]
 contentflow = "contentflow.cli:main"
+contentflow-migrate = "contentflow.migrate:main"
 contentflow-worker = "contentflow.worker:main"
 
 [tool.setuptools.packages.find]

@@ -24,7 +24,16 @@ class Settings(BaseSettings):
     access_token_minutes: int = 480
     allow_registration: bool = True
     cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://localhost:3300",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3001",
+            "http://127.0.0.1:3300",
+            "http://127.0.0.1:5173",
+        ]
     )
 
     storage_backend: str = "local"
