@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,11 +28,11 @@ class ObjectStorage(Protocol):
         filename: str,
         stream: BinaryIO,
         content_type: str | None = None,
-    ) -> StoredObject:
-        ...
+    ) -> StoredObject: ...
 
-    def read(self, uri: str, *, max_bytes: int = 100 * 1024 * 1024) -> bytes:
-        ...
+    def read(self, uri: str, *, max_bytes: int = 100 * 1024 * 1024) -> bytes: ...
+
+    def check(self) -> None: ...
 
 
 def safe_filename(filename: str) -> str:
@@ -42,8 +43,9 @@ def safe_filename(filename: str) -> str:
 
 
 class LocalObjectStorage:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, max_upload_bytes: int):
         self.root = root.resolve()
+        self.max_upload_bytes = max_upload_bytes
         self.root.mkdir(parents=True, exist_ok=True)
 
     def put(
@@ -64,14 +66,26 @@ class LocalObjectStorage:
         digest = hashlib.sha256()
         size = 0
         temporary = target_dir / f".{uuid.uuid4().hex}-{clean_name}.uploading"
-        with temporary.open("wb") as output:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
-                size += len(chunk)
-                output.write(chunk)
+        try:
+            with temporary.open("wb") as output:
+                while chunk := stream.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > self.max_upload_bytes:
+                        raise ValueError(
+                            f"Upload exceeds {self.max_upload_bytes} byte limit"
+                        )
+                    digest.update(chunk)
+                    output.write(chunk)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         final = target_dir / f"{digest.hexdigest()[:16]}-{clean_name}"
         temporary.replace(final)
-        mime = content_type or mimetypes.guess_type(clean_name)[0] or "application/octet-stream"
+        mime = (
+            content_type
+            or mimetypes.guess_type(clean_name)[0]
+            or "application/octet-stream"
+        )
         return StoredObject(
             uri=final.as_uri(),
             checksum=digest.hexdigest(),
@@ -91,6 +105,10 @@ class LocalObjectStorage:
             raise ValueError("对象超过读取大小限制")
         return path.read_bytes()
 
+    def check(self) -> None:
+        if not self.root.is_dir():
+            raise RuntimeError(f"Local storage directory is unavailable: {self.root}")
+
 
 class S3ObjectStorage:
     def __init__(self, settings: Settings):
@@ -99,6 +117,7 @@ class S3ObjectStorage:
         except ImportError as error:
             raise RuntimeError("使用 S3 存储需要安装 contentflow[s3]") from error
         self.bucket = settings.s3_bucket
+        self.max_upload_bytes = settings.max_upload_bytes
         self.client = boto3.client(
             "s3",
             endpoint_url=settings.s3_endpoint_url,
@@ -117,20 +136,40 @@ class S3ObjectStorage:
         content_type: str | None = None,
     ) -> StoredObject:
         clean_name = safe_filename(filename)
-        data = stream.read()
-        digest = hashlib.sha256(data).hexdigest()
-        key = f"{workspace_id}/{category}/{digest[:16]}-{clean_name}"
-        mime = content_type or mimetypes.guess_type(clean_name)[0] or "application/octet-stream"
-        self.client.put_object(
-            Bucket=self.bucket,
-            Key=key,
-            Body=data,
-            ContentType=mime,
-        )
+        digest = hashlib.sha256()
+        size = 0
+        with tempfile.SpooledTemporaryFile(
+            max_size=min(self.max_upload_bytes, 8 * 1024 * 1024)
+        ) as staging:
+            while chunk := stream.read(1024 * 1024):
+                size += len(chunk)
+                if size > self.max_upload_bytes:
+                    raise ValueError(
+                        f"Upload exceeds {self.max_upload_bytes} byte limit"
+                    )
+                digest.update(chunk)
+                staging.write(chunk)
+            checksum = digest.hexdigest()
+            key = f"{workspace_id}/{category}/{checksum[:16]}-{clean_name}"
+            mime = (
+                content_type
+                or mimetypes.guess_type(clean_name)[0]
+                or "application/octet-stream"
+            )
+            staging.seek(0)
+            self.client.upload_fileobj(
+                staging,
+                self.bucket,
+                key,
+                ExtraArgs={
+                    "ContentType": mime,
+                    "Metadata": {"sha256": checksum},
+                },
+            )
         return StoredObject(
             uri=f"s3://{self.bucket}/{key}",
-            checksum=digest,
-            size_bytes=len(data),
+            checksum=checksum,
+            size_bytes=size,
             mime_type=mime,
         )
 
@@ -140,20 +179,53 @@ class S3ObjectStorage:
             raise ValueError("S3 对象不属于当前 bucket")
         key = uri[len(prefix) :]
         response = self.client.get_object(Bucket=self.bucket, Key=key)
-        content_length = int(response.get("ContentLength") or 0)
-        if content_length > max_bytes:
-            response["Body"].close()
-            raise ValueError("对象超过读取大小限制")
-        data = response["Body"].read(max_bytes + 1)
-        response["Body"].close()
+        raw_content_length = response.get("ContentLength")
+        content_length = (
+            int(raw_content_length) if raw_content_length is not None else None
+        )
+        body = response["Body"]
+        try:
+            if content_length is not None and content_length > max_bytes:
+                raise ValueError("对象超过读取大小限制")
+            data = body.read(max_bytes + 1)
+        finally:
+            body.close()
         if len(data) > max_bytes:
             raise ValueError("对象超过读取大小限制")
+        if content_length is not None and len(data) != content_length:
+            raise OSError("S3 对象读取不完整")
+
+        checksum = hashlib.sha256(data).hexdigest()
+        metadata = dict(response.get("Metadata") or {})
+        expected_checksum = metadata.get("sha256")
+        if expected_checksum:
+            valid_checksum = checksum == expected_checksum
+        else:
+            # Objects created before checksum metadata was introduced still
+            # carry the first 16 checksum characters in their generated key.
+            expected_prefix = key.rsplit("/", 1)[-1].split("-", 1)[0]
+            valid_checksum = (
+                len(expected_prefix) == 16
+                and all(
+                    character in "0123456789abcdef"
+                    for character in expected_prefix
+                )
+                and checksum.startswith(expected_prefix)
+            )
+        if not valid_checksum:
+            raise ValueError("S3 对象完整性校验失败")
         return data
+
+    def check(self) -> None:
+        self.client.head_bucket(Bucket=self.bucket)
 
 
 def build_object_storage(settings: Settings) -> ObjectStorage:
     if settings.storage_backend == "local":
-        return LocalObjectStorage(settings.local_storage_dir)
+        return LocalObjectStorage(
+            settings.local_storage_dir,
+            max_upload_bytes=settings.max_upload_bytes,
+        )
     if settings.storage_backend == "s3":
         return S3ObjectStorage(settings)
     raise ValueError(f"不支持的存储后端: {settings.storage_backend}")

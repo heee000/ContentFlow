@@ -232,5 +232,69 @@ class ConnectorContractTest(unittest.TestCase):
         self.assertEqual(result.external_id, "draft-media")
 
 
+    def test_wechat_reconciliation_waits_for_article_id(self):
+        requests: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/cgi-bin/token":
+                return httpx.Response(200, json={"access_token": "wechat-token"})
+            if request.url.path == "/cgi-bin/freepublish/get":
+                requests.append(json.loads(request.content))
+                if len(requests) == 1:
+                    return httpx.Response(200, json={"publish_status": 0})
+                return httpx.Response(
+                    200,
+                    json={
+                        "publish_status": 0,
+                        "article_id": "article-001",
+                        "article_detail": {
+                            "item": [
+                                {
+                                    "article_url": (
+                                        "https://mp.weixin.qq.com/s/article-001"
+                                    )
+                                }
+                            ]
+                        },
+                    },
+                )
+            return httpx.Response(404)
+
+        channel = ChannelConnection(
+            id="channel-wechat-reconcile",
+            workspace_id="workspace-1",
+            platform="wechat",
+            display_name="公众号自动发布",
+            config_json={"api_base": "https://wechat.test", "auto_publish": True},
+        )
+        connector = WechatConnector(
+            channel=channel,
+            credentials={"app_id": "app", "app_secret": "secret"},
+            storage=MemoryStorage(),
+            client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        job = publish_job(channel.id)
+        job.external_id = "publish-001"
+
+        pending = connector.reconcile(job)
+        self.assertTrue(connector.reconciliation_supported)
+        self.assertEqual(pending.status, "pending")
+        self.assertEqual(pending.external_id, "publish-001")
+
+        published = connector.reconcile(job)
+        self.assertEqual(published.status, "published")
+        self.assertEqual(published.external_id, "article-001")
+        self.assertEqual(
+            published.external_url,
+            "https://mp.weixin.qq.com/s/article-001",
+        )
+        self.assertEqual(
+            requests,
+            [
+                {"publish_id": "publish-001"},
+                {"publish_id": "publish-001"},
+            ],
+        )
+
 if __name__ == "__main__":
     unittest.main()

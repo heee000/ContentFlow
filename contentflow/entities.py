@@ -76,6 +76,85 @@ class Membership(TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String(24), default="editor")
 
 
+class AuthSession(TimestampMixin, Base):
+    __tablename__ = "auth_sessions"
+    __table_args__ = (
+        Index(
+            "ix_auth_sessions_user_active",
+            "user_id",
+            "revoked_at",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    refresh_token_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    revoke_reason: Mapped[str | None] = mapped_column(String(120))
+    user_agent_hash: Mapped[str | None] = mapped_column(String(64))
+    client_ip_hash: Mapped[str | None] = mapped_column(String(64))
+
+
+class AuthRefreshTokenHistory(Base):
+    __tablename__ = "auth_refresh_token_history"
+    __table_args__ = (
+        Index(
+            "ix_auth_refresh_token_history_session",
+            "auth_session_id",
+            "rotated_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    auth_session_id: Mapped[str] = mapped_column(
+        ForeignKey("auth_sessions.id", ondelete="CASCADE")
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    rotated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
+class AuthRateLimit(TimestampMixin, Base):
+    __tablename__ = "auth_rate_limits"
+    __table_args__ = (
+        Index(
+            "ix_auth_rate_limits_scope_expires",
+            "scope",
+            "expires_at",
+        ),
+    )
+
+    key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    window_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    blocked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+
 class Campaign(TimestampMixin, Base):
     __tablename__ = "campaigns"
 
@@ -364,3 +443,29 @@ class Job(TimestampMixin, Base):
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+
+
+class WorkerNode(Base):
+    __tablename__ = "worker_nodes"
+    __table_args__ = (
+        Index(
+            "ix_worker_nodes_status_heartbeat",
+            "status",
+            "heartbeat_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False)
+    process_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(24), default="online", nullable=False, index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

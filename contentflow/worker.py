@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import socket
-import time
+import threading
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any
 
@@ -26,13 +27,17 @@ from .entities import (
     MetricSnapshot,
     PublishJob,
     WorkflowRun,
+    WorkerNode,
 )
 from .embeddings import build_embedding_provider
 from .job_queue import (
+    JobLeaseLost,
     claim_next_job,
     complete_job,
     enqueue_job,
+    fail_exhausted_leases,
     fail_job,
+    renew_job_lease,
 )
 from .knowledge_service import index_document
 from .media_providers import (
@@ -46,10 +51,174 @@ from .workflow_service import execute_workflow_run
 
 logger = logging.getLogger("contentflow.worker")
 Handler = Callable[[Session, dict[str, Any], Settings], dict[str, Any]]
+def configure_worker_logging() -> None:
+    logging.basicConfig(level=logging.INFO, force=True)
+    logger.disabled = False
+    logger.setLevel(logging.INFO)
 
 
 class JobNotReady(RuntimeError):
     """The external task is healthy but has not reached a terminal state."""
+
+
+class PublishReconciliationRequired(RuntimeError):
+    """The remote outcome is uncertain and requires reconciliation before retry."""
+
+
+class LeaseHeartbeat:
+    def __init__(
+        self,
+        *,
+        session_factory,
+        job_id: str,
+        worker_id: str,
+        attempt: int,
+        lease_seconds: int,
+    ):
+        self.session_factory = session_factory
+        self.job_id = job_id
+        self.worker_id = worker_id
+        self.attempt = attempt
+        self.interval_seconds = max(0.25, min(30.0, lease_seconds / 3))
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"contentflow-lease-{job_id[:8]}",
+            daemon=True,
+        )
+
+    @property
+    def lost(self) -> bool:
+        return self._lost.is_set()
+
+    def __enter__(self) -> LeaseHeartbeat:
+        self._thread.start()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self._stop.set()
+        self._thread.join(timeout=self.interval_seconds + 2)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                with self.session_factory() as session:
+                    renewed = renew_job_lease(
+                        session,
+                        job_id=self.job_id,
+                        worker_id=self.worker_id,
+                        attempt=self.attempt,
+                    )
+                    if not renewed:
+                        session.rollback()
+                        self._lost.set()
+                        logger.error(
+                            "job lease lost id=%s worker=%s attempt=%s",
+                            self.job_id,
+                            self.worker_id,
+                            self.attempt,
+                        )
+                        return
+                    session.commit()
+            except Exception:
+                self._lost.set()
+                logger.exception(
+                    "job lease heartbeat failed id=%s worker=%s attempt=%s",
+                    self.job_id,
+                    self.worker_id,
+                    self.attempt,
+                )
+                return
+
+
+class WorkerNodeHeartbeat:
+    def __init__(
+        self,
+        *,
+        session_factory,
+        worker_id: str,
+        interval_seconds: float,
+        hostname: str | None = None,
+        process_id: int | None = None,
+    ):
+        self.session_factory = session_factory
+        self.worker_id = worker_id
+        self.interval_seconds = interval_seconds
+        self.hostname = hostname or socket.gethostname()
+        self.process_id = process_id or os.getpid()
+        self.started_at = datetime.now(timezone.utc)
+        self._stop = threading.Event()
+        self._started = False
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"contentflow-worker-node-{worker_id[-12:]}",
+            daemon=True,
+        )
+
+    def __enter__(self) -> WorkerNodeHeartbeat:
+        self.start()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.stop()
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self.pulse("online")
+        self._started = True
+        self._thread.start()
+
+    def stop(self) -> None:
+        if not self._started or self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        self._thread.join(timeout=self.interval_seconds + 2)
+        self.pulse("stopped")
+
+    def pulse(self, status: str = "online") -> bool:
+        now = datetime.now(timezone.utc)
+        try:
+            with self.session_factory() as session:
+                node = session.get(WorkerNode, self.worker_id)
+                if node is None:
+                    node = WorkerNode(
+                        id=self.worker_id,
+                        hostname=self.hostname,
+                        process_id=self.process_id,
+                        status=status,
+                        started_at=self.started_at,
+                        heartbeat_at=now,
+                        metadata_json={
+                            "heartbeat_interval_seconds": self.interval_seconds,
+                        },
+                    )
+                    session.add(node)
+                else:
+                    node.hostname = self.hostname
+                    node.process_id = self.process_id
+                    node.status = status
+                    node.heartbeat_at = now
+                if status == "stopped":
+                    node.stopped_at = now
+                else:
+                    node.stopped_at = None
+                session.commit()
+            return True
+        except Exception:
+            logger.exception(
+                "worker node heartbeat failed id=%s status=%s",
+                self.worker_id,
+                status,
+            )
+            return False
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self.pulse("online")
 
 
 def handle_knowledge_index(
@@ -91,7 +260,17 @@ def handle_workflow_execute(
         entity_id=run.id,
         workspace_id=run.workspace_id,
         actor_user_id=None,
-        metadata={"content_count": len(result.get("contents") or [])},
+        metadata={
+            "content_count": len(result.get("contents") or []),
+            "ai_provider": (result.get("ai_provenance") or {}).get("provider"),
+            "ai_model": (result.get("ai_provenance") or {}).get("model"),
+            "ai_invocations": (result.get("ai_provenance") or {}).get(
+                "invocation_count"
+            ),
+            "token_usage_source": (
+                (result.get("ai_provenance") or {}).get("token_usage") or {}
+            ).get("source"),
+        },
     )
     return result
 
@@ -229,11 +408,124 @@ def handle_asset_poll(
     )
     return {"asset_id": asset.id, "status": asset.status}
 
+def publish_reconciliation_job_key(publish_job_id: str) -> str:
+    return f"publish.reconcile:{publish_job_id}"
+
+
+def ensure_publish_reconciliation_job(
+    session: Session,
+    *,
+    publish_job: PublishJob,
+    settings: Settings,
+    reason: str,
+) -> tuple[Job, bool]:
+    key = publish_reconciliation_job_key(publish_job.id)
+    run_at = datetime.now(timezone.utc) + timedelta(
+        seconds=settings.publish_reconciliation_initial_delay_seconds
+    )
+    payload = {
+        "publish_job_id": publish_job.id,
+        "lookup_external_id": publish_job.external_id,
+    }
+    existing = session.scalar(select(Job).where(Job.idempotency_key == key))
+    if existing is not None:
+        if (
+            publish_job.status == "submitted"
+            and existing.status in {"succeeded", "failed"}
+        ):
+            previous_status = existing.status
+            previous_attempts = existing.attempts
+            existing.status = "queued"
+            existing.payload_json = payload
+            existing.result_json = {}
+            existing.attempts = 0
+            existing.max_attempts = settings.publish_reconciliation_max_attempts
+            existing.run_at = run_at
+            existing.locked_by = None
+            existing.locked_at = None
+            existing.last_error = None
+            record_audit(
+                session,
+                action="publish.reconciliation_requeued",
+                entity_type="publish_job",
+                entity_id=publish_job.id,
+                workspace_id=publish_job.workspace_id,
+                actor_user_id=None,
+                metadata={
+                    "queue_job_id": existing.id,
+                    "reason": reason,
+                    "previous_status": previous_status,
+                    "previous_attempts": previous_attempts,
+                },
+            )
+            return existing, True
+        return existing, False
+
+    job = enqueue_job(
+        session,
+        job_type="publish.reconcile",
+        payload=payload,
+        workspace_id=publish_job.workspace_id,
+        idempotency_key=key,
+        run_at=run_at,
+        max_attempts=settings.publish_reconciliation_max_attempts,
+    )
+    record_audit(
+        session,
+        action="publish.reconciliation_queued",
+        entity_type="publish_job",
+        entity_id=publish_job.id,
+        workspace_id=publish_job.workspace_id,
+        actor_user_id=None,
+        metadata={"queue_job_id": job.id, "reason": reason},
+    )
+    return job, True
+
+
+def schedule_pending_publish_reconciliations(
+    session: Session,
+    *,
+    settings: Settings,
+    limit: int = 100,
+) -> int:
+    query = (
+        select(PublishJob)
+        .join(
+            ChannelConnection,
+            ChannelConnection.id == PublishJob.channel_id,
+        )
+        .where(
+            PublishJob.status == "submitted",
+            PublishJob.external_id.is_not(None),
+            ChannelConnection.platform == "wechat",
+        )
+        .order_by(PublishJob.updated_at.asc())
+        .limit(limit)
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update(of=PublishJob, skip_locked=True)
+    publish_jobs = list(session.scalars(query))
+    scheduled = 0
+    for publish_job in publish_jobs:
+        _, created = ensure_publish_reconciliation_job(
+            session,
+            publish_job=publish_job,
+            settings=settings,
+            reason="worker_sweep",
+        )
+        scheduled += int(created)
+    return scheduled
+
 
 def handle_publish_dispatch(
     session: Session, payload: dict[str, Any], settings: Settings
 ) -> dict[str, Any]:
-    publish_job = session.get(PublishJob, payload["publish_job_id"])
+    publish_query = select(PublishJob).where(
+        PublishJob.id == payload["publish_job_id"]
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        publish_query = publish_query.with_for_update()
+    publish_job = session.scalar(publish_query)
     if publish_job is None:
         raise ValueError("发布任务不存在")
     if publish_job.status in {
@@ -248,6 +540,15 @@ def handle_publish_dispatch(
             "status": publish_job.status,
             "external_id": publish_job.external_id,
         }
+    if publish_job.status in {"publishing", "reconciliation_required"}:
+        publish_job.status = "reconciliation_required"
+        publish_job.error = (
+            "上一次分发已开始但未保存确定结果，禁止自动重试；"
+            "请先到平台核对并完成人工对账。"
+        )
+        session.commit()
+        raise PublishReconciliationRequired(publish_job.error)
+
     content = session.get(ContentItem, publish_job.content_item_id)
     channel = session.get(ChannelConnection, publish_job.channel_id)
     if content is None or channel is None:
@@ -277,19 +578,97 @@ def handle_publish_dispatch(
         settings=settings,
         storage=build_object_storage(settings),
     )
+
+    request_json = dict(publish_job.request_json or {})
+    request_json["dispatch_token"] = request_json.get("dispatch_token") or uuid.uuid4().hex
+    request_json["dispatch_started_at"] = datetime.now(timezone.utc).isoformat()
+    request_json["dispatch_attempt"] = int(request_json.get("dispatch_attempt") or 0) + 1
+    publish_job.request_json = request_json
     publish_job.status = "publishing"
     publish_job.attempts += 1
-    result = connector.publish(
-        publish_job=publish_job,
-        content=content,
-        assets=assets,
+    publish_job.error = None
+    record_audit(
+        session,
+        action="publish.dispatch_started",
+        entity_type="publish_job",
+        entity_id=publish_job.id,
+        workspace_id=publish_job.workspace_id,
+        actor_user_id=None,
+        metadata={
+            "channel_id": channel.id,
+            "dispatch_attempt": request_json["dispatch_attempt"],
+        },
     )
+    session.commit()
+
+    try:
+        result = connector.publish(
+            publish_job=publish_job,
+            content=content,
+            assets=assets,
+        )
+    except Exception as error:
+        publish_job = session.get(PublishJob, publish_job.id)
+        if publish_job is not None:
+            publish_job.status = "reconciliation_required"
+            publish_job.error = (
+                "平台调用已开始但结果不确定，禁止自动重试："
+                f"{type(error).__name__}: {error}"
+            )[:8000]
+            record_audit(
+                session,
+                action="publish.reconciliation_required",
+                entity_type="publish_job",
+                entity_id=publish_job.id,
+                workspace_id=publish_job.workspace_id,
+                actor_user_id=None,
+                metadata={
+                    "channel_id": channel.id,
+                    "error_type": type(error).__name__,
+                },
+            )
+            session.commit()
+        raise PublishReconciliationRequired(
+            "平台分发结果不确定，需要人工对账后再决定是否重试"
+        ) from error
+
     publish_job.status = result.status
     publish_job.external_id = result.external_id
     publish_job.external_url = result.external_url
     publish_job.response_json = result.response
     publish_job.error = None
-    publish_job.published_at = datetime.now(timezone.utc)
+    reconciliation_job: Job | None = None
+    if result.status == "submitted":
+        if not result.external_id or not connector.reconciliation_supported:
+            publish_job.status = "reconciliation_required"
+            publish_job.error = (
+                "平台已接受发布请求，但没有可用的确定性状态查询键；"
+                "请完成人工对账。"
+            )
+            record_audit(
+                session,
+                action="publish.reconciliation_required",
+                entity_type="publish_job",
+                entity_id=publish_job.id,
+                workspace_id=publish_job.workspace_id,
+                actor_user_id=None,
+                metadata={"reason": "automatic_reconciliation_unavailable"},
+            )
+            session.commit()
+            raise PublishReconciliationRequired(publish_job.error)
+
+        reconciliation_job, _ = ensure_publish_reconciliation_job(
+            session,
+            publish_job=publish_job,
+            settings=settings,
+            reason="platform_submission_accepted",
+        )
+
+    publish_job.published_at = (
+        datetime.now(timezone.utc)
+        if publish_job.status == "published"
+        else None
+    )
     record_audit(
         session,
         action="publish.dispatch",
@@ -297,8 +676,190 @@ def handle_publish_dispatch(
         entity_id=publish_job.id,
         workspace_id=publish_job.workspace_id,
         actor_user_id=None,
-        metadata={"status": publish_job.status, "channel_id": channel.id},
+        metadata={
+            "status": publish_job.status,
+            "channel_id": channel.id,
+            "reconciliation_job_id": (
+                reconciliation_job.id if reconciliation_job is not None else None
+            ),
+        },
     )
+    # Persist the remote result and follow-up job before the queue attempt is
+    # finalized. If the worker dies after this commit, replay sees a terminal
+    # domain state instead of invoking the external publish endpoint again.
+    session.commit()
+    return {
+        "publish_job_id": publish_job.id,
+        "status": publish_job.status,
+        "external_id": publish_job.external_id,
+        "external_url": publish_job.external_url,
+        "reconciliation_job_id": (
+            reconciliation_job.id if reconciliation_job is not None else None
+        ),
+    }
+
+def handle_publish_reconcile(
+    session: Session, payload: dict[str, Any], settings: Settings
+) -> dict[str, Any]:
+    publish_query = select(PublishJob).where(
+        PublishJob.id == payload["publish_job_id"]
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        publish_query = publish_query.with_for_update()
+    publish_job = session.scalar(publish_query)
+    if publish_job is None:
+        raise ValueError("发布任务不存在")
+    if publish_job.status in {
+        "cancelled",
+        "published",
+        "exported",
+        "draft_created",
+        "failed",
+    }:
+        return {
+            "publish_job_id": publish_job.id,
+            "status": publish_job.status,
+            "external_id": publish_job.external_id,
+        }
+    if publish_job.status not in {"submitted", "reconciliation_required"}:
+        raise ValueError(f"当前发布状态不能自动对账: {publish_job.status}")
+    if not publish_job.external_id:
+        raise PublishReconciliationRequired(
+            "缺少平台状态查询键，必须人工核对发布结果"
+        )
+
+    channel = session.get(ChannelConnection, publish_job.channel_id)
+    if channel is None:
+        raise ValueError("发布任务关联的连接器不存在")
+    connector = build_connector(
+        channel=channel,
+        settings=settings,
+        storage=build_object_storage(settings),
+    )
+    if not connector.reconciliation_supported:
+        raise PublishReconciliationRequired(
+            f"{channel.platform} 不支持确定性的自动发布对账"
+        )
+
+    publish_job_id = publish_job.id
+    channel_id = channel.id
+    lookup_external_id = publish_job.external_id
+    # Never keep a row lock open while waiting for a remote platform. The
+    # second phase re-locks and validates the domain state before applying the
+    # response, so a reviewer can safely win the race with a slow query.
+    session.commit()
+    result = connector.reconcile(publish_job)
+    checked_at = datetime.now(timezone.utc)
+
+    publish_query = (
+        select(PublishJob)
+        .where(PublishJob.id == publish_job_id)
+        .execution_options(populate_existing=True)
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        publish_query = publish_query.with_for_update()
+    current_publish_job = session.scalar(publish_query)
+    if current_publish_job is None:
+        raise ValueError("Publish job not found during reconciliation")
+    terminal_states = {
+        "cancelled",
+        "published",
+        "exported",
+        "draft_created",
+        "failed",
+    }
+    state_changed = (
+        current_publish_job.status
+        not in {"submitted", "reconciliation_required"}
+        or current_publish_job.external_id != lookup_external_id
+    )
+    if current_publish_job.status in terminal_states or state_changed:
+        record_audit(
+            session,
+            action="publish.reconciliation_stale_ignored",
+            entity_type="publish_job",
+            entity_id=current_publish_job.id,
+            workspace_id=current_publish_job.workspace_id,
+            actor_user_id=None,
+            metadata={
+                "current_status": current_publish_job.status,
+                "remote_status": result.status,
+                "lookup_external_id": lookup_external_id,
+                "current_external_id": current_publish_job.external_id,
+                "channel_id": channel_id,
+            },
+        )
+        session.commit()
+        return {
+            "publish_job_id": current_publish_job.id,
+            "status": current_publish_job.status,
+            "external_id": current_publish_job.external_id,
+            "external_url": current_publish_job.external_url,
+            "ignored_remote_status": result.status,
+        }
+
+    publish_job = current_publish_job
+    response_json = dict(publish_job.response_json or {})
+    response_json["automatic_reconciliation"] = {
+        "state": result.status,
+        "lookup_external_id": lookup_external_id,
+        "checked_at": checked_at.isoformat(),
+        "response": result.response,
+    }
+    publish_job.response_json = response_json
+    if result.status == "pending":
+        record_audit(
+            session,
+            action="publish.reconciliation_checked",
+            entity_type="publish_job",
+            entity_id=publish_job.id,
+            workspace_id=publish_job.workspace_id,
+            actor_user_id=None,
+            metadata={"state": "pending", "channel_id": channel.id},
+        )
+        session.commit()
+        raise JobNotReady("平台仍在处理发布请求")
+    if result.status != "published":
+        raise RuntimeError(f"连接器返回了未知的对账状态: {result.status}")
+
+    publish_job.status = "published"
+    publish_job.external_id = result.external_id or lookup_external_id
+    publish_job.external_url = result.external_url or publish_job.external_url
+    publish_job.error = None
+    publish_job.published_at = checked_at
+
+    dispatch_query = select(Job).where(
+        Job.idempotency_key == f"publish.dispatch:{publish_job.id}"
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        dispatch_query = dispatch_query.with_for_update()
+    dispatch_job = session.scalar(dispatch_query)
+    if dispatch_job is not None:
+        dispatch_job.status = "succeeded"
+        dispatch_job.result_json = {
+            "publish_job_id": publish_job.id,
+            "status": "published",
+            "reconciled": "automatic",
+        }
+        dispatch_job.last_error = None
+        dispatch_job.locked_by = None
+        dispatch_job.locked_at = None
+
+    record_audit(
+        session,
+        action="publish.reconcile_auto",
+        entity_type="publish_job",
+        entity_id=publish_job.id,
+        workspace_id=publish_job.workspace_id,
+        actor_user_id=None,
+        metadata={
+            "channel_id": channel.id,
+            "lookup_external_id": lookup_external_id,
+            "external_id": publish_job.external_id,
+        },
+    )
+    # Keep the remote terminal result durable even if queue completion crashes.
+    session.commit()
     return {
         "publish_job_id": publish_job.id,
         "status": publish_job.status,
@@ -358,11 +919,19 @@ HANDLERS: dict[str, Handler] = {
     "asset.generate": handle_asset_generate,
     "asset.poll": handle_asset_poll,
     "publish.dispatch": handle_publish_dispatch,
+    "publish.reconcile": handle_publish_reconcile,
     "metrics.pull": handle_metrics_pull,
 }
 
 
-def mark_domain_failure(session: Session, job: Job, message: str) -> None:
+def mark_domain_failure(
+    session: Session,
+    job: Job,
+    message: str,
+    *,
+    publish_outcome_uncertain: bool = False,
+    ai_provenance: dict[str, Any] | None = None,
+) -> None:
     payload = dict(job.payload_json or {})
     if job.job_type == "workflow.execute" and payload.get("run_id"):
         run = session.get(WorkflowRun, payload["run_id"])
@@ -371,6 +940,11 @@ def mark_domain_failure(session: Session, job: Job, message: str) -> None:
             run.current_stage = "failed"
             run.error = message[:8000]
             run.completed_at = datetime.now(timezone.utc)
+            if ai_provenance:
+                run.result_json = {
+                    **(run.result_json or {}),
+                    "ai_provenance": ai_provenance,
+                }
     elif job.job_type == "knowledge.index" and payload.get("document_id"):
         document = session.get(KnowledgeDocument, payload["document_id"])
         if document:
@@ -385,10 +959,63 @@ def mark_domain_failure(session: Session, job: Job, message: str) -> None:
             asset.status = "failed"
             asset.error = message[:8000]
     elif job.job_type == "publish.dispatch" and payload.get("publish_job_id"):
-        publish_job = session.get(PublishJob, payload["publish_job_id"])
-        if publish_job and publish_job.status != "cancelled":
+        publish_query = select(PublishJob).where(
+            PublishJob.id == payload["publish_job_id"]
+        )
+        if session.bind and session.bind.dialect.name == "postgresql":
+            publish_query = publish_query.with_for_update()
+        publish_job = session.scalar(publish_query)
+        if (
+            publish_job
+            and publish_outcome_uncertain
+            and publish_job.status == "publishing"
+        ):
+            publish_job.status = "reconciliation_required"
+            publish_job.error = (
+                "Worker 在发布结果落库前失联，禁止自动重试；"
+                f"请先人工对账。{message}"
+            )[:8000]
+            record_audit(
+                session,
+                action="publish.reconciliation_required",
+                entity_type="publish_job",
+                entity_id=publish_job.id,
+                workspace_id=publish_job.workspace_id,
+                actor_user_id=None,
+                metadata={"reason": "worker_lease_exhausted"},
+            )
+        elif publish_job and publish_job.status in {
+            "scheduled",
+            "queued",
+            "publishing",
+        }:
             publish_job.status = "failed"
             publish_job.error = message[:8000]
+    elif job.job_type == "publish.reconcile" and payload.get("publish_job_id"):
+        publish_query = select(PublishJob).where(
+            PublishJob.id == payload["publish_job_id"]
+        )
+        if session.bind and session.bind.dialect.name == "postgresql":
+            publish_query = publish_query.with_for_update()
+        publish_job = session.scalar(publish_query)
+        if publish_job and publish_job.status in {
+            "submitted",
+            "reconciliation_required",
+        }:
+            publish_job.status = "reconciliation_required"
+            publish_job.error = (
+                "自动发布对账未能获得确定结果，已转人工处理："
+                f"{message}"
+            )[:8000]
+            record_audit(
+                session,
+                action="publish.reconciliation_required",
+                entity_type="publish_job",
+                entity_id=publish_job.id,
+                workspace_id=publish_job.workspace_id,
+                actor_user_id=None,
+                metadata={"reason": "automatic_reconciliation_exhausted"},
+            )
     elif job.job_type == "connector.test" and payload.get("channel_id"):
         channel = session.get(ChannelConnection, payload["channel_id"])
         if channel:
@@ -403,6 +1030,7 @@ class Worker:
         worker_id: str | None = None,
         session_factory=None,
         handlers: dict[str, Handler] | None = None,
+        stop_event: threading.Event | None = None,
     ):
         self.settings = settings or get_settings()
         self.worker_id = worker_id or (
@@ -410,19 +1038,78 @@ class Worker:
         )
         self.session_factory = session_factory or db.SessionLocal
         self.handlers = handlers or HANDLERS
+        self._stop_event = stop_event or threading.Event()
+        self._shutdown_signal: int | None = None
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_event.is_set()
+
+    def request_stop(self, signum: int | None = None) -> None:
+        self._shutdown_signal = signum
+        self._stop_event.set()
 
     def run_once(self) -> bool:
+        if self.stop_requested:
+            return False
+
+        expired_job_refs: list[tuple[str, str]] = []
         with self.session_factory() as session:
-            job = claim_next_job(
+            scheduled_reconciliations = schedule_pending_publish_reconciliations(
                 session,
-                worker_id=self.worker_id,
+                settings=self.settings,
+            )
+            if scheduled_reconciliations:
+                session.commit()
+                logger.info(
+                    "publish reconciliation jobs queued count=%s",
+                    scheduled_reconciliations,
+                )
+            expired_jobs = fail_exhausted_leases(
+                session,
                 lease_seconds=self.settings.worker_lease_seconds,
             )
-            if job is None:
-                session.rollback()
-                return False
-            session.commit()
-            job_id = job.id
+            if expired_jobs:
+                expired_job_refs = [
+                    (expired_job.id, expired_job.job_type)
+                    for expired_job in expired_jobs
+                ]
+                session.commit()
+            else:
+                job = claim_next_job(
+                    session,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.settings.worker_lease_seconds,
+                )
+                if job is None:
+                    session.rollback()
+                    return False
+                if self.stop_requested:
+                    session.rollback()
+                    return False
+                session.commit()
+                job_id = job.id
+                attempt = job.attempts
+
+        if expired_job_refs:
+            with self.session_factory() as session:
+                for expired_job_id, _job_type in expired_job_refs:
+                    expired_job = session.get(Job, expired_job_id)
+                    if expired_job is not None:
+                        mark_domain_failure(
+                            session,
+                            expired_job,
+                            expired_job.last_error or "",
+                            publish_outcome_uncertain=True,
+                        )
+                session.commit()
+            for expired_job_id, job_type in expired_job_refs:
+                logger.error(
+                    "job lease exhausted id=%s type=%s",
+                    expired_job_id,
+                    job_type,
+                )
+            return True
 
         with self.session_factory() as session:
             job = session.get(Job, job_id)
@@ -432,37 +1119,128 @@ class Worker:
                 handler = self.handlers.get(job.job_type)
                 if handler is None:
                     raise ValueError(f"没有任务处理器: {job.job_type}")
-                result = handler(session, dict(job.payload_json), self.settings)
-                complete_job(session, job, result)
+                with LeaseHeartbeat(
+                    session_factory=self.session_factory,
+                    job_id=job_id,
+                    worker_id=self.worker_id,
+                    attempt=attempt,
+                    lease_seconds=self.settings.worker_lease_seconds,
+                ) as heartbeat:
+                    result = handler(
+                        session,
+                        dict(job.payload_json),
+                        self.settings,
+                    )
+                if heartbeat.lost:
+                    raise JobLeaseLost(
+                        f"Job lease heartbeat was lost: id={job_id} "
+                        f"worker={self.worker_id} attempt={attempt}"
+                    )
+                complete_job(
+                    session,
+                    job,
+                    result,
+                    worker_id=self.worker_id,
+                    attempt=attempt,
+                )
                 session.commit()
                 logger.info("job succeeded id=%s type=%s", job.id, job.job_type)
             except Exception as error:
                 session.rollback()
+                if isinstance(error, JobLeaseLost):
+                    logger.error("stale worker stopped id=%s error=%s", job_id, error)
+                    return True
                 job = session.get(Job, job_id)
+                ai_provenance = getattr(error, "ai_provenance", None)
+                persisted_error: Exception | str = error
+                if (
+                    job is not None
+                    and job.job_type == "workflow.execute"
+                    and ai_provenance
+                ):
+                    persisted_error = (
+                        f"AI workflow failed ({type(error).__name__})"
+                    )
                 if job is not None:
-                    fail_job(session, job, error)
-                    if not isinstance(error, JobNotReady) or job.status == "failed":
+                    mark_publish_first = (
+                        job.job_type == "publish.dispatch"
+                        and not isinstance(error, JobNotReady)
+                    )
+                    if mark_publish_first:
                         mark_domain_failure(session, job, str(error))
+                    try:
+                        job = fail_job(
+                            session,
+                            job,
+                            persisted_error,
+                            worker_id=self.worker_id,
+                            attempt=attempt,
+                            force_terminal=isinstance(
+                                error,
+                                PublishReconciliationRequired,
+                            ),
+                        )
+                    except JobLeaseLost as lease_error:
+                        session.rollback()
+                        logger.error(
+                            "stale worker failure ignored id=%s error=%s",
+                            job_id,
+                            lease_error,
+                        )
+                        return True
+                    if (
+                        not mark_publish_first
+                        and (
+                            not isinstance(error, JobNotReady)
+                            or job.status == "failed"
+                        )
+                    ):
+                        mark_domain_failure(
+                            session,
+                            job,
+                            str(persisted_error),
+                            ai_provenance=ai_provenance,
+                        )
                     session.commit()
                 if isinstance(error, JobNotReady):
                     logger.info("job pending id=%s message=%s", job_id, error)
+                elif ai_provenance:
+                    logger.error(
+                        "AI job failed id=%s error_type=%s",
+                        job_id,
+                        type(error).__name__,
+                    )
                 else:
                     logger.exception("job failed id=%s", job_id)
             return True
 
     def run_forever(self) -> None:
         logger.info("worker started id=%s", self.worker_id)
-        while True:
-            worked = self.run_once()
-            if not worked:
-                time.sleep(self.settings.worker_poll_seconds)
+        node_heartbeat = WorkerNodeHeartbeat(
+            session_factory=self.session_factory,
+            worker_id=self.worker_id,
+            interval_seconds=self.settings.worker_heartbeat_seconds,
+        )
+        try:
+            with node_heartbeat:
+                while not self.stop_requested:
+                    worked = self.run_once()
+                    if not worked:
+                        self._stop_event.wait(
+                            self.settings.worker_poll_seconds
+                        )
+        finally:
+            logger.info(
+                "worker stopped id=%s signal=%s",
+                self.worker_id,
+                self._shutdown_signal,
+            )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the ContentFlow worker.")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
     settings = get_settings()
     if not settings.production:
         from .migrate import upgrade_database
@@ -470,7 +1248,16 @@ def main() -> None:
         upgrade_database(settings)
         db.configure_database(settings.database_url)
     db.create_schema()
+    # Alembic configures logging while migrations run. Re-apply the worker
+    # logger afterwards so startup and job failures remain visible.
+    configure_worker_logging()
     worker = Worker(settings=settings)
+
+    def stop_worker(signum, _frame) -> None:
+        worker.request_stop(signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, stop_worker)
     if args.once:
         worker.run_once()
     else:

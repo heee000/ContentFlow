@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -8,13 +9,15 @@ from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..db import get_db
-from ..dependencies import Principal, require_role
-from ..entities import AuditLog, Membership, User
+from ..dependencies import AppSettings, Principal, require_role
+from ..entities import AuditLog, Job, Membership, User, WorkerNode, Workspace
 from ..schemas import (
     AuditLogResponse,
     MemberCreate,
     MemberResponse,
     MemberUpdate,
+    WorkerHealthResponse,
+    WorkerQueueHealthResponse,
 )
 
 
@@ -61,6 +64,14 @@ def ensure_another_admin(
 ) -> None:
     if membership.role != "admin":
         return
+    workspace_query = select(Workspace.id).where(Workspace.id == workspace_id)
+    if session.bind and session.bind.dialect.name == "postgresql":
+        workspace_query = workspace_query.with_for_update()
+    if session.scalar(workspace_query) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found",
+        )
     admin_count = session.scalar(
         select(func.count(Membership.id)).where(
             Membership.workspace_id == workspace_id,
@@ -237,3 +248,108 @@ def list_audit_logs(
         )
         for audit, display_name in rows
     ]
+
+
+def heartbeat_age_seconds(value: datetime, now: datetime) -> float:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - value).total_seconds())
+
+
+@router.get("/worker-health", response_model=WorkerHealthResponse)
+def worker_health(
+    principal: Admin,
+    session: Db,
+    settings: AppSettings,
+):
+    now = datetime.now(timezone.utc)
+    nodes = list(
+        session.scalars(
+            select(WorkerNode)
+            .order_by(WorkerNode.heartbeat_at.desc())
+            .limit(500)
+        )
+    )
+    active_workers = 0
+    stale_workers = 0
+    stopped_workers = 0
+    for node in nodes:
+        age = heartbeat_age_seconds(node.heartbeat_at, now)
+        if node.status == "stopped":
+            stopped_workers += 1
+        elif age > settings.worker_stale_seconds:
+            stale_workers += 1
+        else:
+            active_workers += 1
+
+    queue_counts = {"queued": 0, "retry": 0, "running": 0, "failed": 0}
+    for job_status, count in session.execute(
+        select(Job.status, func.count(Job.id))
+        .where(
+            Job.workspace_id == principal.workspace_id,
+            Job.status.in_(queue_counts),
+        )
+        .group_by(Job.status)
+    ):
+        queue_counts[job_status] = int(count)
+
+    ready_filter = (
+        Job.workspace_id == principal.workspace_id,
+        Job.status.in_(["queued", "retry"]),
+        Job.run_at <= now,
+    )
+    ready_jobs = int(
+        session.scalar(select(func.count(Job.id)).where(*ready_filter))
+        or 0
+    )
+    oldest_ready_at = session.scalar(
+        select(func.min(Job.run_at)).where(*ready_filter)
+    )
+    oldest_ready_age = (
+        heartbeat_age_seconds(oldest_ready_at, now)
+        if oldest_ready_at is not None
+        else None
+    )
+
+    issues: list[str] = []
+    if active_workers == 0:
+        issues.append("no_active_workers")
+    if stale_workers:
+        issues.append("stale_worker_nodes")
+    if ready_jobs and active_workers == 0:
+        issues.append("ready_jobs_without_active_workers")
+    if (
+        oldest_ready_age is not None
+        and oldest_ready_age > settings.worker_queue_stall_seconds
+    ):
+        issues.append("queue_ready_age_exceeded")
+
+    if active_workers == 0:
+        health_status = "unavailable"
+    elif issues:
+        health_status = "degraded"
+    else:
+        health_status = "healthy"
+
+    return WorkerHealthResponse(
+        status=health_status,
+        checked_at=now,
+        active_workers=active_workers,
+        stale_workers=stale_workers,
+        stopped_workers=stopped_workers,
+        issues=issues,
+        thresholds={
+            "heartbeat_seconds": settings.worker_heartbeat_seconds,
+            "stale_seconds": settings.worker_stale_seconds,
+            "queue_stall_seconds": settings.worker_queue_stall_seconds,
+        },
+        queue=WorkerQueueHealthResponse(
+            **queue_counts,
+            ready=ready_jobs,
+            oldest_ready_age_seconds=(
+                round(oldest_ready_age, 3)
+                if oldest_ready_age is not None
+                else None
+            ),
+        ),
+    )

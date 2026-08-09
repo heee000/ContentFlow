@@ -229,6 +229,7 @@ def main() -> None:
             f"{api}/contents/{content_id}",
             headers=headers,
             json={
+                "expected_version": content["version"],
                 "title": f"{content['title']}｜人工校订",
                 "body": (
                     f"{content['body']}\n\n"
@@ -257,6 +258,7 @@ def main() -> None:
             f"{api}/contents/{content_id}/review",
             headers=headers,
             json={
+                "expected_version": edited.json()["version"],
                 "decision": "approve",
                 "reason": "已核对知识来源、文案与平台格式",
             },

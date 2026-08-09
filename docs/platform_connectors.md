@@ -22,7 +22,7 @@
 - 使用 `video_id` 创建作品
 - 按 `item_id` 回收播放、点赞、评论和分享数据
 
-需要 `access_token`、`open_id`，并要求开放平台应用已获得相应 scope。即使接口地址正确，未审核应用、未授权用户或受限内容仍会被平台拒绝。参考[抖音开放平台内容发布解决方案](https://open.douyin.com/platform/resource/docs/ability/content-management/douyin-publish-solution)。
+需要非空 `access_token`、`open_id`，并要求开放平台应用已获得相应 scope。创建渠道时 API 会同步校验这两个运行时必需字段，`open_id` 可放在加密凭据或非敏感配置中。即使接口地址正确，未审核应用、未授权用户或受限内容仍会被平台拒绝。参考[抖音开放平台内容发布解决方案](https://open.douyin.com/platform/resource/docs/ability/content-management/douyin-publish-solution)。
 
 ## 公众号
 
@@ -32,8 +32,9 @@
 - 上传封面到永久素材
 - 创建草稿
 - `auto_publish=true` 时提交发布
+- 以返回的 `publish_id` 查询发布状态；没有 `article_id` 时保持 pending，取得后才标记 published
 
-默认配置只创建草稿，避免未经运营人员确认直接群发。不同公众号类型和认证状态拥有不同接口权限，必须以目标账号的实际权限集验收。
+默认配置只创建草稿，避免未经运营人员确认直接群发。自动对账使用确定查询键并允许 reviewer 人工接管，不会根据含糊状态猜测成功。不同公众号类型和认证状态拥有不同接口权限，必须以目标账号的实际权限集验收。
 
 ## 小红书
 
@@ -52,6 +53,6 @@
 - 使用测试应用/账号，不要直接以正式品牌账号做首次联调
 - 记录应用 scope、回调地址、用户授权时间和 token 过期时间
 - 分别测试连接、素材格式错误、平台限流、审核拒绝和成功路径
-- 外部 ID/URL 只在平台实际返回后保存
+- 区分平台接收 ID 与最终内容 ID/URL；只有平台实际返回最终标识后才保存为已发布
 - 对同一排期重复执行，验证不会创建重复作品
 - 撤销授权后确认连接测试进入 `invalid`

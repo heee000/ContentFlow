@@ -13,8 +13,15 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "8b6c1f3a9d21"
+HEAD_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
+LAYOUT_REVISION = "8b6c1f3a9d21"
+WORKER_NODE_TABLE = "worker_nodes"
+WORKER_NODE_REVISION = "c9e7b4a2d610"
+AUTH_SESSION_TABLE = "auth_sessions"
+AUTH_REFRESH_HISTORY_TABLE = "auth_refresh_token_history"
+AUTH_SESSION_REVISION = "f4c2d8e7a190"
+AUTH_RATE_LIMIT_TABLE = "auth_rate_limits"
 
 
 def _alembic_config(connection: Connection) -> Config:
@@ -43,22 +50,73 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         if current_revision:
             return
 
+    incrementally_added = {
+        WORKER_NODE_TABLE,
+        AUTH_SESSION_TABLE,
+        AUTH_REFRESH_HISTORY_TABLE,
+        AUTH_RATE_LIMIT_TABLE,
+    }
     expected_tables = set(db.Base.metadata.tables)
-    missing_tables = expected_tables - tables
+    missing_tables = (expected_tables - incrementally_added) - tables
     if missing_tables:
         missing = ", ".join(sorted(missing_tables))
         raise RuntimeError(
             "检测到未受 Alembic 管理的不完整数据库，缺少表："
             f"{missing}。请先备份数据库再人工处理。"
         )
+    for table_name in sorted(incrementally_added & tables):
+        expected_columns = set(db.Base.metadata.tables[table_name].columns.keys())
+        actual_columns = {
+            column["name"] for column in inspector.get_columns(table_name)
+        }
+        missing_columns = expected_columns - actual_columns
+        if missing_columns:
+            missing = ", ".join(sorted(missing_columns))
+            raise RuntimeError(
+                "检测到未受 Alembic 管理的不完整增量表 "
+                f"{table_name}，缺少列：{missing}。"
+                "请先备份数据库再人工处理。"
+            )
 
     layout_state = {
         table: "layout_json"
         in {column["name"] for column in inspector.get_columns(table)}
         for table in LAYOUT_TABLES
     }
-    if all(layout_state.values()):
+    worker_node_exists = WORKER_NODE_TABLE in tables
+    auth_session_exists = AUTH_SESSION_TABLE in tables
+    auth_refresh_history_exists = AUTH_REFRESH_HISTORY_TABLE in tables
+    auth_rate_limit_exists = AUTH_RATE_LIMIT_TABLE in tables
+    if worker_node_exists and not all(layout_state.values()):
+        raise RuntimeError(
+            "The worker_nodes table exists without the preceding layout migration. "
+            "Back up the database and repair the schema before continuing."
+        )
+    if auth_session_exists and not worker_node_exists:
+        raise RuntimeError(
+            "The auth_sessions table exists without the worker registry migration. "
+            "Back up the database and repair the schema before continuing."
+        )
+    if auth_session_exists != auth_refresh_history_exists:
+        raise RuntimeError(
+            "The authentication session tables are incomplete. Back up the "
+            "database and repair the schema before continuing."
+        )
+    if auth_rate_limit_exists and not auth_session_exists:
+        raise RuntimeError(
+            "The authentication rate-limit table exists without the session "
+            "migration. Back up the database and repair the schema before "
+            "continuing."
+        )
+
+    if auth_rate_limit_exists:
         revision = HEAD_REVISION
+    elif auth_session_exists:
+        revision = AUTH_SESSION_REVISION
+    elif worker_node_exists:
+        revision = WORKER_NODE_REVISION
+    elif all(layout_state.values()):
+        revision = LAYOUT_REVISION
     elif not any(layout_state.values()):
         revision = INITIAL_REVISION
     else:

@@ -1,0 +1,135 @@
+name: ContentFlow CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend, PostgreSQL, and security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+        env:
+          POSTGRES_DB: contentflow_ci
+          POSTGRES_USER: contentflow
+          POSTGRES_PASSWORD: contentflow-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U contentflow -d contentflow_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CONTENTFLOW_TEST_POSTGRES_URL: postgresql+psycopg://contentflow:contentflow-ci@127.0.0.1:5432/contentflow_ci
+      CONTENTFLOW_SECRET_KEY: ci-only-contentflow-secret-key
+      PYTHONUTF8: "1"
+      CONTENTFLOW_TEST_S3_ENDPOINT_URL: http://127.0.0.1:9000
+      CONTENTFLOW_TEST_S3_ACCESS_KEY: contentflow-test
+      CONTENTFLOW_TEST_S3_SECRET_KEY: contentflow-test-secret
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Start pinned MinIO
+        run: |
+          docker run --detach --rm \
+            --name contentflow-minio-ci \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=contentflow-test \
+            --env MINIO_ROOT_PASSWORD=contentflow-test-secret \
+            minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e \
+            server /data --console-address ":9001"
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent \
+              http://127.0.0.1:9000/minio/health/ready > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs contentflow-minio-ci
+          exit 1
+
+      - name: Install Python and uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          python-version: "3.12"
+          enable-cache: true
+          prune-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Recreate the locked Python environment
+        run: uv sync --all-extras --locked --python 3.12
+
+      - name: Verify dependency lock
+        run: uv lock --check
+
+      - name: Lint Python
+        run: uv run --locked ruff check .
+
+      - name: Test against PostgreSQL and MinIO and enforce coverage
+        run: >-
+          uv run --locked pytest -q
+          --cov=contentflow
+          --cov-branch
+          --cov-report=term-missing
+          --cov-fail-under=75
+
+      - name: Audit Python dependencies
+        run: uv run --locked pip-audit --strict
+
+      - name: Stop MinIO
+        if: always()
+        run: docker stop contentflow-minio-ci || true
+
+  frontend:
+    name: Frontend, build, and security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    env:
+      CI: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_CONTENTFLOW_API_BASE: "https://api.contentflow.example/api/v1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Recreate the locked frontend environment
+        run: npm ci
+
+      - name: Lint frontend
+        run: npm run lint
+
+      - name: Test frontend
+        run: npm test
+
+      - name: Build production frontend
+        run: npm run build
+
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=moderate

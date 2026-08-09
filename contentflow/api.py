@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
 from .migrate import upgrade_database
+from .object_storage import build_object_storage
 from .routers import (
     admin,
     assets,
@@ -90,6 +91,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response = await call_next(request)
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         response.headers["x-request-id"] = request_id
+        response.headers.setdefault("x-content-type-options", "nosniff")
+        response.headers.setdefault("x-frame-options", "DENY")
+        response.headers.setdefault(
+            "referrer-policy", "strict-origin-when-cross-origin"
+        )
+        response.headers.setdefault(
+            "permissions-policy", "camera=(), geolocation=(), microphone=()"
+        )
+        if request.url.path.startswith(settings.api_prefix):
+            response.headers.setdefault("cache-control", "no-store")
         logger.info(
             json.dumps(
                 {
@@ -109,6 +120,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def http_error(request: Request, error: StarletteHTTPException):
         return JSONResponse(
             status_code=error.status_code,
+            headers=error.headers,
             content={
                 "error": {
                     "code": f"http_{error.status_code}",
@@ -128,6 +140,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "message": "请求参数校验失败",
                     "details": error.errors(),
                     "request_id": getattr(request.state, "request_id", None),
+                }
+            },
+        )
+
+    @application.exception_handler(Exception)
+    async def unexpected_error(request: Request, error: Exception):
+        request_id = getattr(request.state, "request_id", None)
+        logger.error(
+            json.dumps(
+                {
+                    "event": "http.unhandled_error",
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "error_type": type(error).__name__,
+                },
+                ensure_ascii=False,
+            ),
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "code": "internal_error",
+                    "message": "Internal server error",
+                    "request_id": request_id,
                 }
             },
         )
@@ -162,7 +201,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def readiness():
         with db.SessionLocal() as session:
             session.execute(text("SELECT 1"))
-        return {"status": "ready"}
+        storage = build_object_storage(settings)
+        storage.check()
+        return {"status": "ready", "database": "ok", "storage": "ok"}
 
     return application
 

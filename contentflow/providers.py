@@ -10,6 +10,10 @@ from .prompts import PROMPTS
 
 
 class Provider(Protocol):
+    provider_name: str
+    model_name: str
+    last_call_metadata: dict[str, Any]
+
     def complete_json(self, stage: str, payload: dict[str, Any]) -> dict[str, Any]:
         ...
 
@@ -24,7 +28,16 @@ PLATFORM_LABELS = {
 class MockProvider:
     """Deterministic provider so the complete workflow runs offline."""
 
+    provider_name = "mock"
+    model_name = "mock-deterministic-v1"
+
+    def __init__(self) -> None:
+        self.last_call_metadata: dict[str, Any] = {
+            "usage_source": "not_reported"
+        }
+
     def complete_json(self, stage: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.last_call_metadata = {"usage_source": "not_reported"}
         if stage == "plan":
             brief = payload["brief"]
             return {
@@ -72,7 +85,7 @@ class MockProvider:
                 }
             if platform == "douyin":
                 return {
-                    "title": f"一条路线解决夜游选择困难",
+                    "title": "一条路线解决夜游选择困难",
                     "body": (
                         f"开场：想夜游又不想反复切换攻略？"
                         f"用{product}先整理地点，再按时间调整路线。"
@@ -112,7 +125,7 @@ class MockProvider:
                     },
                 }
             return {
-                "title": f"从零散地点到一条可执行的夜游路线",
+                "title": "从零散地点到一条可执行的夜游路线",
                 "body": (
                     f"做夜游计划时，难点往往不是找不到地点，而是信息太散。"
                     f"可以先在{product}中整理候选地点，再结合出发时间、交通方式和停留时长"
@@ -153,11 +166,17 @@ class OpenAICompatibleProvider:
         api_key: str,
         model: str,
         timeout_seconds: int = 60,
+        provider_name: str = "openai-compatible",
     ):
         self.endpoint = f"{api_base.rstrip('/')}/chat/completions"
         self.api_key = api_key
         self.model = model
+        self.model_name = model
+        self.provider_name = provider_name
         self.timeout_seconds = timeout_seconds
+        self.last_call_metadata: dict[str, Any] = {
+            "usage_source": "not_reported"
+        }
 
     @classmethod
     def from_environment(cls) -> "OpenAICompatibleProvider":
@@ -176,6 +195,7 @@ class OpenAICompatibleProvider:
         )
 
     def complete_json(self, stage: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.last_call_metadata = {"usage_source": "not_reported"}
         if stage not in PROMPTS:
             raise ValueError(f"没有对应提示词模板: {stage}")
         request_body = {
@@ -204,6 +224,25 @@ class OpenAICompatibleProvider:
                 request, timeout=self.timeout_seconds
             ) as response:
                 raw = json.loads(response.read().decode("utf-8"))
+            usage = raw.get("usage") if isinstance(raw, dict) else None
+            if isinstance(usage, dict):
+                input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+                output_tokens = usage.get(
+                    "completion_tokens", usage.get("output_tokens")
+                )
+                total_tokens = usage.get("total_tokens")
+                if any(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    for value in (input_tokens, output_tokens, total_tokens)
+                ):
+                    self.last_call_metadata = {
+                        "usage_source": "provider_reported",
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": total_tokens,
+                    }
+            if isinstance(raw, dict) and isinstance(raw.get("model"), str):
+                self.last_call_metadata["response_model"] = raw["model"]
             content = raw["choices"][0]["message"]["content"]
             parsed = json.loads(content)
             if not isinstance(parsed, dict):

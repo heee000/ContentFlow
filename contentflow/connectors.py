@@ -10,7 +10,7 @@ import httpx
 
 from .entities import Asset, ChannelConnection, ContentItem, PublishJob
 from .object_storage import ObjectStorage
-from .security import decrypt_credentials
+from .security import decrypt_credentials_with_keys
 from .settings import Settings
 
 
@@ -23,6 +23,8 @@ class ConnectorResult:
 
 
 class ChannelConnector(Protocol):
+    reconciliation_supported: bool
+
     def test(self) -> ConnectorResult:
         ...
 
@@ -35,6 +37,9 @@ class ChannelConnector(Protocol):
     ) -> ConnectorResult:
         ...
 
+    def reconcile(self, publish_job: PublishJob) -> ConnectorResult:
+        ...
+
     def pull_metrics(self, publish_job: PublishJob) -> dict[str, float]:
         ...
 
@@ -44,6 +49,8 @@ def _object_name(uri: str) -> str:
 
 
 class XiaohongshuExportConnector:
+    reconciliation_supported = False
+
     def __init__(
         self,
         *,
@@ -132,11 +139,16 @@ class XiaohongshuExportConnector:
             },
         )
 
+    def reconcile(self, publish_job: PublishJob) -> ConnectorResult:
+        raise NotImplementedError("小红书导出模式没有远端发布状态")
+
     def pull_metrics(self, publish_job: PublishJob) -> dict[str, float]:
         raise NotImplementedError("小红书导出模式需要人工回填数据")
 
 
 class DouyinConnector:
+    reconciliation_supported = False
+
     def __init__(
         self,
         *,
@@ -236,6 +248,11 @@ class DouyinConnector:
             response=body,
         )
 
+    def reconcile(self, publish_job: PublishJob) -> ConnectorResult:
+        raise NotImplementedError(
+            "抖音结果不确定且没有 item_id 时，不支持可靠的自动对账"
+        )
+
     def pull_metrics(self, publish_job: PublishJob) -> dict[str, float]:
         token, open_id = self._identity()
         response = self.client.post(
@@ -256,6 +273,8 @@ class DouyinConnector:
 
 
 class WechatConnector:
+    reconciliation_supported = True
+
     def __init__(
         self,
         *,
@@ -369,6 +388,44 @@ class WechatConnector:
             response=body,
         )
 
+    def reconcile(self, publish_job: PublishJob) -> ConnectorResult:
+        if not publish_job.external_id:
+            raise ValueError("公众号自动对账需要 freepublish publish_id")
+        token = self._access_token()
+        response = self.client.post(
+            f"{self.base_url}/cgi-bin/freepublish/get",
+            params={"access_token": token},
+            json={"publish_id": publish_job.external_id},
+        )
+        response.raise_for_status()
+        body = response.json()
+        error_code = int(body.get("errcode") or 0)
+        if error_code:
+            raise RuntimeError(f"公众号发布状态查询失败: {body}")
+
+        article_id = body.get("article_id")
+        if article_id:
+            detail = body.get("article_detail") or {}
+            items = detail.get("item") or []
+            first_item = items[0] if items else {}
+            external_url = (
+                body.get("article_url")
+                or detail.get("article_url")
+                or first_item.get("article_url")
+                or first_item.get("url")
+            )
+            return ConnectorResult(
+                status="published",
+                external_id=str(article_id),
+                external_url=str(external_url) if external_url else None,
+                response=body,
+            )
+        return ConnectorResult(
+            status="pending",
+            external_id=publish_job.external_id,
+            response=body,
+        )
+
     def pull_metrics(self, publish_job: PublishJob) -> dict[str, float]:
         raise NotImplementedError("公众号数据能力需按账号权限单独配置")
 
@@ -380,7 +437,10 @@ def build_connector(
     storage: ObjectStorage,
 ) -> ChannelConnector:
     credentials = (
-        decrypt_credentials(channel.credential_ciphertext, settings.secret_key)
+        decrypt_credentials_with_keys(
+            channel.credential_ciphertext,
+            settings.credential_decryption_keys,
+        )
         if channel.credential_ciphertext
         else {}
     )

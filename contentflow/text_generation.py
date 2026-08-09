@@ -26,5 +26,6 @@ def build_text_provider(settings: Settings, override: str | None = None) -> Prov
             api_base=api_base,
             api_key=api_key,
             model=settings.text_model,
+            provider_name=provider,
         )
     raise ValueError(f"不支持的文本模型 Provider: {provider}")

@@ -5,11 +5,15 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .entities import Job
+
+
+class JobLeaseLost(RuntimeError):
+    """Raised when a worker no longer owns the job attempt it is finishing."""
 
 
 def utcnow() -> datetime:
@@ -91,7 +95,99 @@ def claim_next_job(
     return job
 
 
-def complete_job(session: Session, job: Job, result: dict[str, Any]) -> None:
+def renew_job_lease(
+    session: Session,
+    *,
+    job_id: str,
+    worker_id: str,
+    attempt: int,
+) -> bool:
+    outcome = session.execute(
+        update(Job)
+        .where(
+            Job.id == job_id,
+            Job.status == "running",
+            Job.locked_by == worker_id,
+            Job.attempts == attempt,
+        )
+        .values(locked_at=utcnow())
+        .execution_options(synchronize_session=False)
+    )
+    return outcome.rowcount == 1
+
+
+def _get_claimed_job(
+    session: Session,
+    *,
+    job_id: str,
+    worker_id: str,
+    attempt: int,
+) -> Job:
+    query = select(Job).where(
+        Job.id == job_id,
+        Job.status == "running",
+        Job.locked_by == worker_id,
+        Job.attempts == attempt,
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    job = session.scalar(query.execution_options(populate_existing=True))
+    if job is None:
+        raise JobLeaseLost(
+            f"Job lease ownership lost: id={job_id} "
+            f"worker={worker_id} attempt={attempt}"
+        )
+    return job
+
+
+def fail_exhausted_leases(
+    session: Session,
+    *,
+    lease_seconds: int,
+    limit: int = 100,
+) -> list[Job]:
+    lease_expired = utcnow() - timedelta(seconds=lease_seconds)
+    query = (
+        select(Job)
+        .where(
+            Job.status == "running",
+            Job.attempts >= Job.max_attempts,
+            Job.locked_at.is_not(None),
+            Job.locked_at < lease_expired,
+        )
+        .order_by(Job.locked_at.asc())
+        .limit(limit)
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update(skip_locked=True)
+    jobs = list(session.scalars(query))
+    for job in jobs:
+        job.status = "failed"
+        job.last_error = (
+            f"Worker lease expired after the final attempt ({job.attempts}/"
+            f"{job.max_attempts})"
+        )
+        job.locked_by = None
+        job.locked_at = None
+    if jobs:
+        session.flush()
+    return jobs
+
+
+def complete_job(
+    session: Session,
+    job: Job,
+    result: dict[str, Any],
+    *,
+    worker_id: str,
+    attempt: int,
+) -> None:
+    job = _get_claimed_job(
+        session,
+        job_id=job.id,
+        worker_id=worker_id,
+        attempt=attempt,
+    )
     job.status = "succeeded"
     job.result_json = result
     job.last_error = None
@@ -100,16 +196,30 @@ def complete_job(session: Session, job: Job, result: dict[str, Any]) -> None:
     session.flush()
 
 
-def fail_job(session: Session, job: Job, error: Exception | str) -> None:
+def fail_job(
+    session: Session,
+    job: Job,
+    error: Exception | str,
+    *,
+    worker_id: str,
+    attempt: int,
+    force_terminal: bool = False,
+) -> Job:
+    job = _get_claimed_job(
+        session,
+        job_id=job.id,
+        worker_id=worker_id,
+        attempt=attempt,
+    )
     message = str(error)
     job.last_error = message[:8000]
     job.locked_by = None
     job.locked_at = None
-    if job.attempts >= job.max_attempts:
+    if force_terminal or job.attempts >= job.max_attempts:
         job.status = "failed"
     else:
         job.status = "retry"
         delay_seconds = min(300, 2 ** max(0, job.attempts - 1) * 5)
         job.run_at = utcnow() + timedelta(seconds=delay_seconds)
     session.flush()
-
+    return job

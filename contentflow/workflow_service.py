@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from .ai_provenance import AIProvenanceRecorder
 from .entities import Asset, Campaign, ContentItem, ContentRevision, WorkflowRun
 from .embeddings import build_embedding_provider
 from .knowledge_service import search_workspace_knowledge
@@ -58,21 +59,27 @@ def execute_workflow_run(
             *brief.product_facts,
         ]
     )
+    embedder = build_embedding_provider(settings)
     retrieved = search_workspace_knowledge(
         session,
         workspace_id=run.workspace_id,
         query=query,
         limit=6,
-        embedder=build_embedding_provider(settings),
+        embedder=embedder,
     )
     knowledge_payload = [chunk.to_dict() for chunk in retrieved]
 
     provider_override = run.request_json.get("provider")
     provider = build_text_provider(settings, provider_override)
-    run.provider = provider_override or settings.text_provider
+    provenance = AIProvenanceRecorder(
+        provider,
+        embedding_provider=settings.embedding_provider,
+        embedding_model=embedder.model_name,
+    )
+    run.provider = provenance.provider_name
     run.current_stage = "planning"
     session.flush()
-    plan = provider.complete_json(
+    plan = provenance.complete_json(
         "plan",
         {"brief": brief.to_dict(), "knowledge": knowledge_payload},
     )
@@ -87,7 +94,7 @@ def execute_workflow_run(
     for platform in brief.platforms:
         if platform not in requested_platforms:
             continue
-        draft = provider.complete_json(
+        draft = provenance.complete_json(
             "generate",
             {
                 "brief": brief.to_dict(),
@@ -95,12 +102,13 @@ def execute_workflow_run(
                 "plan": plan,
                 "knowledge": knowledge_payload,
             },
+            platform=platform,
         )
         rule_review = reviewer.review(platform, draft, brief)
         if not rule_review.passed:
             draft = reviewer.repair(platform, draft, brief)
             rule_review = reviewer.review(platform, draft, brief)
-        model_review = provider.complete_json(
+        model_review = provenance.complete_json(
             "review",
             {
                 "brief": brief.to_dict(),
@@ -108,6 +116,7 @@ def execute_workflow_run(
                 "content": draft,
                 "knowledge": knowledge_payload,
             },
+            platform=platform,
         )
         model_review_passed = bool(model_review.get("passed", False))
 
@@ -183,6 +192,7 @@ def execute_workflow_run(
         "plan": plan,
         "retrieved_knowledge": knowledge_payload,
         "contents": result_items,
+        "ai_provenance": provenance.snapshot(),
     }
     session.flush()
     return run.result_json

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -11,16 +12,38 @@ SENSITIVE_KEYS = {
     "access_token",
     "refresh_token",
     "api_key",
+    "credential_ciphertext",
+    "credentials",
     "secret",
     "password",
     "authorization",
 }
 
 
+SENSITIVE_SUFFIXES = (
+    "_token",
+    "_secret",
+    "_password",
+    "_api_key",
+    "_credentials",
+    "_credential_ciphertext",
+)
+
+
+def is_sensitive_key(key: Any) -> bool:
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
+    normalized = normalized.replace("-", "_").lower()
+    return (
+        normalized in SENSITIVE_KEYS
+        or normalized.endswith(SENSITIVE_SUFFIXES)
+        or normalized.startswith(("authorization_", "password_", "secret_"))
+    )
+
+
 def redact(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: ("***" if key.lower() in SENSITIVE_KEYS else redact(item))
+            key: ("***" if is_sensitive_key(key) else redact(item))
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -50,4 +73,3 @@ def record_audit(
     )
     session.add(event)
     return event
-

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from contentflow import db
 from contentflow.api import create_app
+from contentflow.entities import ChannelConnection, Job
 from contentflow.settings import Settings
 
 
@@ -42,9 +43,7 @@ class ApiV2Test(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_authenticated_campaign_and_job_flow(self):
-        session_response = self.client.get(
-            "/api/v1/auth/session", headers=self.headers
-        )
+        session_response = self.client.get("/api/v1/auth/session", headers=self.headers)
         self.assertEqual(session_response.status_code, 200)
 
         created = self.client.post(
@@ -102,6 +101,27 @@ class ApiV2Test(unittest.TestCase):
         self.assertEqual(run.status_code, 202, run.text)
         self.assertEqual(run.json()["status"], "queued")
 
+        second_run = self.client.post(
+            f"/api/v1/campaigns/{campaign_id}/runs",
+            headers=self.headers,
+            json={},
+        )
+        self.assertEqual(second_run.status_code, 202, second_run.text)
+
+        recent_runs = self.client.get(
+            f"/api/v1/campaigns/{campaign_id}/runs?limit=1",
+            headers=self.headers,
+        )
+        self.assertEqual(recent_runs.status_code, 200, recent_runs.text)
+        self.assertEqual(len(recent_runs.json()), 1)
+        self.assertEqual(recent_runs.json()[0]["id"], second_run.json()["id"])
+
+        invalid_limit = self.client.get(
+            f"/api/v1/campaigns/{campaign_id}/runs?limit=101",
+            headers=self.headers,
+        )
+        self.assertEqual(invalid_limit.status_code, 422, invalid_limit.text)
+
         jobs = self.client.get("/api/v1/jobs", headers=self.headers)
         self.assertEqual(jobs.status_code, 200)
         self.assertEqual(jobs.json()[0]["job_type"], "workflow.execute")
@@ -135,6 +155,90 @@ class ApiV2Test(unittest.TestCase):
         self.assertEqual(channel.json()["status"], "export_only")
         self.assertNotIn("credential_ciphertext", channel.json())
 
+    def test_channel_credentials_must_match_runtime_requirements(self):
+        missing_open_id = self.client.post(
+            "/api/v1/channels",
+            headers=self.headers,
+            json={
+                "platform": "douyin",
+                "display_name": "抖音缺少 Open ID",
+                "credentials": {"access_token": "token"},
+                "config": {},
+            },
+        )
+        self.assertEqual(missing_open_id.status_code, 422, missing_open_id.text)
+        self.assertIn("open_id", missing_open_id.text)
+
+        config_open_id = self.client.post(
+            "/api/v1/channels",
+            headers=self.headers,
+            json={
+                "platform": "douyin",
+                "display_name": "抖音完整连接",
+                "credentials": {"access_token": "token"},
+                "config": {"open_id": "open-id"},
+            },
+        )
+        self.assertEqual(config_open_id.status_code, 201, config_open_id.text)
+
+        blank_wechat_secret = self.client.post(
+            "/api/v1/channels",
+            headers=self.headers,
+            json={
+                "platform": "wechat",
+                "display_name": "公众号空密钥",
+                "credentials": {"app_id": "app-id", "app_secret": "   "},
+                "config": {},
+            },
+        )
+        self.assertEqual(blank_wechat_secret.status_code, 422, blank_wechat_secret.text)
+        self.assertIn("app_secret", blank_wechat_secret.text)
+
+    def test_failed_connector_test_can_be_enqueued_again(self):
+        channel = self.client.post(
+            "/api/v1/channels",
+            headers=self.headers,
+            json={
+                "platform": "xiaohongshu",
+                "display_name": "可重试连接",
+                "credentials": {},
+                "config": {"export_format": "zip"},
+            },
+        )
+        self.assertEqual(channel.status_code, 201, channel.text)
+        channel_id = channel.json()["id"]
+
+        first = self.client.post(
+            f"/api/v1/channels/{channel_id}/test",
+            headers=self.headers,
+        )
+        self.assertEqual(first.status_code, 202, first.text)
+        duplicate = self.client.post(
+            f"/api/v1/channels/{channel_id}/test",
+            headers=self.headers,
+        )
+        self.assertEqual(duplicate.status_code, 202, duplicate.text)
+        self.assertEqual(duplicate.json()["id"], first.json()["id"])
+
+        with db.SessionLocal() as session:
+            previous_job = session.get(Job, first.json()["id"])
+            previous_job.status = "failed"
+            previous_job.attempts = previous_job.max_attempts
+            stored_channel = session.get(ChannelConnection, channel_id)
+            stored_channel.status = "invalid"
+            session.commit()
+
+        retried = self.client.post(
+            f"/api/v1/channels/{channel_id}/test",
+            headers=self.headers,
+        )
+        self.assertEqual(retried.status_code, 202, retried.text)
+        self.assertNotEqual(retried.json()["id"], first.json()["id"])
+        channels = self.client.get("/api/v1/channels", headers=self.headers)
+        self.assertEqual(channels.status_code, 200, channels.text)
+        stored = next(item for item in channels.json() if item["id"] == channel_id)
+        self.assertEqual(stored["status"], "pending_test")
+
     def test_dedicated_local_frontend_origin_is_allowed(self):
         response = self.client.options(
             "/api/v1/auth/login",
@@ -149,6 +253,17 @@ class ApiV2Test(unittest.TestCase):
             response.headers.get("access-control-allow-origin"),
             "http://localhost:3001",
         )
+
+    def test_security_headers_and_api_cache_policy(self):
+        response = self.client.get("/api/v1/auth/workspaces")
+        self.assertEqual(response.status_code, 401, response.text)
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertEqual(
+            response.headers["referrer-policy"],
+            "strict-origin-when-cross-origin",
+        )
+        self.assertEqual(response.headers["cache-control"], "no-store")
 
 
 if __name__ == "__main__":

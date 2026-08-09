@@ -1,0 +1,1095 @@
+# ContentFlow 项目交接文档
+
+> 更新日期：2026-08-08
+> 适用仓库：`F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow`
+> GitHub：<https://github.com/heee000/ContentFlow>
+> 当前分支：`main`
+> 当前基准提交：`edc523a Harden local runtime and database upgrades`
+
+## 0. 给接手者的最短说明
+
+ContentFlow 是一个把 AI 内容营销拆成“知识检索、内容生成、规则校验、人工审核、素材生成、发布和数据复盘”等可追踪步骤的全栈工作流系统。当前应维护的主链路是：
+
+```text
+Next.js 工作台
+  -> FastAPI API
+  -> SQLAlchemy 数据库
+  -> Job 数据库任务队列
+  -> 独立 Worker
+  -> workflow_service / Provider / Connector
+```
+
+请不要把 `contentflow/cli.py`、`contentflow/workflow.py` 中保留的早期本地批处理原型，误当成当前 Web 产品的主链路。真正需要优先追踪的是：
+
+```text
+web/app/contentflow-app.tsx
+  -> contentflow/routers/runs.py:create_run
+  -> contentflow/job_queue.py:enqueue_job
+  -> contentflow/worker.py:Worker.run_once
+  -> contentflow/workflow_service.py:execute_workflow_run
+  -> ContentItem / ContentRevision / Asset / WorkflowRun
+```
+
+接手后第一条命令应是 `git status --short`，因为当前工作区有尚未提交的用户修改，不能 reset、checkout 或覆盖。
+
+## 1. 产品目标和设计原则
+
+### 1.1 项目解决什么问题
+
+ContentFlow 面向营销内容生产，把一份活动 Brief 和品牌/产品知识转成不同平台的内容及素材，并在发布前保留人工审核和版本控制。覆盖的业务链路是：
+
+```text
+活动 Brief
+  -> 知识库检索
+  -> 跨平台策划
+  -> 小红书/抖音/公众号内容生成
+  -> 确定性规则校验 + 模型风险审核
+  -> 人工编辑与审批
+  -> 图片/视频素材生成
+  -> 排期与分发
+  -> 指标回收或人工录入
+```
+
+### 1.2 核心设计原则
+
+1. **概率性 AI 与确定性规则分离**：模型负责策划、文案、排版和脚本；禁用词、必含事实、CTA、长度、权限、版本一致性等由普通代码控制。
+2. **外部副作用必须经过人工审核**：内容未被 reviewer 明确批准时，不生成正式素材，也不能进入发布。
+3. **长任务异步化**：知识索引、生成、素材、连接测试、发布和指标拉取都进入数据库 Job 队列。
+4. **状态可追踪**：生成批次、内容版本、素材状态、发布结果和审计日志都持久化。
+5. **能力边界要诚实**：离线 Mock 不冒充真实模型；小红书无公开发布能力时只生成 ZIP 投放包；外部平台只有真正返回成功时才保存外部 ID。
+6. **多租户隔离**：所有业务对象带 `workspace_id`，工作区来自服务端签名令牌，不允许客户端随意指定。
+
+## 2. 当前技术栈
+
+| 层级 | 当前实现 | 说明 |
+|---|---|---|
+| Web | Next.js 16.2.12、React 19.2.6、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
+| API | FastAPI 0.115+、Pydantic | REST API 前缀默认 `/api/v1` |
+| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前迁移 head：`a73f9c2e4b61` |
+| 本地数据库 | SQLite | 默认 `.contentflow/contentflow-v2.db` |
+| 生产数据库 | PostgreSQL 16 + pgvector | 迁移创建 1024 维向量表与 HNSW 索引 |
+| 异步任务 | 数据库 Job 队列 + 独立 Python Worker | 不依赖 Redis/Celery |
+| 本地存储 | `.contentflow/storage` | 按工作区隔离文件路径 |
+| 生产存储 | MinIO/S3 | 通过 `ObjectStorage` 抽象切换 |
+| 文本模型 | Mock / OpenAI-compatible / DashScope | 当前本机默认 Mock |
+| Embedding | Hash / OpenAI-compatible / DashScope | 当前本机默认 1024 维 Hash |
+| 图片/视频 | Mock / DashScope Wan | 当前本机默认 Mock |
+| 发布连接器 | 小红书导出、抖音、公众号 | 真实能力受外部账号、scope 和平台审核限制 |
+
+Python 项目版本为 `0.2.0`，要求 Python 3.11+。前端要求 Node.js 22.13+。
+
+## 3. 仓库结构和关键文件
+
+```text
+ContentFlow/
+├─ contentflow/                  后端源码
+│  ├─ api.py                     FastAPI 应用、CORS、日志、路由注册、健康检查
+│  ├─ settings.py                环境变量与运行时校验
+│  ├─ db.py                      Engine、Session、SQLite 外键
+│  ├─ entities.py                SQLAlchemy 领域实体
+│  ├─ schemas.py                 API 输入输出模型
+│  ├─ dependencies.py            当前用户、工作区和 RBAC 依赖
+│  ├─ security.py                密码、令牌、凭据加密
+│  ├─ audit.py                   审计记录和敏感字段脱敏
+│  ├─ routers/                   REST API
+│  ├─ job_queue.py               入队、幂等、领取、租约、重试
+│  ├─ worker.py                  Job Handler 和 Worker 主循环
+│  ├─ workflow_service.py        当前 Web 主工作流
+│  ├─ knowledge_service.py       文档切块、向量写入和检索
+│  ├─ embeddings.py              Embedding Provider
+│  ├─ text_generation.py         当前文本 Provider 选择入口
+│  ├─ providers.py               Mock/OpenAI-compatible 文本实现；还含旧入口
+│  ├─ media_providers.py         Mock/Wan 图片和视频
+│  ├─ connectors.py              小红书/抖音/公众号连接器
+│  ├─ object_storage.py          Local/S3 对象存储
+│  ├─ review.py                  确定性规则审核与一次自动修复
+│  ├─ workflow.py                素材任务构建；也保留早期工作流代码
+│  └─ cli.py                     早期 CLI/兼容入口，不是当前 Web 主入口
+├─ migrations/                  Alembic 迁移
+├─ tests/                       后端、接口、迁移、安全和连接器测试
+├─ web/                         Next.js/vinext 工作台
+│  ├─ app/contentflow-app.tsx   前端主要界面和状态逻辑
+│  └─ lib/contentflow-api.ts    API Base、Cookie 会话刷新、fetch 和下载封装
+├─ docs/                        架构、使用、运维和平台边界说明
+├─ scripts/validate_stack.py    完整容器栈验收脚本
+├─ docker-compose.yml           PostgreSQL、MinIO、API、Worker、Web
+└─ .contentflow/                本机数据库和素材，已被 Git 忽略
+```
+
+## 4. 本地运行方式
+
+### 4.1 当前本机事实
+
+- 当前仓库根目录没有 `.env`，因此运行时读取 `settings.py` 的开发默认值。
+- 当前有效本地数据库是 `.contentflow/contentflow-v2.db`，迁移状态为 `8b6c1f3a9d21 (head)`。
+- `.contentflow/contentflow.db` 是旧数据库，不应和 `contentflow-v2.db` 混用。
+- `.contentflow/storage` 中存在此前测试产生的知识、素材和导出文件。删除 `.contentflow` 会丢失本地工作区、账户和草稿数据，操作前必须备份。
+- 本地工作台固定使用 `3001`，因为 `3000` 曾被另一个项目使用。不要为了启动 ContentFlow 杀掉占用 `3000` 的无关项目。
+
+### 4.2 三个终端启动
+
+仓库路径：
+
+```powershell
+Set-Location 'F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow'
+```
+
+终端 1：API。
+
+```powershell
+& 'F:\python\python.exe' -m contentflow.migrate
+& 'F:\python\python.exe' -m uvicorn contentflow.api:app --reload
+```
+
+终端 2：Worker。没有 Worker 时，Job 会一直停在 `queued`。
+
+```powershell
+Set-Location 'F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow'
+& 'F:\python\python.exe' -m contentflow.worker
+```
+
+终端 3：Web。
+
+```powershell
+Set-Location 'F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow\web'
+npm run dev:local
+```
+
+访问地址：
+
+- 工作台：<http://localhost:3001>
+- Swagger：<http://localhost:8000/docs>
+- API 就绪检查：<http://localhost:8000/health/ready>
+- 默认 API Base：`http://localhost:8000/api/v1`
+
+首次使用时在登录页切到“注册”，系统会同时创建账户、默认工作区和管理员成员关系。
+
+### 4.3 一次性 Worker 调试
+
+只领取一个可运行 Job 后退出：
+
+```powershell
+& 'F:\python\python.exe' -m contentflow.worker --once
+```
+
+它适合逐个观察数据库状态，但如果队列为空，会直接退出。
+
+## 5. 一次内容生成的真实调用链
+
+### 5.1 API 入队
+
+前端在活动页调用：
+
+```http
+POST /api/v1/campaigns/{campaign_id}/runs
+```
+
+`contentflow/routers/runs.py:create_run` 会：
+
+1. 校验活动属于当前工作区且未归档。
+2. 创建 `WorkflowRun(status=queued, current_stage=queued)`。
+3. 创建 `workflow.execute` Job，幂等键为 `workflow.execute:{run_id}`。
+4. 写入 `workflow.enqueue` 审计日志。
+5. 立即返回 HTTP 202，不在请求线程中调用模型。
+
+### 5.2 Worker 领取任务
+
+`contentflow/job_queue.py:claim_next_job` 会选择：
+
+- `run_at <= 当前时间`
+- `attempts < max_attempts`
+- 状态为 `queued/retry`，或租约已过期的 `running`
+
+PostgreSQL 下使用 `FOR UPDATE SKIP LOCKED`，允许多个 Worker 并发领取不同任务；SQLite 只适合本地单 Worker。领取后状态变成 `running`，记录 `locked_by/locked_at`，并将 `attempts + 1`。
+
+默认租约 300 秒、最大尝试 4 次。失败后按 5、10、20……秒指数退避，单次最多 300 秒。`asset.poll` 的最大尝试次数单独设为 60。
+任务执行期间 LeaseHeartbeat 会以“30 秒与租约三分之一中的较小值”为周期使用独立数据库会话续租；续租条件同时绑定 job_id、worker_id、attempt 和 running 状态。任务完成或失败落库前会再次校验所有权，旧 Worker 在任务已被重新领取后不能覆盖新执行结果。
+
+
+### 5.3 工作流执行
+
+`contentflow/workflow_service.py:execute_workflow_run` 的顺序是：
+
+1. 读取 `Campaign` 并转成结构化 `CampaignBrief`。
+2. 用产品、目标、人群、城市、必含信息和产品事实拼接检索 Query。
+3. 在当前工作区检索最多 6 个知识块。
+4. 调用文本 Provider 的 `plan` 阶段生成跨平台计划。
+5. 对活动中的每个平台调用 `generate` 阶段，生成标题、正文、标签和平台结构。
+6. 用 `RuleReviewer` 检查禁用词、必含信息、CTA 和长度等规则。
+7. 规则不通过时做一次确定性修复，然后重新检查一次。
+8. 调用 Provider 的 `review` 阶段做模型风险审核。
+9. 两类审核都通过时，内容状态为 `needs_review`；否则为 `blocked`。
+10. 保存 `ContentItem`、首条 `ContentRevision(version=1)` 和 `planned` 素材。
+11. 将使用过的知识块 ID 保存到 `source_chunk_ids`。
+12. `WorkflowRun` 最终进入 `awaiting_review/current_stage=human_review`。
+
+注意：`WorkflowRun=awaiting_review` 只表示自动阶段完成，不表示所有内容都通过检查；需要继续查看每条 `ContentItem` 是 `needs_review` 还是 `blocked`。
+
+## 6. 人工编辑、版本和素材门禁
+
+### 6.1 编辑内容
+
+`PATCH /api/v1/contents/{content_id}` 会：
+请求体必须携带页面读取到的 expected_version。PostgreSQL 会锁定内容行并比较版本；不一致返回 409，旧页面不能覆盖新版本。
+
+
+1. 更新正文、标题、标签、CTA 或平台结构。
+2. `version + 1`。
+3. 内容重新变为 `needs_review`，清除批准人和批准时间。
+4. 把已有非 stale 素材标记为 `stale`。
+5. 为新内容版本建立新的 `planned` 素材。
+6. 写入新的 `ContentRevision(change_reason=human_edit)`。
+
+因此，审核后修改正文导致“重新审核、重新生成素材”是设计行为，不是 Bug。
+
+### 6.2 人工审批
+
+`POST /api/v1/contents/{content_id}/review` 需要 `reviewer` 权限。
+
+请求体同样必须携带 expected_version，并且只有 needs_review/blocked 内容可以直接审批。被驳回内容需要先编辑形成新版本，再重新审核。
+
+- `approve`：内容变为 `approved`，所有 `planned/failed` 素材变为 `queued`，并创建 `asset.generate` Job。
+- `reject`：内容变为 `rejected`，清空批准信息，不生成素材。
+
+素材生成可能有两种返回：
+
+- 同步完成：写入对象存储，素材状态直接变成 `ready`。
+- 异步视频：素材变成 `processing`，记录外部 task ID，并创建 `asset.poll` Job；未完成时抛出 `JobNotReady` 进入延迟重试，不立即视为业务失败。
+
+## 7. RAG 实现
+
+### 7.1 入库
+
+知识库上传支持 Markdown、TXT、CSV 和 JSON。上传后先写对象存储并创建 `KnowledgeDocument`，然后入队 `knowledge.index`。Worker 会：
+
+1. 安全读取文件并按格式解码。
+2. 切分成 `KnowledgeChunk`。
+3. 使用配置的 Embedding Provider 生成 1024 维向量。
+4. 保存正文、来源、序号、向量和模型名。
+5. 更新文档状态和块数量。
+
+知识文件默认限制 20MB。
+
+### 7.2 检索
+
+- SQLite：向量保存在 JSON 字段，由应用层计算余弦相似度。
+- PostgreSQL：向量另写入 `knowledge_vectors`，使用 pgvector `<=>` 和 HNSW 余弦索引排序。
+- 两种路径都必须带 `workspace_id`，防止跨租户检索。
+- 生成内容保存 `source_chunk_ids`，用于审核时回看知识来源。
+
+### 7.3 当前边界
+
+Hash Embedding 只用于离线可复现验收，不具备真实语义向量质量。真实效果评估必须切换 OpenAI-compatible 或 DashScope Embedding，并重新索引知识库；不能用 Hash 模式的结果宣称线上 RAG 质量。
+
+当前没有独立 Reranker、混合 BM25、Query 改写或系统化召回评测集，这些可以作为后续改进方向。
+
+## 8. Provider 层
+
+### 8.1 文本
+
+当前入口是 `contentflow/text_generation.py:build_text_provider`：
+
+- `mock`：离线、确定性、无需密钥；当前本机默认。
+- `openai-compatible`：调用 `/chat/completions`，要求 API Base、API Key 和模型名。
+- `dashscope`：通过百炼工作区的 OpenAI 兼容地址调用。
+
+Provider 按 `plan / generate / review` 三个阶段接收结构化 JSON，并要求返回 JSON 对象。温度当前为 0.3。
+
+`contentflow/providers.py:build_provider` 是早期入口，维护主工作流时不要绕过 `build_text_provider(settings, override)`。
+
+### 8.2 Embedding
+
+- `hash`
+- `openai-compatible`
+- `dashscope`
+
+PostgreSQL 迁移固定向量维度为 1024；使用其他维度会被运行时校验拒绝。
+
+### 8.3 图片和视频
+
+- Mock 图片会生成明确标注的离线预览 PNG。
+- Mock 视频只生成 `storyboard.json`，不是 MP4。
+- DashScope/Wan 图片通常同步返回下载地址。
+- DashScope/Wan 视频异步返回 task ID，由 Worker 轮询，成功后再转存本地或 S3。
+- 模型生成素材下载上限为 100MB。
+
+### 8.4 重要表达边界
+
+“已经实现真实 Provider 适配层”不等于“本次本机运行调用了真实模型”。截至本交接文档，当前本机没有 `.env`，实际默认仍是 Mock 文本、Hash Embedding、Mock 图片和 Mock 视频。
+
+## 9. 发布连接器
+
+### 9.1 小红书
+
+当前是 `XiaohongshuExportConnector`：
+
+- 连接测试成功状态为 `export_only`，不是 `connected`。
+- 发布时生成包含 `content.md`、`manifest.json`、`layout.json` 和素材的 ZIP。
+- 运营人员下载 ZIP 后人工发布。
+- 指标通过工作台人工回填。
+
+不要把该能力描述成“小红书自动发布”。
+
+### 9.2 抖音
+
+当前适配器实现：
+
+1. 使用 `access_token + open_id` 测试用户身份。
+2. 上传视频。
+3. 用 `video_id` 创建作品。
+4. 根据 `item_id` 拉取播放、点赞、评论和分享。
+
+能否真实调用取决于开放平台应用审核、账号授权、scope、素材和内容审核。仓库中的 HTTP 契约测试不等于真实账号验收。
+
+### 9.3 公众号
+
+当前适配器实现：
+
+1. App ID/Secret 换取 access token。
+2. 上传封面永久素材。
+3. 创建草稿。
+4. 仅在渠道配置 `auto_publish=true` 时提交发布。
+5. 提交后使用 `publish_id` 调用 `freepublish/get`；未取得 `article_id` 时保持 pending，取得后才记为 published。
+
+默认只创建草稿。自动对账和指标接口仍受具体公众号权限限制，仓库契约测试不等于真实账号验收。
+
+### 9.4 发布前的二次校验
+
+`handle_publish_dispatch` 不信任排期时的旧状态，会重新检查：
+
+- 内容仍为 `approved`。
+- 当前内容版本等于排期保存的版本。
+- 当前版本至少有一个素材。
+- 当前版本的全部素材均为 `ready`。
+- 内容和连接器平台匹配。
+
+这用于防止审核后改稿、使用旧素材或素材未完成就发布。
+PostgreSQL 下，取消接口与 Worker 分发入口都会先锁定同一条 PublishJob。取消先获得锁时，PublishJob 进入 cancelled、队列 Job 同步进入 succeeded/cancelled；Worker 先获得锁并持久化 publishing 时，取消接口等待后返回 409。因此不能出现接口返回取消成功、Worker 随后仍按旧状态发布的结果。
+
+
+### 9.5 发布结果不确定、自动对账与人工接管
+
+Worker 在调用平台前先持久化 `dispatch_token`、`dispatch_started_at` 和 publishing 状态，再提交事务。远程结果返回后，PublishJob、原始响应和后续对账 Job 会先于 publish.dispatch 队列完成落库；若进程在两次提交之间退出，重放会读取 submitted/published 等领域终态，不会再次调用发布接口。
+
+公众号自动对账链路如下：
+
+1. `freepublish/submit` 返回 `publish_id` 后，PublishJob 进入 submitted，并创建幂等键为 `publish.reconcile:{publish_job_id}` 的 Job；Worker 周期扫描也会补建历史 submitted 任务。
+2. `freepublish/get` 未返回 `article_id` 时保守视为 pending，通过队列指数退避重试；只有取得 `article_id` 才进入 published。
+3. 对账远程 HTTP 期间不持有 PublishJob 行锁；返回后重新 `FOR UPDATE` 并校验当前状态和原查询键，避免慢查询阻塞人工操作。
+4. 若人工处置或其他状态在查询期间先提交，自动结果写入 `publish.reconciliation_stale_ignored` 审计后被忽略，不覆盖新状态。
+5. 查询异常或最大尝试耗尽后进入 reconciliation_required，保留最后错误并交给人工，不会重新调用发布接口。
+
+reviewer 可在 submitted 或 reconciliation_required 时执行人工接管：
+
+- “确认已发布”：可补充平台内容 ID/链接，PublishJob 与原 publish.dispatch Job 分别进入 published 和 succeeded。
+- “确认未发布”：PublishJob 与原 publish.dispatch Job 进入 failed；之后才可以重试原分发任务。
+- 如果自动对账 Job 已 queued/retry/running，人工处置在同一事务中把它记为 succeeded/manual 并清除租约；旧 Worker 随后因所有权失效或领域终态不能覆盖人工决策。
+- 两种处置都会写入 `publish.reconcile` 审计、人工依据和两类队列 Job ID。
+
+当前边界：微信公众号已具备确定查询键下的自动轮询闭环；抖音在不确定响应且没有 `item_id` 时仍只能人工核对。系统仍缺跨平台回调验签/去重、平台级幂等键和发布 Outbox，因此不能表述为严格端到端 exactly-once。
+
+## 10. 主要领域对象和状态
+
+| 对象 | 作用 | 关键状态/字段 |
+|---|---|---|
+| `Workspace` / `Membership` | 租户和成员关系 | `viewer/editor/reviewer/admin` |
+| `Campaign` | 营销 Brief | `draft/active/archived` |
+| `KnowledgeDocument` / `KnowledgeChunk` | 原文、切块和向量 | `pending/indexing/indexed/failed` |
+| `WorkflowRun` | 一次生成批次 | `queued/running/awaiting_review/failed`，另有 `current_stage` |
+| `ContentItem` | 某个平台的一条当前内容 | `needs_review/blocked/approved/rejected`，带 `version` |
+| `ContentRevision` | 不可变版本记录 | 生成或人工编辑原因、正文和 `layout_json` |
+| `Asset` | 图片、视频或离线分镜 | `planned/queued/generating/processing/ready/failed/stale` |
+| `ChannelConnection` | 平台凭据和配置 | `disconnected/pending_test/connected/export_only/invalid` |
+| `PublishJob` | 发布排期和外部结果 | `scheduled/publishing/reconciliation_required/published/exported/draft_created/submitted/failed/cancelled` |
+| `MetricSnapshot` | 某次发布的分时指标 | 曝光、点击、点赞、评论、分享及原始数据 |
+| `Job` | 系统异步任务 | `queued/running/retry/succeeded/failed` |
+| `AuditLog` | 操作审计 | 操作者、动作、实体、脱敏元数据 |
+
+Job 类型目前包括：
+
+```text
+knowledge.index
+workflow.execute
+connector.test
+asset.generate
+asset.poll
+publish.dispatch
+metrics.pull
+```
+
+## 11. 权限、安全和审计
+
+角色等级由低到高为：
+
+```text
+viewer < editor < reviewer < admin
+```
+
+- viewer：查看数据。
+- editor：维护活动、知识和内容。
+- reviewer：审批内容、排期发布、执行需要审核权限的操作。
+- admin：成员、角色、工作区和审计管理。
+
+当前安全实现包括：
+
+- PBKDF2-SHA256 密码哈希和随机 salt。
+- Base64URL + HMAC-SHA256 签名短访问令牌，校验 `sid/jti/iss/aud/iat/nbf/exp`。
+- 数据库 `auth_sessions`、旋转 Refresh Token、复用检测、单会话/全会话撤销。
+- 浏览器 HttpOnly/SameSite Cookie、生产 Secure 和 Cookie 写请求可信 Origin 校验；CLI 保留短期 Bearer。
+- 由应用密钥派生 Fernet key，加密平台凭据。
+- API 不回传凭据密文。
+- 审计元数据递归脱敏 token、secret、password 等键。
+- 防止移除自己或降级最后一名管理员。
+- 生产环境拒绝默认应用密钥。
+
+生产化仍应补 OIDC/SAML、MFA、设备会话管理、集中密钥管理、CSP、共享网关限流、签名密钥轮换和更完整的可观测平台。
+
+## 12. 前端工作台
+
+主界面集中在 `web/app/contentflow-app.tsx`。主要区域包括：
+
+- 总览
+- 营销活动
+- 内容审核与版本历史
+- 素材中心
+- 发布管理
+- 知识库
+- 平台连接
+- 数据复盘
+- 任务队列
+- 团队与审计
+
+登录后的数据由 `loadData` 并行请求，之后每 15 秒静默刷新一次。它是普通轮询，不是 WebSocket/SSE。
+
+前端只在 `localStorage` 保存 `contentflow_api_base`。访问/刷新令牌只存在 HttpOnly Cookie 中，旧版 `contentflow_token` 会被主动清除；平台账号凭据也不会保存在前端。
+
+目前大部分界面和业务逻辑都集中在一个较大的 `contentflow-app.tsx` 中。继续扩展功能时，优先按业务域拆组件和 hooks，避免文件继续膨胀。
+
+## 13. API 功能地图
+
+所有业务 API 默认位于 `/api/v1`：
+
+| 模块 | 主要能力 |
+|---|---|
+| `/auth` | 注册、登录、会话、工作区列表/创建/切换 |
+| `/admin` | 成员管理、角色调整、审计日志、Worker 与工作区队列健康 |
+| `/campaigns` | 活动查询、创建、修改和归档 |
+| `/campaigns/{id}/runs`、`/runs/{id}` | 创建和查看生成批次 |
+| `/knowledge` | 知识文档列表和上传索引 |
+| `/contents` | 内容筛选、详情、版本、编辑和人工审核 |
+| `/assets` | 素材列表、上传、重新生成和鉴权下载 |
+| `/channels` | 平台连接创建、列表和异步测试 |
+| `/publishing` | 发布排期、取消、人工对账和导出包下载 |
+| `/metrics` | 人工指标、平台拉取和汇总 |
+| `/jobs` | 任务查询和失败任务重试 |
+| `/dashboard` | 工作台摘要 |
+
+准确请求体和响应体以运行中的 Swagger 为准，不要只根据前端 TypeScript 类型猜测。
+
+## 14. 当前 Git 工作区现场
+
+### 14.1 已跟踪但尚未提交的修改
+
+截至 2026-08-03，以下修改存在于工作区，属于用户当前工作，不得丢弃：
+
+1. `contentflow/routers/channels.py`
+   - 重复点击正在执行的连接测试时复用现有活动 Job。
+   - 上一次测试已经 terminal/failed 后，允许把渠道重新置为 `pending_test` 并创建新 Job。
+2. `contentflow/worker.py`
+   - Alembic 初始化日志后用 `logging.basicConfig(..., force=True)` 恢复 Worker 日志，避免 Worker 实际运行但终端只看到迁移日志。
+3. `tests/test_api_v2.py`
+   - 增加“连接器失败后可以重新入队，同时 pending 重复点击不重复入队”的回归测试。
+4. `web/app/contentflow-app.tsx`
+   - 增加 `invalid -> 连接异常` 的中文状态映射。
+
+### 14.2 未跟踪文件
+
+```text
+knowledge/北京周末 CityWalk 路线助手产品资料.txt
+docs/CONTENTFLOW_HANDOFF.md
+```
+
+前者是用户放入仓库的测试知识资料；是否纳入版本控制应由用户确认。本文档是本次交接新增文件。
+
+### 14.3 接手时禁止做的操作
+
+- 不要运行 `git reset --hard`。
+- 不要对上述文件执行 `git checkout --`。
+- 不要删除 `.contentflow` 试图“重置环境”，除非先获得用户确认并备份。
+- 不要擅自提交或推送；先让用户确认提交范围和测试知识文件是否公开。
+
+## 15. 本次交接时的验证结果
+
+2026-08-03 在当前未提交修改上实际执行：
+
+```powershell
+& 'F:\python\python.exe' -m pytest -q
+```
+
+结果：
+
+```text
+18 passed in 10.51s
+```
+
+前端实际执行：
+
+```powershell
+npm run lint
+npm run build
+```
+
+结果：ESLint 通过；Next.js 16.2.12 生产构建、TypeScript 检查和静态页面生成通过。
+
+数据库实际执行 `alembic current`，结果与 head 一致：
+
+```text
+8b6c1f3a9d21 (head)
+```
+
+本次没有重新执行以下高成本或外部依赖验证：
+
+- `npm test` 的 Sites/vinext 构建链。
+- Docker Compose 的 PostgreSQL + pgvector + MinIO 全栈验收。
+- `scripts/validate_stack.py`。
+- 真实 DashScope/Wan 调用。
+- 真实抖音或公众号账号发布。
+
+因此，仓库文档中既有的容器验收记录可以作为历史材料，但不能说这些外部路径在 2026-08-03 本轮被重新验证过。
+
+## 16. 常见问题排查
+
+### 16.1 工作台一直显示“正在连接工作台”或 `Failed to fetch`
+
+按顺序检查：
+
+1. 打开 <http://localhost:8000/health/ready>，确认 API 可达。
+2. 确认前端地址为 <http://localhost:3001>。
+3. 确认 API Base 为 `http://localhost:8000/api/v1`，不要漏掉 `/api/v1`。
+4. 浏览器开发者工具查看失败请求是网络错误、CORS 还是 401。
+5. 如果之前保存过错误地址，清除 `localStorage.contentflow_api_base` 后刷新。
+6. 如果是 401，重新登录；不要手工伪造 Token。
+
+### 16.2 前端自动跑到 3001
+
+这是预期行为。`npm run dev:local` 固定使用 3001，用来避开另一个占用 3000 的项目。
+
+### 16.3 Job 一直 queued
+
+通常是 Worker 未启动。检查独立终端是否正在运行：
+
+```powershell
+& 'F:\python\python.exe' -m contentflow.worker
+```
+
+然后在任务队列页面查看 Job 类型、尝试次数和 `last_error`。
+
+### 16.4 Worker 只显示 Alembic 日志
+
+当前未提交的 `worker.py` 修改专门修复了这一点。迁移完成后应继续看到 `worker started id=...`。Worker 空闲时不会持续刷日志，这是正常现象。
+
+### 16.5 平台连接显示 `invalid`
+
+1. 先看对应 `connector.test` Job 的 `last_error`。
+2. 确认 Worker 正在运行。
+3. 小红书不需要账号密码，正常结果应为 `export_only`。
+4. 抖音需要有效 `access_token/open_id`；公众号需要有效 App ID/Secret 和接口权限。
+5. 修复配置后重新点“测试连接”。当前未提交补丁允许 terminal/failed 测试重新入队。
+
+### 16.6 内容批准后又变成待审核
+
+如果内容被编辑，系统会增加版本并撤销旧批准，这是版本门禁的正常行为。重新审核后才会为新版本生成素材。
+
+## 17. 事实边界：可以说什么，不能说什么
+
+### 可以基于代码和本次验证说明
+
+- 已实现 FastAPI + SQLAlchemy + 数据库 Job 队列 + Worker 的全栈主链路。
+- 已实现多工作区、RBAC、内容版本、人工审核、素材任务、发布排期和审计。
+- 已实现 SQLite 本地模式，以及 PostgreSQL/pgvector、S3/MinIO 的生产适配和迁移配置。
+- 已实现 Mock、OpenAI-compatible、DashScope/Wan Provider 适配层。
+- 已实现小红书 ZIP 导出、抖音 API，以及公众号草稿/可选提交和 `publish_id` 状态查询连接器代码。
+- 当前工作区全量 Ruff 通过、后端 51 个测试通过，前端 Next.js 生产构建和 TypeScript 检查通过。
+
+### 不能据此夸大的内容
+
+- 不能把本地 Mock 演示说成真实千问、Wan 或其他付费模型调用。
+- 不能把小红书导出包说成自动发布。
+- 不能把 HTTP Mock/契约测试说成真实平台账号已经验收。
+- 不能声称已经验证生产级高并发、成本或稳定性。
+- 不能声称 RAG 有高召回率；当前没有正式评测集和 Reranker。
+- 不能把项目说成一个自主 Agent；它是显式状态机和工作流系统。
+
+## 18. 建议的后续优先级
+
+### P0：先保护并收尾当前工作区
+
+1. 阅读 `git diff`，确认连接器重试和 Worker 日志补丁是否符合预期。
+2. 手工回归“小红书连接测试：pending_test -> export_only”。
+3. 手工回归“失败后重新测试会创建新 Job；重复点击同一次 pending 测试复用旧 Job”。
+4. 让用户决定是否提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。
+5. 经用户确认后再 commit/push。
+
+### P1：补齐完整本地验收
+
+1. 从注册开始跑一遍：工作区 -> 知识上传 -> 索引 -> 活动 -> 生成 -> 编辑 -> 审批 -> 素材 -> 小红书导出 -> 指标。
+2. 为每一步记录数据库对象和状态变化，而不只看前端提示。
+3. 执行 `npm test`，确认 Sites/vinext 路径是否仍然有效。
+4. 如 Docker 可用，再运行 Compose 和 `scripts/validate_stack.py`。
+
+### P2：真实模型联调
+
+1. 在不提交 `.env` 的前提下配置文本、Embedding、图片和视频 Provider。
+2. 先只切文本，验证结构化 JSON、错误和费用，再切 Embedding 并重新索引。
+3. 图片和视频分开联调，特别记录异步视频超时、轮询和下载地址过期。
+4. 增加外部调用耗时、token/费用和错误码的结构化记录。
+
+### P3：工程改进
+
+1. 把超大的 `contentflow-app.tsx` 按业务域拆分。
+2. 为任务状态增加更清楚的前端时间线；数据量大时考虑 SSE，而不是全页面 15 秒轮询。
+3. 增加 RAG 评测集、混合检索和可选 Reranker。
+4. 增加 API 限流、集中密钥管理、指标监控和告警。
+5. 在 PostgreSQL 多 Worker 环境做并发、租约恢复和幂等压力测试。
+
+## 19. 建议新对话首先阅读的文件
+
+按以下顺序阅读，能最快建立正确心智模型：
+
+1. `docs/CONTENTFLOW_HANDOFF.md`
+2. `git status --short` 和 `git diff`
+3. `README.md`
+4. `docs/architecture.md`
+5. `contentflow/routers/runs.py`
+6. `contentflow/job_queue.py`
+7. `contentflow/worker.py`
+8. `contentflow/workflow_service.py`
+9. `contentflow/entities.py`
+10. `contentflow/routers/contents.py`
+11. `contentflow/routers/publishing.py`
+12. `contentflow/knowledge_service.py`
+13. `contentflow/text_generation.py`、`embeddings.py`、`media_providers.py`
+14. `contentflow/connectors.py`
+15. `web/app/contentflow-app.tsx`
+
+## 20. 可直接发给新对话的开场指令
+
+```text
+请接手并继续完善以下 ContentFlow 项目：
+F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
+
+第一步请完整阅读 docs/CONTENTFLOW_HANDOFF.md，然后执行只读的 git status --short、git diff 和关键文件检查。当前工作区存在尚未提交的用户修改，不要 reset、checkout、覆盖、提交或推送。
+
+理解系统时请以 Web -> FastAPI -> SQLAlchemy -> Job -> Worker -> workflow_service 的当前主链路为准，不要把早期 CLI/ContentMarketingWorkflow 原型当成主链路。所有结论要区分：已由当前代码实现、本轮实际验证、只有适配层但未做真实外部联调、尚未实现。
+
+在提出或实施下一步改动前，先用一个具体业务案例说明它会改变哪些 API、数据库对象、Job、状态和前端页面，并保护 .contentflow 中的现有本地数据。
+```
+
+
+## 21. 2026-08-08 可靠性加固增量交接
+
+### 21.1 本轮保护边界
+
+本轮继续在既有未提交工作区上增量修改，没有执行 reset、checkout、暂存、提交或推送，也没有删除 .contentflow、本地知识资料或用户已有改动。后续接手仍必须先执行只读 git status --short 和 git diff。
+
+### 21.2 已实现
+
+1. Worker 租约：
+   - job_queue.py 增加按 job_id、worker_id、attempt 条件续租，以及完成/失败前的所有权校验。
+   - worker.py 增加独立会话的 LeaseHeartbeat；心跳失败或任务被重新领取时，旧 Worker 不再落成功/失败结果。
+   - settings.py 为轮询间隔、租约和最大重试次数增加安全范围。
+2. 内容并发：
+   - 编辑和审核请求新增必填 expected_version。
+   - PostgreSQL 使用行锁串行化竞争请求，版本冲突返回 409。
+   - 审核只接受 needs_review/blocked；rejected 必须先编辑形成新版本。
+   - Web 已随编辑/审核请求发送当前版本。
+3. 发布防重与对账：
+   - 调平台前先持久化 dispatch_token、开始时间、尝试次数和 publishing。
+   - 结果不确定时进入 reconciliation_required，自动重试被禁止。
+   - 新增 reviewer 人工对账 API、发布管理按钮和 publish.reconcile 审计。
+   - 确认已发布后同步把队列置为 succeeded；确认未发布后保持 failed，才允许人工重试。
+4. 构建兼容：
+   - web/tsconfig.json 显式允许 TypeScript 扩展导入，Next.js 与 vinext/Vite 两条生产构建链均可通过。
+
+### 21.3 本轮实际验证
+
+- 全量 Ruff：通过。
+- 后端 pytest：45 passed。
+- 前端 ESLint：通过。
+- 前端 vinext/Sites 构建与渲染测试：2 passed。
+- 前端 Next.js 生产构建与 TypeScript 检查：通过。
+- PostgreSQL 16/pgvector 临时 schema 并发验证：
+  - 两个未提交领取事务通过 FOR UPDATE SKIP LOCKED 获取不同 Job；
+  - 第二个旧版本内容请求在首事务持锁时等待，首事务提交 version=2 后返回 409；
+  - 取消请求在 Worker 持发布行锁时等待，Worker 提交 publishing 后取消返回 409；取消先完成时队列原子进入 succeeded/cancelled，后到 Worker 只返回 cancelled；
+  - 随机临时 schema 已删除，验证用 PostgreSQL 容器已停止，数据卷未删除。
+- 完整 Compose 重建未能在本轮重跑：Docker Hub 拉取 python:3.12-slim 时网络连接失败。该项应记录为外部环境阻塞，不能据此宣称 2026-08-08 已重新通过完整容器栈验收。
+
+### 21.4 当时尚未关闭的生产门禁（最新见 21.8）
+
+1. 当时发布只完成保守防重和人工对账；21.8 已部分关闭微信公众号查询式自动对账，平台幂等键、抖音确定对账、回调验签/去重和 Outbox 仍未实现。
+2. Worker 已具备优雅停机、数据库节点心跳和管理员队列健康接口；仍缺可观测指标、自动告警、编排层健康探针，以及在 CI 中持续运行的 PostgreSQL 双 Worker 长任务/进程终止故障注入。
+3. 浏览器令牌仍在 localStorage，尚无企业 SSO/MFA、会话撤销、安全 Cookie、CSP 和共享限流。
+4. 真实 DashScope/Wan、抖音、公众号测试租户与 RAG 评测集仍未签收。
+5. 一致性备份、对象级校验、PITR、KMS/TLS/WAF、CI/CD、SLO 和数据治理仍是企业成熟度主要差距。
+
+更完整的风险分级、证据和路线图见 docs/enterprise_readiness_review.md。
+
+### 21.5 第二轮复审补充
+
+- Worker 的发布异常路径、取消和人工对账现统一为 PublishJob → Job 锁顺序；最终租约耗尽使用两个事务，先释放 Job 锁，再更新领域状态，避免跨表反向锁死。
+- publish.dispatch 在 publishing 状态最终租约耗尽时进入 reconciliation_required，不能通过通用 Job 重试绕过人工核对。
+- 最后一名管理员检查在 PostgreSQL 中先锁定 Workspace 行，并发降级/移除同一工作区管理员时会串行执行。
+- 新增发布租约耗尽回归场景；Worker/发布定向测试 2 passed，管理员定向测试 2 passed。
+- 依赖组合已出现 Starlette TestClient/httpx 弃用告警；后续应通过依赖锁文件和 CI 升级矩阵治理，不能继续只依赖宽版本范围。
+- PostgreSQL 临时 schema 管理员竞态实测结果为一个提交、一个 409、最终保留一名管理员；临时 schema 已删除，验证容器已停止。
+- 本轮最终全量验证仍为 Ruff 通过、后端 45 passed、前端 ESLint/两条生产构建通过、vinext 渲染测试 2 passed。
+
+### 21.6 Worker 优雅停机与容器验证
+
+- Worker 已处理 SIGTERM/SIGINT：停止领取新任务，空闲轮询立即唤醒，在途任务完成后退出。
+- 领取事务提交前若检测到停机请求会回滚，避免留下已锁定但未执行的 Job。
+- Alembic 后会重新启用 Worker logger，启动/失败/停机日志不再静默丢失。
+- Compose Worker 默认 stop_grace_period=10m；API 使用 exec 启动 Uvicorn，长期服务默认 restart=unless-stopped，可由环境变量覆盖。
+- 定向队列测试 7 passed；全量后端 45 passed。
+- 真实 Docker SIGTERM 验证为 0.43 秒、ExitCode=0、signal=15；一次性容器已删除。
+- 已补数据库 Worker 业务心跳和管理员队列健康接口；仍缺编排层自动探针、滚动升级和宽限期耗尽/SIGKILL 的 CI 故障注入。
+
+### 21.7 Worker 业务心跳、队列健康与迁移增量
+
+- 新增 `worker_nodes` 表和 Alembic head `c9e7b4a2d610`；启动迁移可安全识别未版本化初始结构、上一 head `8b6c1f3a9d21` 和当前结构。
+- 长驻 Worker 使用独立数据库会话周期写入节点心跳，正常退出写 `stopped`；`--once` 一次性执行不注册为长驻节点。
+- 新增 `/api/v1/admin/worker-health`。Worker 容量是全局汇总，Job 队列按当前工作空间过滤；接口不暴露 hostname、process_id 或节点明细。
+- 健康问题代码包括 `no_active_workers`、`stale_worker_nodes`、`ready_jobs_without_active_workers` 和 `queue_ready_age_exceeded`。
+- 全量 Ruff 通过、后端 45 passed；相关定向测试 30 passed。
+- 随机临时 PostgreSQL 数据库从 base 升级到 head 后有 18 张 public 基础表，Worker ORM 心跳最终为 stopped，4 个索引齐全；临时库残留 0，验证容器恢复停止。
+- `verify_backup.ps1` 已更新为 18 张表和当前 head，但新迁移头的 PostgreSQL+MinIO 联合备份/隔离恢复仍需重跑，不能沿用上一 head 的灾备签收结论。
+- 后续优先补编排层自动健康探针、指标/告警、失联节点保留与清理策略，以及 PostgreSQL CI 故障注入。
+
+### 21.8 微信自动发布对账、人工接管与第四轮企业复审
+
+#### 保护边界
+
+- 本轮继续在既有未提交工作区上增量修改，没有 reset、checkout、暂存、提交或推送，也没有删除用户知识资料或其他既有改动。
+- 对账实现只在平台提供确定查询键时自动运行；微信公众号使用 `publish_id`，抖音缺少 `item_id` 的不确定响应不做标题/时间模糊匹配。
+
+#### 已实现
+
+1. `ChannelConnector` 增加显式对账能力契约；微信公众号调用官方 `POST /cgi-bin/freepublish/get`，只有响应包含 `article_id` 才返回 published，其余成功响应均保持 pending。
+2. `publish.dispatch` 得到 submitted 后，在同一领域事务中保存远程响应并创建幂等 `publish.reconcile:{publish_job_id}` Job；队列任务完成发生在下一次提交，缩小“平台已接收、本地未记录”的崩溃窗口。
+3. Worker 启动每轮领取前扫描微信公众号 submitted 任务并补建对账 Job；PostgreSQL 使用 `FOR UPDATE OF publish_jobs SKIP LOCKED`，多 Worker 不会围绕同一 PublishJob 重复补偿。
+4. `publish.reconcile` 支持 pending 退避、最终 article_id 收敛、最大尝试耗尽转人工，以及 queued/checked/auto/stale_ignored 审计。
+5. 自动查询改为两阶段事务：远程 HTTP 前释放 PublishJob 行锁，返回后重新加锁并比较状态与 `publish_id`。人工或其他事务已先提交时，迟到结果只审计、不覆盖。
+6. reviewer 可在 submitted 或 reconciliation_required 时人工接管；人工处置同时终结自动对账 Job、清除租约，并保持原 publish.dispatch Job 与 PublishJob 的一致状态。
+7. 新增 `CONTENTFLOW_PUBLISH_RECONCILIATION_INITIAL_DELAY_SECONDS` 和 `CONTENTFLOW_PUBLISH_RECONCILIATION_MAX_ATTEMPTS`，已接入 `.env.example` 与 API/Worker Compose 环境。
+8. 自动 published 会把仍 running/failed 的原 publish.dispatch Job 收敛为 succeeded；人工确认未发布后再次提交新 `publish_id` 时，旧终态对账 Job 会清空旧结果、租约和尝试次数，写 `publish.reconciliation_requeued` 后重新 queued。
+
+#### 验证证据
+
+- 严格 UTF-8 校验、全量 Ruff 和 Python 语法检查通过。
+- 连接器与 Worker 定向测试 `11 passed`，覆盖 submitted 持久化、pending→published、查询耗尽、原分发 running Job 收敛、人工接管、终态对账 Job 复活，以及迟到 published 结果不得覆盖人工 failed 决策。
+- 全量后端 `51 passed`；前端 Next.js 生产构建、TypeScript 检查通过。
+- 随机临时 PostgreSQL 数据库从空库迁移到 `c9e7b4a2d610` 后实测：锁住的 PublishJob 被扫描跳过；释放后只入队 1 个 Job；再次扫描新增 0；旧 succeeded Job 在新 `publish_id` 下原位 requeued 1 次；自动 published 将仍 running 的原分发 Job 收敛为 succeeded。
+- PostgreSQL 远程查询竞态使用 1 秒 `lock_timeout`：并发人工事务成功锁定并写入 failed，迟到 published 结果被 `publish.reconciliation_stale_ignored` 拒绝，最终仍为 failed。
+- 本机 5432 端口被其他进程占用，本轮容器临时映射 55432；随机验证数据库已精确核对并删除，PostgreSQL 容器已停止，数据卷保留。
+- 当前仍有 Starlette TestClient/httpx 弃用提示和 Windows `.pytest_cache` 权限警告；二者未造成断言失败，但应由依赖锁与干净 CI 工作目录治理。
+
+#### 当前仍最关键的 5 个不足
+
+1. 真实外部租户尚未签收；微信只有查询式闭环，抖音不确定响应仍需人工，跨平台回调验签/去重、平台幂等键和发布 Outbox 未完成。
+2. 企业身份与会话仍缺 OIDC/SAML、MFA、Refresh Token 旋转、会话撤销、HttpOnly Cookie、登录审计和跨实例共享限流。
+3. 软件交付仍缺正式 CI/CD、独立迁移 Job、环境晋级、灰度/回滚、依赖锁、CODEOWNERS、SBOM、镜像签名和覆盖率门禁。
+4. 可观测与韧性仍缺 Prometheus、OpenTelemetry、SLO/告警、Provider 熔断限流、编排层健康探针、容量模型和持续故障注入。
+5. 数据治理与灾备仍缺 RLS、PITR/WAL 归档、数据库与对象一致性快照、异地恢复、租户导出/删除、留存策略和不可篡改审计；当前 head 的联合备份恢复仍待重签。
+
+#### 接下来最值得继续做的 5 项改进
+
+1. 使用隔离的真实公众号和抖音租户完成授权、发布、查询/回调与指标签收；为抖音补可靠查询键或回调，设计回调验签、事件去重、渠道级幂等与 Outbox。
+2. 建立 PostgreSQL/pgvector/MinIO CI，固化本轮行锁实验，并加入 Alembic、双 Worker、SIGTERM/SIGKILL、数据库闪断、Playwright、依赖审计和覆盖率门禁。
+3. 以 OIDC 为首选改造身份体系，并落地短 Access Token、旋转 Refresh Token、HttpOnly/SameSite Cookie、jti 撤销、CSP 和 Redis 共享限流。
+4. 接入 Prometheus/OpenTelemetry，定义 API、队列、Worker、Provider、自动对账、外部发布成功率和成本 SLI/SLO，让编排层消费现有健康信号。
+5. 为核心租户表设计 RLS 与数据库租户上下文，启用 PITR 和异地备份，重跑当前 head 的 PostgreSQL+MinIO 联合恢复，并建立数据生命周期制度。
+
+#### 成熟度结论
+
+自动对账关闭了微信公众号 submitted 永久悬挂和慢查询持锁两处关键可靠性缺口，使发布链路进一步接近 L3；但单个平台的本地契约与 PostgreSQL 实测不能替代真实租户、企业 IAM、自动交付、SRE、灾备和治理的持续生产证据。当前仍应表述为“可部署产品基线，部分可靠性能力接近生产就绪”，不能表述为“成熟企业生产项目已签收”。
+
+## 21.9 PostgreSQL 自动门禁、依赖锁与第五轮企业复审
+
+### 保护边界
+
+- 本轮仍在已有未提交修改上增量工作，没有 reset、checkout、暂存、提交或推送，也没有删除用户资料或 PostgreSQL 数据卷。
+- 新集成测试只创建名称为 `contentflow_test_<uuid>` 的随机临时数据库；结束时先终止该库残留连接，再按已校验名称删除。验证后残留临时库为 0，PostgreSQL 容器已停止。
+
+### 已实现
+
+1. 新增 `tests/test_postgres_integration.py`。未提供 `CONTENTFLOW_TEST_POSTGRES_URL` 时安全跳过；提供后从空 PostgreSQL/pgvector 数据库迁移到 Alembic head，并验证 vector 扩展、关键表、`SKIP LOCKED`、幂等对账 Job 复活、原分发终态收敛和远程查询竞态。
+2. 新增 `uv.lock`，固定 74 个 Python 包及制品哈希；CI 使用 `uv sync --all-extras --locked`，不再由宽版本范围临时解析运行环境。
+3. 新增 `.github/workflows/ci.yml`：后端在固定 digest 的 pgvector 服务上运行 Ruff、真实 PostgreSQL 测试、75% 分支覆盖率和严格漏洞审计；前端执行 `npm ci`、lint、Sites/vinext 测试、Next.js 生产构建和高危依赖审计。
+4. GitHub Actions 均固定完整提交 SHA，CI pgvector 固定镜像 digest；新增 `.github/dependabot.yml` 每周检查 uv、npm、Actions 和 Docker 依赖。
+5. 严格审计发现并修复 Python 漏洞：`cryptography 48.0.1` 命中 PYSEC-2026-3552、3553、3554，现约束并锁定为 `50.0.0`。
+6. 前端审计发现 `image-size`、`nanoid` 和 `undici` 高危链路。Cloudflare Vite Plugin/Wrangler 升至 1.51.1/4.120.0，nanoid 固定 3.3.17；vinext 回退到不引入无修复 `image-size` 的 0.0.45，并通过双构建验证。
+
+### 本轮实际证据
+
+- GitHub Workflow 与 Dependabot JSON Schema：均通过。
+- `uv lock --check`、全仓 Ruff：通过。
+- 后端：`54 passed`；包含真实 PostgreSQL 集成测试 `3 passed`；分支覆盖率 `76.47%`，高于 75% 门槛。
+- Python：`pip-audit --strict` 为 `No known vulnerabilities found`。
+- 前端：从空依赖目录 `npm ci` 后 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js 生产构建全部通过；`npm audit --audit-level=moderate` 为 0 vulnerabilities。
+- PostgreSQL：随机测试数据库残留 0，容器停止，数据卷保留。
+- 仍有 Starlette TestClient/httpx 弃用警告和本机 `.pytest_cache` 权限警告；两者不影响断言，但前者需要后续兼容迁移。
+- 工作流尚未提交或推送，故没有远程 GitHub Actions 运行记录；当前证据是仓库配置、Schema 验证和本地等价流水线通过，不能写成“远程 CI 已签收”。
+
+### 当前仍最关键的 5 个不足
+
+1. 真实外部闭环仍未签收：公众号、抖音、DashScope/Wan 和对象存储需要隔离租户的成功、超时、限流、审核、授权过期与重复回调证据；跨平台 Outbox、平台幂等键、回调验签和事件去重仍缺。
+2. 企业身份与会话仍不足：OIDC/SAML、MFA、短 Access Token、旋转 Refresh Token、jti 撤销、HttpOnly/SameSite Cookie、设备/登录审计、CSP 和 Redis 共享限流均未落地。
+3. CI 只是仓库基线：尚无远程首次运行、受保护分支必需检查、独立迁移 Job、环境晋级、灰度/回滚；MinIO 联合验证、浏览器 E2E、双 Worker、SIGKILL、数据库闪断、负载和混沌测试未进入持续门禁。
+4. 可观测和 SRE 运营未闭环：缺 Prometheus/OpenTelemetry、SLO/告警、Provider 熔断与配额治理、编排层探针/扩缩、容量模型、On-call、事故复盘和变更治理。
+5. 数据治理、灾备和供应链证明不足：缺 RLS、PITR/WAL、当前 head 的 PostgreSQL+MinIO 联合恢复、异地备份、数据生命周期、不可篡改审计、SBOM、镜像扫描/签名和集中 KMS。
+
+### 接下来最值得继续做的 5 项改进
+
+1. 先扩展 CI：加入 MinIO 真实对象测试、Alembic 升降级、Playwright、双 Worker 长任务、SIGTERM/SIGKILL 和数据库闪断；随后在远程仓库启用 backend/frontend 必需检查与分支保护。
+2. 用隔离公众号、抖音和 DashScope/Wan 租户完成外部验收，补回调验签/去重、渠道级幂等与 Outbox，并把质量、费用和配额阈值变成门禁。
+3. 以 OIDC 为首选重构认证与浏览器会话，配套 MFA、短令牌、刷新旋转、撤销、HttpOnly Cookie、CSP、共享限流和登录审计。
+4. 接入 Prometheus/OpenTelemetry，覆盖 API、数据库、队列、Worker、Provider、对账、成本和质量 SLI；建立 SLO、告警、Runbook、容量与故障演练。
+5. 落地 RLS/PITR/异地备份和当前版本联合恢复，建立租户导出/删除/留存制度；为构建产物生成 SBOM、执行镜像扫描并签名。
+
+### 最新成熟度结论
+
+本轮把“依赖本机手工证明”的 PostgreSQL 关键场景变成了仓库内可重复测试，并补上依赖锁、覆盖率和双栈漏洞门禁；测试与供应链成熟度从 L1-L2 推进到 L2-L3。由于远程门禁、真实租户、企业 IAM、SRE、灾备和治理尚未形成持续生产证据，ContentFlow 仍应描述为“具备可重复质量门禁、可靠性持续加固的可部署产品基线”，不能描述为“成熟企业生产系统已签收”。
+
+## 21.10 MinIO 完整性门禁与第六轮企业复审
+
+### 已实现
+
+1. `S3ObjectStorage.put` 现在把完整 SHA-256 写入 S3 用户元数据；`read` 在关闭响应流的 `finally` 路径下校验读取上限、Content-Length 和内容哈希。
+2. 对升级前的对象保持兼容：没有 `sha256` 元数据时，使用 ContentFlow 既有对象键中的 16 位哈希前缀校验；既无元数据又不符合旧键规则的对象会被拒绝。
+3. 新增 `tests/test_minio_integration.py`。测试使用随机 bucket，覆盖真实上传/读取、Content-Type/哈希元数据、错误 bucket、读取/上传上限、错误覆盖篡改检测和旧对象读取；清理同时处理版本、删除标记和普通对象。
+4. 后端 CI 使用固定 digest 的无持久卷 MinIO，健康后执行集成测试，最后通过 `if: always()` 停止容器；测试凭据仅为隔离 CI 常量。
+
+### 实际验证
+
+- 真实 MinIO 定向集成测试：`2 passed`；随机 bucket 已清空并删除，无持久卷临时容器已自动移除。
+- PostgreSQL/pgvector 与 MinIO 同时启用的全量后端：`56 passed`，分支覆盖率 `77.60%`。
+- 对象存储 Ruff、全仓 Ruff、Workflow Schema：通过。
+- PostgreSQL 临时数据库残留 0；PostgreSQL 容器已停止；用户既有 MinIO 容器、bucket 和数据卷未启动、未写入、未删除。
+- 该校验能发现偶发损坏和未同步元数据的错误覆盖，但不是恶意篡改证明；具备 S3 管理权限的攻击者若同时重写数据与元数据仍需依靠 Object Lock、版本保留、KMS 和不可篡改清单防护。
+
+### 当前仍最关键的 5 个不足
+
+1. 真实公众号、抖音、DashScope/Wan 仍未完成隔离租户签收；跨平台 Outbox、幂等键、回调验签/去重和成本/质量阈值仍缺。
+2. 企业身份与会话仍缺 OIDC/SAML、MFA、刷新旋转与撤销、HttpOnly/SameSite Cookie、CSP、登录审计和 Redis 共享限流。
+3. CI 已覆盖 PostgreSQL/pgvector/MinIO，但尚无远程运行与分支保护；Alembic downgrade、浏览器 E2E、双 Worker、SIGKILL、数据库闪断、负载/混沌、独立迁移和灰度回滚未闭环。
+4. 可观测与 SRE 仍缺 Metrics/Trace/SLO/告警、Provider 熔断与配额、编排层探针/扩缩、容量模型、On-call 和事故/变更治理。
+5. 数据与供应链治理仍缺 RLS、PITR/WAL、当前 head 联合恢复、异地演练、Object Lock/版本保留、生命周期、不可篡改审计、SBOM 和镜像签名。
+
+### 接下来最值得继续做的 5 项改进
+
+1. 在 CI 补 Alembic 升降级、Playwright、双 Worker 长任务、SIGTERM/SIGKILL 和数据库闪断；远程首次通过后启用受保护分支必需检查。
+2. 重跑当前 head 的 PostgreSQL+MinIO 联合备份/隔离恢复，并加入对象逐项哈希、S3 版本保留/Object Lock、PITR 和异地恢复证据。
+3. 用隔离外部租户完成公众号、抖音与 DashScope/Wan 成功/失败矩阵，落地回调事件表、验签、去重、Outbox 与渠道级幂等。
+4. 以 OIDC 为首选完成企业认证与浏览器会话治理，配套 MFA、短令牌、刷新旋转、撤销、安全 Cookie、CSP、共享限流和登录审计。
+5. 接入 Prometheus/OpenTelemetry，建立 API、数据库、对象存储、队列、Worker、Provider、发布、成本与质量 SLO、告警、容量和故障演练。
+
+### 成熟度结论
+
+真实 MinIO 已从“只有适配器和历史整栈证据”升级为每次可重复执行的完整性门禁，测试与质量维度更接近 L3 前段。但对象校验不等于不可篡改存储，CI 配置也不等于远程发布治理；项目综合成熟度仍约为 L2，不能宣称成熟企业生产签收。
+
+## 21.11 当前 head 联合恢复、持久库迁移与第七轮企业复审
+
+### 保护边界
+
+- 继续在 `main` 分支既有未提交修改上增量工作；没有 reset、checkout、暂存、提交或推送。用户提供的账号资料文件未读取、未修改，已用根目录精确规则加入 `.gitignore`，防止误提交。
+- 迁移前回滚备份 `.contentflow\backups\20260808-235410` 与当前 head 备份 `.contentflow\backups\20260809-000908` 均保留；没有删除 PostgreSQL/MinIO 数据卷。
+- Compose 首次因本地必填加密环境变量缺失而在解析阶段停止；补入仅用于本次本地容器解析的临时值后重跑，没有把临时值写入仓库。
+
+### 已实现与修正
+
+1. `backup_stack.ps1` 默认拒绝 API/Worker 仍在写入、数据库不在预期 Alembic 版本或时间戳目录已存在的备份；检查通过后才创建目录和 `.incomplete` 标记。
+2. manifest v2 记录静默模式、运行服务、数据库 SHA-256/大小/迁移版本/表数，以及每个对象的相对路径、大小和完整 SHA-256。
+3. `verify_backup.ps1` 在恢复前验证清单与每个对象；数据库恢复到随机临时库，对象恢复到随机临时 bucket、重新下载并逐项验真，最后精确清理它创建的库、bucket 和目录。
+4. 当前发布版门槛默认为 `c9e7b4a2d610` 和 18 张表；历史回滚包必须用 `-ExpectedAlembicRevision` 与 `-MinimumPublicTableCount` 显式声明，避免把旧版本误当成当前发布版。
+5. 发现持久 `contentflow` 库仍停留在上一迁移头。先验证迁移前联合回滚包，再执行单向增量迁移；迁移前 17 张表的逐表行数全部保持不变，新建 `worker_nodes` 表和 4 个索引。
+
+### 实际恢复证据
+
+| 恢复点 | Alembic | public 表 | 对象 | 结果 |
+| --- | --- | ---: | ---: | --- |
+| 迁移前回滚包 | `8b6c1f3a9d21` | 17 | 39 | 数据库与对象隔离恢复、逐对象验真通过 |
+| 当前 head 恢复点 | `c9e7b4a2d610` | 18 | 39 / 165208 字节 | manifest v2、随机库和随机 bucket 恢复通过 |
+
+两次验证结束后，`contentflow_verify_%` 临时数据库、`contentflow-verify-*` bucket 和 `.contentflow\restore-verification` 子目录残留均为 0；PostgreSQL 与 MinIO 已停止，数据卷保留。`uv sync --locked --no-dev --extra s3` 的依赖阶段与非 editable 项目安装已在隔离临时环境通过，运行时导入通过；Docker Engine 管道缺失，因此镜像构建仍待 Docker Desktop 可用后签收。
+
+### 第七轮复审新增发现：当前最关键的 5 个不足
+
+1. 真实公众号、抖音、DashScope/Wan 与 RAG 质量/成本仍未形成可审计签收矩阵；抖音无可靠查询键时仍需人工，跨平台 Outbox、回调验签/去重和渠道级幂等未完成。
+2. 浏览器令牌仍在 localStorage，Access Token 默认 480 分钟；只有 HS256/exp，没有 Refresh Token 旋转、jti 撤销、OIDC/MFA、安全 Cookie、登录/设备审计和跨实例共享限流。
+3. 生产 Dockerfile 已改为使用固定 `uv==0.11.2` 与 `uv sync --locked`，但 Docker 引擎不可用使镜像构建尚未签收；Compose 服务/基础镜像仍多为可变 tag，API 容器启动时自行迁移，远程必需检查、独立迁移 Job、SBOM/签名和灰度回滚仍缺。
+4. 可观测和运行平台仍是 L1-L2：没有 Prometheus/OpenTelemetry、SLO/告警、Provider 熔断/配额、资源 requests/limits、自动扩缩、多区高可用和持续故障注入。
+5. 本地静默联合恢复已关闭“当前 head 无恢复证据”缺口，但仍没有 PITR/WAL、异地/不可变备份、Object Lock、RPO/RTO、RLS、租户导出/删除/留存和不可篡改审计。
+
+### 下一步最值得继续做的 5 项改进
+
+1. 先用受控公众号资料做无发布副作用的鉴权/scope 测试，再按明确测试内容验收草稿、发布和自动对账；抖音补 OAuth 刷新、确定对账或回调，所有平台落地 Outbox、事件验签与去重。
+2. 改造企业身份：OIDC 优先，短 Access Token、旋转 Refresh Token、jti 撤销、HttpOnly/SameSite Cookie、CSP、Redis 限流和登录审计。
+3. Docker Desktop 可用后完成锁定镜像构建验收；随后固定基础/服务镜像 digest，拆出独立迁移 Job，加入远程分支保护、Playwright、进程/数据库故障门禁、SBOM、扫描和签名。
+4. 接入 Prometheus/OpenTelemetry，定义 API、数据库、队列、Worker、对象存储、Provider、发布对账、成本与质量 SLI/SLO，补告警、容量、资源限制和演练。
+5. 建立 PostgreSQL PITR/WAL 与异地不可变备份，启用对象版本/Object Lock，制定并演练 RPO/RTO；随后推进 RLS、数据生命周期与审计归档。
+
+### 成熟度结论
+
+当前 head 的数据库与对象联合恢复已经从“待办”变成可重复、逐项验真的本地证据，灾备维度仍属于 L2：它证明能从静默恢复点恢复，不证明能恢复任意时间点、跨故障域或抵抗管理员级篡改。综合成熟度仍约 L2，测试、队列可靠性和本地恢复局部达到 L2-L3；在真实外部签收、企业 IAM、可复现生产制品、SRE、PITR/异地治理完成前，不能表述为成熟企业生产系统已签收。
+
+
+## 21.12 数据库会话安全改造与第八轮企业复审
+
+### 本轮已经落地
+
+1. 新增 Alembic 迁移 `f4c2d8e7a190` 与 `auth_sessions` 表。会话绑定用户和当前工作区，只保存 Refresh Token 的 HMAC 摘要，并记录过期、最后使用、撤销原因以及脱敏后的 User-Agent/IP 指纹。
+2. Access Token 默认从 480 分钟降为 15 分钟，加入 `sid/jti/iss/aud/iat/nbf/exp`，解码时固定 HS256/typ 并校验必要声明、签发方、受众和时间边界。
+3. 浏览器改为 HttpOnly Cookie 会话：Access/Refresh Cookie 使用 SameSite=Lax，生产环境自动 Secure；Cookie 写操作校验精确 Origin。前端不再读写 Bearer Token，并主动删除旧 `contentflow_token`。
+4. Refresh Token 默认 14 天且每次刷新轮换；任意已轮换历史令牌再次出现都会记录 `auth.refresh_reuse_detected`、撤销整个会话并拒绝最新令牌；令牌历史独立保存在 `auth_refresh_token_history`。支持当前会话退出和全部会话退出。
+5. CLI/自动化调用仍可使用登录响应中的短期 Bearer Token；服务端每次请求回查数据库会话、用户状态、工作区和成员关系，角色变更或成员移除立即生效。
+6. 登录、注册、刷新、退出、创建/切换工作区已统一到新会话模型。即使请求同时携带格式合法但无效的 Refresh Cookie 与有效 Access/Bearer Token，退出仍会撤销被有效令牌证明的会话。
+7. 部署参数新增 `CONTENTFLOW_ACCESS_TOKEN_MINUTES`、`CONTENTFLOW_REFRESH_TOKEN_DAYS` 与可选 `CONTENTFLOW_AUTH_COOKIE_DOMAIN`；默认建议 host-only Cookie。
+
+### 本轮验证证据
+
+- 认证、安全、迁移专项：27 passed。
+- 全量后端：59 passed、5 skipped，分支覆盖率 76.80%（门槛 75%）；跳过项仍是需要运行中 PostgreSQL/MinIO 的集成测试。
+- Ruff 全量通过。
+- 前端 ESLint 通过。
+- Next.js 16.2.12 生产构建和 TypeScript 检查通过。
+- SQLite 已覆盖空库迁移、未版本化旧结构、未版本化 `c9e7b4a2d610` 接管升级、Cookie 属性、可信 Origin、刷新轮换/复用、单会话/全会话撤销和 Bearer 兼容。
+- 当前仍有 Starlette TestClient/httpx 弃用提示与 Windows `.pytest_cache` 权限提示；均未造成断言失败。
+
+### 环境与敏感数据边界
+
+- 根目录本地平台凭据文件已被精确加入 `.gitignore`，没有读取、打印、复制或加入测试夹具。
+- 微信公众号真实联调将在连接器代码和隔离环境准备完成后才读取所需字段；任何请求/响应日志必须继续脱敏。
+- 抖音真实发布需要经授权的 `access_token/open_id`、所需 scope 和许可测试素材；长期接入还需 Client Key/Secret、Refresh Token 与回调配置。
+- 小红书当前保持审核后 ZIP 导出，不接受个人账号密码；只有获得官方合作方/开放平台资质后才设计自动发布。
+- 用户要求：若真实联调缺少字段或外部权限，停止无效尝试并一次性列出所需材料，不反复消耗执行次数。
+
+### 当前环境尚未完成的迁移
+
+仓库 head 已是 `f4c2d8e7a190`，但持久 PostgreSQL/MinIO Compose 栈因 Docker Desktop/Linux Engine 当前不可用而保持停止状态，数据库仍在上一 head `c9e7b4a2d610`。备份和恢复脚本默认门槛已提升为新 head 与至少 20 张表，因此在迁移前会 fail-fast，不会把旧库误签成当前发布版。待 Docker 引擎可用后必须按“现有 c9 回滚点 -> 迁移 f4 -> 新备份 -> 随机库和随机 bucket 恢复复验”的顺序签收。
+
+### 第八轮复审：当前最关键的 5 个不足
+
+1. **真实外部业务仍未签收**：微信公众号、抖音、DashScope/Wan 缺受控租户的成功、超时、限流、授权过期、审核拒绝和成本/质量矩阵。
+2. **企业身份仍未完成**：本地数据库会话已关闭 localStorage 长令牌、刷新和撤销缺口，但仍无 OIDC/SAML、MFA、企业 IdP 生命周期、设备会话管理、异常登录检测、nonce/strict-dynamic CSP 与非对称签名密钥轮换。
+3. **跨平台发布一致性仍不完整**：缺统一 Outbox、平台幂等键、回调验签/去重和抖音无查询键场景的自动收敛，不能承诺严格端到端 exactly-once。
+4. **SRE 与规模化证据不足**：缺 Prometheus/OpenTelemetry、Trace、SLO/告警、容量模型、浏览器 E2E、多副本压力、数据库闪断和滚动升级持续演练。
+5. **数据治理与发布治理不足**：新 head 联合恢复尚未签收，且仍缺 RLS、PITR/WAL、异地不可变备份、租户导出/删除/留存、不可篡改审计、SBOM、镜像扫描/签名和远程受保护分支证据。
+
+### 下一步最值得继续做的 5 项改进
+
+1. 在不输出凭据的隔离租户中完成微信公众号连接、草稿、可选发布和查询对账矩阵；只有字段或权限确实不足时一次性向用户索取。
+2. 引入 OIDC 优先的企业身份层，配套 MFA、账号生命周期、设备/会话管理、异常登录告警、签名密钥轮换、nonce/strict-dynamic CSP 与 Redis 共享限流。
+3. 建设事务 Outbox、渠道级幂等键、回调验签与事件去重，并为抖音等平台设计确定查询键或强制人工收敛协议。
+4. 加入 Playwright 浏览器 E2E、OpenTelemetry/Prometheus、SLO 告警、多副本容量与故障注入门禁。
+5. Docker 引擎恢复后先完成 `f4c2d8e7a190` 的持久库迁移和 20 表联合恢复，再推进 RLS、PITR、异地/Object Lock、数据生命周期和制品签名。
+
+### 成熟度结论
+
+本轮把浏览器身份从“长效令牌保存在 localStorage、不可撤销”提升为“短令牌、数据库会话、旋转刷新、复用检测、Cookie 隔离和立即撤销”，身份与应用安全局部达到 L2-L3 基线。项目仍不能称为成熟企业生产系统：真实租户、企业 IdP、跨平台一致性、SRE、当前版本灾备和组织治理尚未共同签收。综合成熟度仍约 L2，但已进一步脱离玩具 Demo。
+
+
+## 21.13 Web CSP、生产 API 信任边界与第九轮安全复审
+
+### 本轮已经落地
+
+1. 新增 `web/security.ts` 作为 Next.js 和 Sites/vinext 的统一安全头来源，避免两个部署路径分别维护后产生漂移。
+2. Web 响应新增 CSP：限制默认源、Base URI、表单目标、框架祖先、对象、脚本、样式、图片、媒体、Worker 和网络连接；明确 `frame-ancestors 'none'` 与 `object-src 'none'`。
+3. 生产构建的 `connect-src` 只允许自身和 `NEXT_PUBLIC_CONTENTFLOW_API_BASE` 的精确 Origin；登录页不再允许运行时改写 API 地址，并清理旧的 `contentflow_api_base`。
+4. 本地开发仍允许修改 API Base，但只接受完整 HTTP(S) URL，拒绝内嵌账号/密码、查询参数和片段，并只放行 localhost/127.0.0.1 与 HTTPS 开发连接。
+5. 仅当构建时 API Base 为 HTTPS 时启用 HSTS 和 `upgrade-insecure-requests`；默认本地 HTTP Compose 不会被错误升级到不存在的 HTTPS 端点。
+6. Sites Worker 对普通 HTML/RSC 与图片优化响应统一附加安全头；Next 路由清单使用相同常量。
+7. CI 的前端任务固定使用非敏感 HTTPS 示例 API，持续覆盖 HTTPS 生产分支。
+
+### 验证证据
+
+- 前端 ESLint 通过。
+- 默认 HTTP 配置下，Sites/vinext 构建与 2 项 Node 渲染/响应头测试通过；断言 CSP 存在且本地不发送 HSTS/强制升级。
+- HTTPS 示例配置下，Next.js 生产构建通过；构建路由清单实测包含精确 API Origin、HSTS 和 `upgrade-insecure-requests`，并拒绝 `unsafe-eval`。
+- 生产 API Base 固定、旧浏览器 Token 禁写、CSP/HSTS 源码约束均进入前端测试。
+- 没有读取平台凭据，也没有重试 Docker 或外部平台调用。
+
+### 仍需诚实保留的边界
+
+当前静态 Next/App Router 输出仍需要 `script-src 'unsafe-inline'` 承载框架内联脚本，因此这是可执行的基础 CSP，不是 nonce/hash + `strict-dynamic` 的最高强度 CSP。要进一步关闭此边界，需要改为可生成 nonce 的动态请求路径或验证稳定脚本哈希，并配套真实浏览器 E2E。数据库共享认证限流已完成；WAF/全业务网关限流、OIDC/MFA 和异常登录检测仍未完成。
+
+
+## 21.14 PostgreSQL 共享认证限流与第十轮安全复审
+
+### 本轮已经落地
+
+1. 新增 Alembic 迁移 `a73f9c2e4b61` 和 `auth_rate_limits`，仓库当前为 21 张基础表。
+2. 登录同时按账号和客户端 IP 限流；注册按客户端 IP 限流；刷新同时按会话族和客户端 IP 限流。生产环境禁止关闭该能力。
+3. 限流键使用带作用域 HMAC，数据库不保存邮箱、IP、Session ID 明文；窗口过期记录在认证流量中自动清理。
+4. 同一 PostgreSQL 限流键先获取事务级 advisory lock，再读取/创建行并计数；多个 API 副本不会因“空行并发插入”同时放行。
+5. 达到门槛返回统一 JSON 错误、HTTP 429 和 `Retry-After`；统一异常处理器现在保留标准异常响应头。
+6. 成功登录只清除账号维度计数，不清除 IP 维度计数，避免攻击者用自己的正确账号重置来源 IP 配额。
+7. 默认完全忽略 `X-Forwarded-For`；只有显式设置 `CONTENTFLOW_TRUSTED_PROXY_HOPS` 后才从右侧可信代理链提取客户端地址，避免伪造请求头绕过。
+8. 新增生产可调参数：窗口、阻断时间、登录账号/IP、注册 IP、刷新会话/IP 门槛；Compose 和环境示例已同步。
+9. 未版本化数据库接管可区分 c9、f4 与 a73，并继续拒绝同名但缺列的半成品增量表。
+
+### 验证证据
+
+- 认证/安全/迁移专项：34 passed。
+- 最终全量后端：68 passed、6 skipped，分支覆盖率 77.49%（门槛 75%）。
+- 本地跳过项为 4 项 PostgreSQL 和 2 项 MinIO 集成测试；其中新增 PostgreSQL 并发限流门禁将在 CI 验证同一键严格“一次 200、一次 429”。
+- Ruff 全仓通过；Alembic 唯一 head 为 `a73f9c2e4b61`。
+- Compose 配置解析和 PowerShell 备份脚本解析通过。
+- 前端 CSP/Sites/Next 的上一轮门禁继续通过，未改变依赖锁。
+
+### 当前环境与剩余边界
+
+持久 Compose 数据库仍在 `c9e7b4a2d610`，没有在 Docker 引擎不可用时强行迁移。恢复后应按 `c9 -> f4 -> a73` 升级，随后生成 21 表联合备份并在随机 PostgreSQL 数据库和随机 bucket 中复验。
+
+数据库共享限流关闭了多副本认证端点的基础暴力尝试缺口，但不等于 WAF、DDoS 防护或全业务 API 配额平台。仍需边缘网关的全局/IP/租户策略、异常登录告警、OIDC/MFA、设备管理与真实压力证据。
+
+## 21.15 平台渠道入口/运行时契约一致性复审
+
+复审真实账号准备流程时发现：抖音连接器运行时要求 `access_token + open_id`，但渠道创建入口过去只检查 `access_token`；公众号入口也只检查键名，空白值可以被保存。这会产生“渠道保存成功、异步连接测试才失败”的延迟错误。
+
+本轮已将入口校验与连接器契约统一：抖音必须提供非空 `access_token` 和 `open_id`，其中 `open_id` 可位于加密凭据或渠道配置；公众号必须提供非空 App ID/Secret；小红书仍为无账号密码的审核后导出模式。新增 API 回归覆盖缺少 Open ID、配置提供 Open ID 和空白公众号 Secret，定向 6 passed，全量 68 passed、6 skipped，覆盖率 77.49%。
+
+真实联调仍必须等待目标平台授权和测试素材；入口校验只能证明字段完整，不能证明 scope、账号审核状态、内容权限或平台稳定性。
+
+## 21.16 微信公众号真实草稿签收与 AI 生成追溯
+
+### 真实公众号受控验收
+
+用户明确授权创建测试永久素材和草稿，但未授权公开发布。2026-08-09 在白名单生效后完成以下真实调用：
+
+1. Access Token 获取成功，素材计数与草稿计数接口可用；调用前图片素材 15、草稿 5。
+2. 使用内存生成的测试 PNG 和标记 `CF-20260809-1443-9209E2` 调用实际 `WechatConnector.publish`，强制 `auto_publish=false`。
+3. 连接器返回 `draft_created`；调用后图片素材 16、草稿 6，分别只增加 1。
+4. 请求跟踪确认 `publish_submit_called=false`，未调用 `/cgi-bin/freepublish/submit`，因此没有任何公开发布。
+5. 永久图片素材与草稿仍保留在公众号后台。清理时必须先在平台后台核对测试标记，不允许凭数量或时间范围批量删除。
+6. 全程没有把 App ID、Secret、Access Token、完整平台响应或草稿标识写入仓库。脱敏证据集中记录在 [外部服务真实验收记录](external_acceptance.md)。
+
+该结果只签收“真实鉴权 + 永久素材 + 不发布草稿”。公开发布、`publish_id/article_id` 自动对账、限流、令牌过期、权限撤销、审核拒绝和不确定结果仍未签收。
+
+### AI 生成追溯能力
+
+1. 新增稳定 Prompt 集版本与逐模板 SHA-256 清单；每次工作流记录实际 Provider、模型和 Embedding 身份。
+2. 策划、分平台生成与自动修复均记录调用序号、阶段、平台、开始时间、时延、响应模型、输入输出摘要与字节数。
+3. OpenAI 兼容与百炼响应中的 Token 用量按 Provider 原值保存；Mock 或 Provider 未上报时明确标记 `not_reported`，不估算账单。
+4. 追溯数据保存在 `WorkflowRun.result_json.ai_provenance`；成功审计写入 Provider/模型/调用次数/Token 来源，终态失败也保留已完成调用证据。
+5. 追溯记录不复制原始 Prompt、知识文本或模型正文；异常只记录脱敏错误类型。
+6. 活动页新增按需展开的“生成记录”，最多读取最近 5 次运行，普通查看者也可核对模型、Prompt 版本、调用次数、Token 来源和追踪摘要。
+7. API 的运行列表增加 `1..100` 条受限分页参数，避免活动历史无限读取。
+
+### 本轮阶段验证
+
+- AI 追溯、Worker 成功/失败留证和 API 分页定向回归：18 passed。
+- 前端 lint、Next.js 生产构建、Sites/vinext 构建与 2 项服务端渲染/源码契约测试通过。
+- 全量后端：73 passed、6 skipped，分支覆盖率 78.42%（门槛 75%）；跳过项仍是需要运行中 PostgreSQL/MinIO 的集成测试。
+- Ruff 全量、Alembic 唯一 head `a73f9c2e4b61`、`uv.lock` 一致性、Compose 示例环境解析、所有 PowerShell 脚本解析、严格 UTF-8 和 `git diff --check` 通过。
+- 前端 `npm audit` 为 0 个已知漏洞；阶段提交只包含项目代码、测试、迁移、运维与文档，继续排除本地平台账密和未确认知识资料；实际提交与推送结果以 Git 历史为准。

@@ -1,3 +1,10 @@
+from __future__ import annotations
+
+import hashlib
+
+
+PROMPT_SET_VERSION = "2026-08-09.1"
+
 PROMPTS = {
     "plan": """
 你是内容营销策划 Agent。基于营销 brief 和检索到的知识，只输出 JSON。
@@ -21,4 +28,9 @@ passed（布尔值）、risk_level（low/medium/high）、issues（字符串数�
 fact_checks（字符串数组）、suggestion（字符串）。
 模型审核只作为人工审核参考，不能自行触发外部发布。
 """.strip(),
+}
+
+PROMPT_HASHES = {
+    stage: hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    for stage, prompt in PROMPTS.items()
 }

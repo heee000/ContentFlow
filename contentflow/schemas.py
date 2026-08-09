@@ -16,7 +16,7 @@ class ORMModel(BaseModel):
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
     display_name: str = Field(min_length=1, max_length=80)
     workspace_name: str = Field(min_length=1, max_length=120)
 
@@ -28,7 +28,7 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    access_token: str
+    access_token: str | None = None
     token_type: str = "bearer"
     expires_in: int
     workspace_id: str
@@ -182,6 +182,7 @@ class ContentResponse(ORMModel):
 
 
 class ContentUpdate(BaseModel):
+    expected_version: int = Field(ge=1)
     title: str | None = Field(default=None, max_length=500)
     body: str | None = Field(default=None, max_length=20_000)
     hashtags: list[str] | None = None
@@ -204,6 +205,7 @@ class ContentRevisionResponse(ORMModel):
 
 
 class ReviewDecision(BaseModel):
+    expected_version: int = Field(ge=1)
     decision: Literal["approve", "reject"]
     reason: str = Field(default="", max_length=2000)
 
@@ -261,6 +263,13 @@ class PublishScheduleRequest(BaseModel):
     scheduled_at: datetime
 
 
+class PublishReconcileRequest(BaseModel):
+    decision: Literal["confirmed_published", "confirmed_not_published"]
+    reason: str = Field(min_length=1, max_length=2000)
+    external_id: str | None = Field(default=None, max_length=255)
+    external_url: str | None = Field(default=None, max_length=2000)
+
+
 class PublishJobResponse(ORMModel):
     id: str
     content_item_id: str
@@ -298,3 +307,24 @@ class JobResponse(ORMModel):
     result_json: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+
+
+class WorkerQueueHealthResponse(BaseModel):
+    queued: int
+    retry: int
+    running: int
+    failed: int
+    ready: int
+    oldest_ready_age_seconds: float | None
+
+
+class WorkerHealthResponse(BaseModel):
+    status: Literal["healthy", "degraded", "unavailable"]
+    checked_at: datetime
+    active_workers: int
+    stale_workers: int
+    stopped_workers: int
+    issues: list[str]
+    thresholds: dict[str, int]
+    queue: WorkerQueueHealthResponse

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,10 +19,16 @@ from .campaigns import get_campaign_or_404
 router = APIRouter(tags=["workflow-runs"])
 Db = Annotated[Session, Depends(get_db)]
 Editor = Annotated[Principal, Depends(require_role("editor"))]
+RunLimit = Annotated[int, Query(ge=1, le=100)]
 
 
 @router.get("/campaigns/{campaign_id}/runs", response_model=list[WorkflowRunResponse])
-def list_runs(campaign_id: str, principal: CurrentPrincipal, session: Db):
+def list_runs(
+    campaign_id: str,
+    principal: CurrentPrincipal,
+    session: Db,
+    limit: RunLimit = 20,
+):
     get_campaign_or_404(session, principal.workspace_id, campaign_id)
     return list(
         session.scalars(
@@ -32,6 +38,7 @@ def list_runs(campaign_id: str, principal: CurrentPrincipal, session: Db):
                 WorkflowRun.campaign_id == campaign_id,
             )
             .order_by(WorkflowRun.created_at.desc())
+            .limit(limit)
         )
     )
 

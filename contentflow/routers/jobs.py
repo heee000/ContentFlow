@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..dependencies import CurrentPrincipal, Principal, require_role
-from ..entities import Job
+from ..entities import Job, PublishJob
 from ..schemas import JobResponse
 
 
@@ -37,6 +37,20 @@ def retry_job(job_id: str, principal: Editor, session: Db):
         raise HTTPException(status_code=404, detail="任务不存在")
     if job.status != "failed":
         raise HTTPException(status_code=409, detail="只有失败任务可以重试")
+    if job.job_type == "publish.dispatch":
+        publish_job_id = dict(job.payload_json or {}).get("publish_job_id")
+        publish_job = session.scalar(
+            select(PublishJob).where(
+                PublishJob.id == publish_job_id,
+                PublishJob.workspace_id == principal.workspace_id,
+            )
+        )
+        if publish_job and publish_job.status == "reconciliation_required":
+            raise HTTPException(
+                status_code=409,
+                detail="发布结果不确定，请先在发布管理中完成人工对账",
+            )
+
     job.status = "retry"
     job.attempts = 0
     job.last_error = None

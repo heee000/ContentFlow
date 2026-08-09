@@ -18,16 +18,42 @@ from ..dependencies import (
     Principal,
     require_role,
 )
-from ..entities import ChannelConnection, ContentItem, PublishJob
+from ..entities import ChannelConnection, ContentItem, Job, PublishJob
 from ..job_queue import enqueue_job
 from ..knowledge_service import local_path_from_uri
 from ..object_storage import build_object_storage
-from ..schemas import PublishJobResponse, PublishScheduleRequest
+from ..schemas import (
+    PublishJobResponse,
+    PublishReconcileRequest,
+    PublishScheduleRequest,
+)
 
 
 router = APIRouter(prefix="/publishing", tags=["publishing"])
 Db = Annotated[Session, Depends(get_db)]
 Reviewer = Annotated[Principal, Depends(require_role("reviewer"))]
+
+
+def get_publish_queue_job_for_update(
+    session: Session, publish_job_id: str
+) -> Job | None:
+    query = select(Job).where(
+        Job.idempotency_key == f"publish.dispatch:{publish_job_id}"
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    return session.scalar(query)
+
+
+def get_reconciliation_queue_job_for_update(
+    session: Session, publish_job_id: str
+) -> Job | None:
+    query = select(Job).where(
+        Job.idempotency_key == f"publish.reconcile:{publish_job_id}"
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    return session.scalar(query)
 
 
 @router.get("/jobs", response_model=list[PublishJobResponse])
@@ -123,17 +149,29 @@ def cancel_publish(
     principal: Reviewer,
     session: Db,
 ):
-    job = session.scalar(
-        select(PublishJob).where(
-            PublishJob.id == publish_job_id,
-            PublishJob.workspace_id == principal.workspace_id,
-        )
+    query = select(PublishJob).where(
+        PublishJob.id == publish_job_id,
+        PublishJob.workspace_id == principal.workspace_id,
     )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    job = session.scalar(query)
     if job is None:
         raise HTTPException(status_code=404, detail="发布任务不存在")
     if job.status not in {"scheduled", "queued"}:
         raise HTTPException(status_code=409, detail="当前状态不能取消")
     job.status = "cancelled"
+    queue_job = get_publish_queue_job_for_update(session, job.id)
+    if queue_job is not None:
+        queue_job.status = "succeeded"
+        queue_job.result_json = {
+            "publish_job_id": job.id,
+            "status": "cancelled",
+        }
+        queue_job.last_error = None
+        queue_job.locked_by = None
+        queue_job.locked_at = None
+
     record_audit(
         session,
         action="publish.cancel",
@@ -141,6 +179,110 @@ def cancel_publish(
         entity_id=job.id,
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
+        metadata={"queue_job_id": queue_job.id if queue_job else None},
+    )
+    return job
+
+
+@router.post(
+    "/jobs/{publish_job_id}/reconcile",
+    response_model=PublishJobResponse,
+)
+def reconcile_publish(
+    publish_job_id: str,
+    payload: PublishReconcileRequest,
+    principal: Reviewer,
+    session: Db,
+):
+    query = select(PublishJob).where(
+        PublishJob.id == publish_job_id,
+        PublishJob.workspace_id == principal.workspace_id,
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    job = session.scalar(query)
+    if job is None:
+        raise HTTPException(status_code=404, detail="发布任务不存在")
+    if job.status not in {"reconciliation_required", "submitted"}:
+        raise HTTPException(status_code=409, detail="当前发布任务不需要人工对账")
+
+    dispatch_queue_job = get_publish_queue_job_for_update(session, job.id)
+    reconciliation_queue_job = get_reconciliation_queue_job_for_update(
+        session,
+        job.id,
+    )
+
+    reconciled_at = datetime.now(timezone.utc)
+    response_json = dict(job.response_json or {})
+    response_json["manual_reconciliation"] = {
+        "decision": payload.decision,
+        "reason": payload.reason,
+        "actor_user_id": principal.user_id,
+        "reconciled_at": reconciled_at.isoformat(),
+        "dispatch_queue_job_id": (
+            dispatch_queue_job.id if dispatch_queue_job else None
+        ),
+        "reconciliation_queue_job_id": (
+            reconciliation_queue_job.id if reconciliation_queue_job else None
+        ),
+    }
+    job.response_json = response_json
+    if payload.decision == "confirmed_published":
+        job.status = "published"
+        job.external_id = payload.external_id or job.external_id
+        job.external_url = payload.external_url or job.external_url
+        job.published_at = reconciled_at
+        job.error = None
+        if dispatch_queue_job is not None:
+            dispatch_queue_job.status = "succeeded"
+            dispatch_queue_job.result_json = {
+                "publish_job_id": job.id,
+                "status": "published",
+                "reconciled": True,
+            }
+            dispatch_queue_job.last_error = None
+            dispatch_queue_job.locked_by = None
+            dispatch_queue_job.locked_at = None
+    else:
+        job.status = "failed"
+        job.external_id = None
+        job.external_url = None
+        job.published_at = None
+        job.error = f"人工确认平台未发布：{payload.reason}"[:8000]
+        if dispatch_queue_job is not None:
+            dispatch_queue_job.status = "failed"
+            dispatch_queue_job.last_error = job.error
+            dispatch_queue_job.locked_by = None
+            dispatch_queue_job.locked_at = None
+    if reconciliation_queue_job is not None:
+        reconciliation_queue_job.status = "succeeded"
+        reconciliation_queue_job.result_json = {
+            "publish_job_id": job.id,
+            "status": job.status,
+            "decision": payload.decision,
+            "reconciled": "manual",
+        }
+        reconciliation_queue_job.last_error = None
+        reconciliation_queue_job.locked_by = None
+        reconciliation_queue_job.locked_at = None
+
+    record_audit(
+        session,
+        action="publish.reconcile",
+        entity_type="publish_job",
+        entity_id=job.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "decision": payload.decision,
+            "reason": payload.reason,
+            "queue_job_id": (
+                dispatch_queue_job.id if dispatch_queue_job else None
+            ),
+            "reconciliation_queue_job_id": (
+                reconciliation_queue_job.id if reconciliation_queue_job else None
+            ),
+        },
     )
     return job
 

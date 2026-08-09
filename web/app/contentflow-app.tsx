@@ -13,9 +13,8 @@ import {
   api,
   download,
   getApiBase,
-  getToken,
+  runtimeApiBaseConfigurable,
   setApiBase,
-  setToken,
 } from "@/lib/contentflow-api";
 
 type View =
@@ -53,6 +52,32 @@ type Campaign = {
     product_facts?: string[];
   };
   updated_at: string;
+};
+
+type AIProvenance = {
+  provider: string;
+  model: string;
+  prompt_set_version: string;
+  invocation_count: number;
+  successful_invocations: number;
+  failed_invocations: number;
+  token_usage: {
+    source: "provider_reported" | "partial" | "not_reported";
+    total_tokens: number | null;
+  };
+};
+
+type WorkflowRun = {
+  id: string;
+  campaign_id: string;
+  status: string;
+  current_stage: string;
+  provider: string;
+  trace_id: string;
+  result_json: { ai_provenance?: AIProvenance };
+  error: string | null;
+  completed_at: string | null;
+  created_at: string;
 };
 
 type Content = {
@@ -266,6 +291,7 @@ const STATUS: Record<string, string> = {
   generating: "生成中",
   indexed: "已索引",
   indexing: "索引中",
+  invalid: "连接异常",
   needs_review: "待审核",
   pending: "等待中",
   pending_test: "待测试",
@@ -429,15 +455,13 @@ function AuthScreen({
               display_name: String(form.get("display_name") || ""),
               workspace_name: String(form.get("workspace_name") || ""),
             };
-      const token = await api<{ access_token: string }>(
+      await api<unknown>(
         mode === "login" ? "/auth/login" : "/auth/register",
         { method: "POST", body: payload },
       );
-      setToken(token.access_token);
       const current = await api<Session>("/auth/session");
       onAuthenticated(current);
     } catch (caught) {
-      setToken(null);
       setError(messageOf(caught));
     } finally {
       setBusy(false);
@@ -508,9 +532,9 @@ function AuthScreen({
               <input
                 name="password"
                 type="password"
-                minLength={8}
+                minLength={mode === "register" ? 12 : 8}
                 required
-                placeholder="至少 8 位"
+                placeholder={mode === "register" ? "至少 12 位" : "输入密码"}
               />
             </label>
             <label>
@@ -519,8 +543,13 @@ function AuthScreen({
                 value={apiBase}
                 onChange={(event) => setBase(event.target.value)}
                 required
+                disabled={!runtimeApiBaseConfigurable}
               />
-              <small>本地默认连接 http://localhost:8000/api/v1</small>
+              <small>
+                {runtimeApiBaseConfigurable
+                  ? "本地默认连接 http://localhost:8000/api/v1"
+                  : "生产环境 API 地址由构建配置固定"}
+              </small>
             </label>
             {error ? <p className="form-error" role="alert">{error}</p> : null}
             <Button busy={busy} type="submit">
@@ -596,7 +625,6 @@ export function ContentFlowApp() {
       setError("");
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {
-        setToken(null);
         setSession(null);
       } else {
         setError(messageOf(caught));
@@ -608,15 +636,11 @@ export function ContentFlowApp() {
 
   useEffect(() => {
     async function restore() {
-      if (!getToken()) {
-        setLoading(false);
-        return;
-      }
       try {
         const current = await api<Session>("/auth/session");
         setSession(current);
       } catch {
-        setToken(null);
+        setSession(null);
       } finally {
         setLoading(false);
       }
@@ -643,11 +667,10 @@ export function ContentFlowApp() {
     if (workspaceId === session?.workspace.id) return;
     setRefreshing(true);
     try {
-      const token = await api<{ access_token: string }>(
+      await api<unknown>(
         `/auth/switch/${workspaceId}`,
         { method: "POST" },
       );
-      setToken(token.access_token);
       const current = await api<Session>("/auth/session");
       setData(EMPTY_DATA);
       setView("dashboard");
@@ -661,16 +684,25 @@ export function ContentFlowApp() {
   }
 
   async function createAndActivateWorkspace(name: string) {
-    const token = await api<{ access_token: string }>("/auth/workspaces", {
+    await api<unknown>("/auth/workspaces", {
       method: "POST",
       body: { name },
     });
-    setToken(token.access_token);
     const current = await api<Session>("/auth/session");
     setData(EMPTY_DATA);
     setView("dashboard");
     setSession(current);
     flash(`工作区 ${current.workspace.name} 已创建`);
+  }
+
+  async function signOut() {
+    try {
+      await api<void>("/auth/logout", { method: "POST" });
+    } finally {
+      setSession(null);
+      setData(EMPTY_DATA);
+      setView("dashboard");
+    }
   }
 
   if (loading) {
@@ -723,10 +755,7 @@ export function ContentFlowApp() {
           <button
             className="icon-button inverse"
             aria-label="退出登录"
-            onClick={() => {
-              setToken(null);
-              setSession(null);
-            }}
+            onClick={() => void signOut()}
           >
             <Icon name="logout" />
           </button>
@@ -1001,6 +1030,38 @@ function DashboardView({
   );
 }
 
+function RunEvidence({ run }: { run: WorkflowRun }) {
+  const provenance = run.result_json.ai_provenance;
+  const source = provenance?.provider === "mock"
+    ? "离线 Mock（非外部模型）"
+    : provenance?.provider || run.provider || "等待执行";
+  const usage = provenance?.token_usage;
+  const usageLabel = usage?.source === "provider_reported"
+    ? `${usage.total_tokens ?? "—"} Tokens（平台返回）`
+    : usage?.source === "partial"
+      ? `${usage.total_tokens ?? "部分"} Tokens（部分平台返回）`
+      : "平台未返回，系统未估算";
+  return (
+    <article className="run-record">
+      <div className="run-record-heading">
+        <div>
+          <strong>{formatDateTime(run.created_at)} 生成批次</strong>
+          <span>追踪号 {run.trace_id.slice(0, 12)}</span>
+        </div>
+        <StatusBadge value={run.status} />
+      </div>
+      <div className="run-evidence-grid">
+        <span><small>生成来源</small><b>{source}</b></span>
+        <span><small>模型</small><b>{provenance?.model || "等待执行"}</b></span>
+        <span><small>提示词版本</small><b>{provenance?.prompt_set_version || "等待执行"}</b></span>
+        <span><small>AI 调用</small><b>{provenance ? `${provenance.invocation_count} 次` : "等待执行"}</b></span>
+        <span><small>Token 记录</small><b>{usageLabel}</b></span>
+      </div>
+      {run.error ? <p className="run-error" role="alert">最近错误：{run.error}</p> : null}
+    </article>
+  );
+}
+
 function CampaignsView({
   campaigns,
   role,
@@ -1016,6 +1077,8 @@ function CampaignsView({
   const [showForm, setShowForm] = useState(false);
   const [busyId, setBusyId] = useState("");
   const [error, setError] = useState("");
+  const [expandedCampaignId, setExpandedCampaignId] = useState("");
+  const [runsByCampaign, setRunsByCampaign] = useState<Record<string, WorkflowRun[]>>({});
   const canEdit = roleAtLeast(role, "editor");
 
   function closeForm() {
@@ -1102,6 +1165,27 @@ function CampaignsView({
     }
   }
 
+  async function toggleRuns(campaign: Campaign) {
+    if (expandedCampaignId === campaign.id) {
+      setExpandedCampaignId("");
+      return;
+    }
+    setExpandedCampaignId(campaign.id);
+    if (Object.prototype.hasOwnProperty.call(runsByCampaign, campaign.id)) return;
+    setBusyId(`runs-${campaign.id}`);
+    setError("");
+    try {
+      const runs = await api<WorkflowRun[]>(
+        `/campaigns/${campaign.id}/runs?limit=5`,
+      );
+      setRunsByCampaign((current) => ({ ...current, [campaign.id]: runs }));
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setBusyId("");
+    }
+  }
+
   async function run(campaign: Campaign) {
     setBusyId(`run-${campaign.id}`);
     setError("");
@@ -1111,6 +1195,12 @@ function CampaignsView({
         body: {},
       });
       flash("内容生成任务已进入队列");
+      setRunsByCampaign((current) => {
+        const next = { ...current };
+        delete next[campaign.id];
+        return next;
+      });
+      setExpandedCampaignId("");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -1211,32 +1301,58 @@ function CampaignsView({
                     <span>{campaign.platforms.map((item) => PLATFORM[item]).join(" / ")}</span>
                     <span>{formatDate(campaign.updated_at)}</span>
                   </div>
+                  {expandedCampaignId === campaign.id ? (
+                    <section className="run-history" aria-label={`${campaign.name} 的生成记录`}>
+                      <div className="run-history-heading">
+                        <strong>最近生成记录</strong>
+                        <span>最多展示 5 个批次</span>
+                      </div>
+                      {busyId === `runs-${campaign.id}` ? (
+                        <p className="run-history-empty">正在读取生成证据…</p>
+                      ) : (runsByCampaign[campaign.id] || []).length ? (
+                        (runsByCampaign[campaign.id] || []).map((runItem) => (
+                          <RunEvidence key={runItem.id} run={runItem} />
+                        ))
+                      ) : (
+                        <p className="run-history-empty">还没有生成记录。</p>
+                      )}
+                    </section>
+                  ) : null}
                 </div>
-                {canEdit ? (
-                  <div className="campaign-actions">
-                    <Button
-                      kind="secondary"
-                      busy={busyId === `run-${campaign.id}`}
-                      onClick={() => void run(campaign)}
-                      disabled={campaign.status === "archived"}
-                    >
-                      生成内容
-                    </Button>
-                    <button type="button" onClick={() => openEdit(campaign)}>编辑 Brief</button>
-                    <button
-                      type="button"
-                      disabled={busyId === `status-${campaign.id}`}
-                      onClick={() =>
-                        void updateStatus(
-                          campaign,
-                          campaign.status === "archived" ? "active" : "archived",
-                        )
-                      }
-                    >
-                      {campaign.status === "archived" ? "恢复活动" : "归档"}
-                    </button>
-                  </div>
-                ) : null}
+                <div className="campaign-actions">
+                  {canEdit ? (
+                    <>
+                      <Button
+                        kind="secondary"
+                        busy={busyId === `run-${campaign.id}`}
+                        onClick={() => void run(campaign)}
+                        disabled={campaign.status === "archived"}
+                      >
+                        生成内容
+                      </Button>
+                      <button type="button" onClick={() => openEdit(campaign)}>编辑 Brief</button>
+                      <button
+                        type="button"
+                        disabled={busyId === `status-${campaign.id}`}
+                        onClick={() =>
+                          void updateStatus(
+                            campaign,
+                            campaign.status === "archived" ? "active" : "archived",
+                          )
+                        }
+                      >
+                        {campaign.status === "archived" ? "恢复活动" : "归档"}
+                      </button>
+                    </>
+                  ) : null}
+                  <button
+                    type="button"
+                    disabled={busyId === `runs-${campaign.id}`}
+                    onClick={() => void toggleRuns(campaign)}
+                  >
+                    {expandedCampaignId === campaign.id ? "收起记录" : "生成记录"}
+                  </button>
+                </div>
               </article>
             ))}
           </div>
@@ -1260,7 +1376,7 @@ function ReviewView({
   flash: (message: string) => void;
 }) {
   const reviewable = contents.filter((item) =>
-    ["needs_review", "blocked", "rejected"].includes(item.status),
+    ["needs_review", "blocked"].includes(item.status),
   );
   const [showAll, setShowAll] = useState(false);
   const visibleContents = showAll ? contents : reviewable;
@@ -1278,7 +1394,7 @@ function ReviewView({
   const canReview = roleAtLeast(role, "reviewer");
   const needsDecision = Boolean(
     selected &&
-      ["needs_review", "blocked", "rejected"].includes(selected.status),
+      ["needs_review", "blocked"].includes(selected.status),
   );
   const revisionKey = selected ? `${selected.id}:${selected.version}` : "";
   const revisions =
@@ -1317,7 +1433,7 @@ function ReviewView({
       if (decision === "reject" && !reason) return;
       await api(`/contents/${selected.id}/review`, {
         method: "POST",
-        body: { decision, reason },
+        body: { decision, reason, expected_version: selected.version },
       });
       flash(decision === "approve" ? "内容已通过，素材任务已创建" : "内容已驳回");
       setSelectedId("");
@@ -1346,6 +1462,7 @@ function ReviewView({
       await api(`/contents/${selected.id}`, {
         method: "PATCH",
         body: {
+          expected_version: selected.version,
           title: form.get("title"),
           body: form.get("body"),
           hashtags: String(form.get("hashtags") || "")
@@ -1619,6 +1736,7 @@ function PublishingView({
   const [busy, setBusy] = useState(false);
   const [pulling, setPulling] = useState("");
   const [cancelling, setCancelling] = useState("");
+  const [reconciling, setReconciling] = useState("");
   const [error, setError] = useState("");
   const canSchedule = roleAtLeast(role, "reviewer");
   const [defaultSchedule] = useState(() =>
@@ -1680,6 +1798,49 @@ function PublishingView({
       setCancelling("");
     }
   }
+
+  async function reconcile(
+    job: PublishJob,
+    decision: "confirmed_published" | "confirmed_not_published",
+  ) {
+    const confirmedPublished = decision === "confirmed_published";
+    const reason = window.prompt(
+      confirmedPublished
+        ? "请填写在平台核对到已发布的依据"
+        : "请填写在平台核对到未发布的依据",
+    );
+    if (!reason?.trim()) return;
+    const externalId = confirmedPublished
+      ? window.prompt("平台内容 ID（可选）")?.trim() || null
+      : null;
+    const externalUrl = confirmedPublished
+      ? window.prompt("平台内容链接（可选）")?.trim() || null
+      : null;
+    setReconciling(job.id);
+    setError("");
+    try {
+      await api(`/publishing/jobs/${job.id}/reconcile`, {
+        method: "POST",
+        body: {
+          decision,
+          reason: reason.trim(),
+          external_id: externalId,
+          external_url: externalUrl,
+        },
+      });
+      flash(
+        confirmedPublished
+          ? "已登记为平台确认发布，系统不会重复分发"
+          : "已登记为未发布；如需再次分发，请在任务中心重试",
+      );
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setReconciling("");
+    }
+  }
+
   return (
     <>
       <PageHeading
@@ -1733,6 +1894,23 @@ function PublishingView({
                   <Icon name="download" />下载投放包
                 </button>
               ) : null}
+              {canSchedule && job.status === "reconciliation_required" ? (
+                <>
+                  <button
+                    disabled={reconciling === job.id}
+                    onClick={() => void reconcile(job, "confirmed_published")}
+                  >
+                    确认已发布
+                  </button>
+                  <button
+                    className="danger-text"
+                    disabled={reconciling === job.id}
+                    onClick={() => void reconcile(job, "confirmed_not_published")}
+                  >
+                    确认未发布
+                  </button>
+                </>
+              ) : null}
               {canSchedule && job.external_id && channelMap[job.channel_id]?.platform !== "xiaohongshu" ? (
                 <button
                   disabled={pulling === job.id}
@@ -1753,7 +1931,7 @@ function PublishingView({
               {!["scheduled", "queued", "exported"].includes(job.status) && job.external_id ? (
                 <span>ID {job.external_id}</span>
               ) : null}
-              {!job.external_id && !["scheduled", "queued"].includes(job.status) ? <span>—</span> : null}
+              {!job.external_id && !["scheduled", "queued", "reconciliation_required"].includes(job.status) ? <span>—</span> : null}
             </div>,
           ])}
           empty="还没有发布任务"

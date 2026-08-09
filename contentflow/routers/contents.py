@@ -40,6 +40,29 @@ def get_content_or_404(
     return item
 
 
+def get_content_for_update_or_409(
+    session: Session,
+    workspace_id: str,
+    content_id: str,
+    expected_version: int,
+) -> ContentItem:
+    query = select(ContentItem).where(
+        ContentItem.id == content_id,
+        ContentItem.workspace_id == workspace_id,
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    item = session.scalar(query)
+    if item is None:
+        raise HTTPException(status_code=404, detail="内容不存在")
+    if item.version != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail=f"内容版本已变化，当前版本为 {item.version}，请刷新后重试",
+        )
+    return item
+
+
 @router.get("", response_model=list[ContentResponse])
 def list_contents(
     principal: CurrentPrincipal,
@@ -94,8 +117,13 @@ def update_content(
     principal: Editor,
     session: Db,
 ):
-    item = get_content_or_404(session, principal.workspace_id, content_id)
-    updates = payload.model_dump(exclude_unset=True)
+    item = get_content_for_update_or_409(
+        session,
+        principal.workspace_id,
+        content_id,
+        payload.expected_version,
+    )
+    updates = payload.model_dump(exclude_unset=True, exclude={"expected_version"})
     if not updates:
         return item
     for field, value in updates.items():
@@ -164,7 +192,17 @@ def review_content(
     principal: Reviewer,
     session: Db,
 ):
-    item = get_content_or_404(session, principal.workspace_id, content_id)
+    item = get_content_for_update_or_409(
+        session,
+        principal.workspace_id,
+        content_id,
+        payload.expected_version,
+    )
+    if item.status not in {"needs_review", "blocked"}:
+        raise HTTPException(
+            status_code=409,
+            detail="只有待审核或规则拦截的内容可以审核",
+        )
     now = datetime.now(timezone.utc)
     review = dict(item.review_json or {})
     review["human_decision"] = payload.decision
