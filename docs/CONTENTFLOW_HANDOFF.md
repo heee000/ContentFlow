@@ -4,7 +4,7 @@
 > 适用仓库：`F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow`
 > GitHub：<https://github.com/heee000/ContentFlow>
 > 当前分支：`main`
-> 当前基准提交：`29563c4 Fix tracked Sites build plugin`；其后存在本阶段待提交修改
+> 当前基准提交：`beaeaf1 Add governed prompt releases`
 
 ## 0. 给接手者的最短说明
 
@@ -1118,7 +1118,7 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 - 后端全量 76 passed、6 skipped，分支覆盖率 79.07%（门槛 75%）；本地跳过项仍为需要运行服务的 PostgreSQL/MinIO 集成测试。
 - 前端 ESLint、Sites/vinext 构建与 2 项测试、Next.js 生产构建、TypeScript 检查通过；`npm audit --audit-level=high` 为 0 个漏洞。
 - Prompt 专项覆盖双人审批、拒绝、激活、回滚、租户隔离、空白/阶段校验、审计不含正文、运行时选择和激活/运行前篡改阻断。
-- 当前分支远程 CI 结果需在阶段提交推送后签收，不能用上一提交的绿色结果代替新迁移证据。
+- 提交 `beaeaf183a51a35484b25a2e5d90c870dafa7689` 的 [ContentFlow CI #31359992207](https://github.com/heee000/ContentFlow/actions/runs/31359992207) 已成功；Backend/PostgreSQL/security 与 Frontend/build/security 两个 Job 均通过，新迁移已获得真实 PostgreSQL 远程门禁证据。
 
 ### 持续复审：当前仍最关键的 5 个不足
 

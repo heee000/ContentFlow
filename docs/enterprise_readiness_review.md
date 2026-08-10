@@ -43,11 +43,11 @@ ContentFlow 已经具备完整的内容营销业务闭环、PostgreSQL/pgvector�
 | 任务与可靠性 | L2-L3 | 数据库队列、条件租约心跳、所有权隔离、重试、SKIP LOCKED、微信自动发布对账、人工接管、优雅退出、Worker 节点心跳与队列健康查询 | 跨平台 Outbox/幂等/回调闭环、编排层自动健康探针、故障注入 CI |
 | 身份与权限 | L2-L3 | 用户、工作区、四级 RBAC、数据库会话、短 Access、旋转 Refresh、即时撤销与 PostgreSQL 共享认证限流 | OIDC/SAML、MFA、企业账号生命周期、设备管理、职责分离、网关级全业务限流 |
 | 应用安全 | L2-L3 | 密钥分离、凭据加密、脱敏、安全响应头、基础 CSP、生产 API Origin 固定、HttpOnly/SameSite/Secure Cookie、可信 Origin、上传上限 | nonce/strict-dynamic CSP、KMS、恶意文件扫描、威胁模型、渗透与安全运营 |
-| AI 与内容治理 | L1-L2 | 引用追踪、规则审核、模型审核、人工门禁 | 模型/Prompt 版本、评测集、成本、注入防护、版权/PII |
-| 测试与质量 | L2-L3 | 73 项后端测试、真实 PostgreSQL/pgvector 与 MinIO 集成测试、78.42% 分支覆盖率门禁、前端双构建和零已知依赖漏洞 | 浏览器 E2E、负载、混沌和完整真实外部平台矩阵 |
-| 发布与供应链 | L2 | `uv.lock`、npm lock、GitHub Actions、Dependabot、Action SHA 与 CI pgvector digest 固定 | 远程 CI 首次签收、受保护分支、独立迁移/发布流水线、SBOM、镜像签名、分环境发布和回滚 |
+| AI 与内容治理 | L2 | 引用追踪、规则/模型/人工门禁；Prompt 不可变版本、双人审批、激活回滚、运行溯源与哈希阻断 | 金标评测、事实性/安全/成本晋级门禁、注入防护、版权/PII |
+| 测试与质量 | L2-L3 | 76 项本地后端测试、79.07% 分支覆盖率门禁、远程 PostgreSQL/pgvector 与 MinIO 双作业、前端双构建和零高危依赖漏洞 | 浏览器 E2E、负载、混沌和完整真实外部平台矩阵 |
+| 发布与供应链 | L2 | `uv.lock`、npm lock、GitHub Actions、Dependabot、Action SHA 与 CI pgvector digest 固定；当前 head 远程双作业通过 | 受保护分支必需检查、独立迁移/发布流水线、SBOM、镜像签名、分环境发布和回滚 |
 | 可观测性与 SRE | L1-L2 | JSON 日志、request_id、健康检查 | 指标、Tracing、告警、SLO、On-call、事故流程 |
-| 灾备与数据治理 | L2 | manifest v2、当前 head 联合隔离恢复、逐对象哈希 | PITR/WAL、异地复制、Object Lock、RPO/RTO、RLS 与生命周期 |
+| 灾备与数据治理 | L2 | manifest v2、上一持久 head 联合隔离恢复、逐对象哈希 | 当前 b84 head 联合恢复、PITR/WAL、异地复制、Object Lock、RPO/RTO、RLS 与生命周期 |
 | 合规与组织治理 | L1 | 审计记录和基础运维文档 | 数据分类、留存/删除、不可篡改审计、CODEOWNERS、发布治理 |
 
 综合判断：当前约处于 L2，部分业务能力接近 L3，但企业级横向能力仍明显不足。
@@ -70,14 +70,14 @@ ContentFlow 已经具备完整的内容营销业务闭环、PostgreSQL/pgvector�
 | 风险 | 当前状态 | 本轮新增证据 | 仍需完成 |
 | --- | --- | --- | --- |
 | ENT-P0-01 长任务租约 | 部分关闭 | 条件续租、后台 LeaseHeartbeat、完成/失败前所有权校验；tests/test_job_queue.py 覆盖心跳、旧 Worker 隔离、空闲退出、在途排空和 logger 恢复；真实 Docker SIGTERM 以 0 退出并记录 signal=15；PostgreSQL 验证两个领取事务获得不同 Job | 在 CI 中运行 PostgreSQL 双 Worker 长 handler、宽限期耗尽/SIGKILL、数据库闪断和滚动升级故障注入 |
-| ENT-P0-02 外部发布一致性 | 部分关闭 | 调平台前持久化 dispatch_token/publishing；submitted 与对账 Job 同事务保存；微信按 publish_id 自动轮询；两阶段行锁允许人工接管并拒绝迟到结果；SQLite 回归和真实 PostgreSQL 竞态验证通过 | 抖音确定查询键、跨平台 Outbox/幂等键、回调验签/去重、真实租户故障签收 |
-| ENT-P0-03 内容并发 | 仓库门禁关闭 | PATCH/审核强制 expected_version；PostgreSQL 行锁；冲突 409；API 回归覆盖旧编辑和旧审核；真实 PostgreSQL 集成测试已进入 CI 工作流 | 扩展 HTTP 级多请求压力测试，并在受保护分支上完成首次远程 CI 签收 |
+| ENT-P0-02 外部发布一致性 | 部分关闭 | PublishJob 与幂等 Job 同事务形成命令 Outbox；调平台前持久化 dispatch_token/publishing；submitted 与对账 Job 同事务保存；微信按 publish_id 自动轮询；两阶段行锁允许人工接管并拒绝迟到结果 | 抖音确定查询键、平台事件 Inbox/验签/去重、渠道原生幂等、跨平台状态归一与真实租户故障签收 |
+| ENT-P0-03 内容并发 | 仓库门禁关闭 | PATCH/审核强制 expected_version；PostgreSQL 行锁；冲突 409；API 回归覆盖旧编辑和旧审核；真实 PostgreSQL 集成测试已在远程 CI 通过 | 扩展 HTTP 级多请求压力测试，并把 CI 设为受保护分支必需检查 |
 | ENT-P0-04 企业身份与浏览器会话 | 部分关闭 | 数据库会话、15 分钟 Access、14 天旋转 Refresh、复用检测、单会话/全会话撤销、HttpOnly/SameSite/Secure Cookie、可信 Origin 与 CLI Bearer 兼容；59 项全量回归通过 | OIDC/SAML、MFA、企业账号生命周期、设备管理、nonce/strict-dynamic CSP、网关级全业务限流和签名密钥轮换 |
-| ENT-P0-05 真实模型/平台/RAG | 未关闭 | 本轮未使用真实租户或付费模型 | 真实调用矩阵、评测集、质量/成本阈值 |
-| ENT-P0-06 一致性灾备 | 部分关闭 | 当前 head 静默联合恢复、manifest v2、逐对象哈希与随机 bucket 复验 | PITR/WAL、异地不可变恢复、Object Lock 与 RPO/RTO |
+| ENT-P0-05 真实模型/平台/RAG | 部分关闭 | 公众号真实鉴权、永久素材和不公开草稿已签；Prompt 运行证据可追溯 | 公众号公开发布/异常矩阵、抖音与真实模型调用矩阵、RAG/生成评测和质量/成本阈值 |
+| ENT-P0-06 一致性灾备 | 部分关闭 | 上一持久 head 静默联合恢复、manifest v2、逐对象哈希与随机 bucket 复验 | 当前 b84 head 联合恢复、PITR/WAL、异地不可变恢复、Object Lock 与 RPO/RTO |
 | ENT-P0-07 生产入口/KMS | 未关闭 | 本轮未部署生产边缘 | TLS/WAF、私网数据面、KMS/Vault、分环境权限 |
 
-最新验证结果见第 22 节：Ruff 全量通过；后端 73 passed、6 skipped；既有真实 PostgreSQL/pgvector 集成测试 3 passed、MinIO 集成测试 2 passed，新增 PostgreSQL 限流并发门禁待 CI；当前分支覆盖率 78.42%；Python 与 npm 审计均为 0 个已知漏洞；前端 lint、Sites/vinext 测试和 Next.js 生产构建通过。临时数据库残留为 0、临时 MinIO 容器已删除、PostgreSQL 已停止。完整 Compose 重建和远程 GitHub Actions 首次运行仍未重跑，因此不能用本地等价流水线替代完整环境与远程门禁签收。
+最新验证结果见第 23 节：Ruff 全量通过；本地后端 76 passed、6 skipped，分支覆盖率 79.07%；Python 依赖一致，npm 高危审计为 0；前端 lint、Sites/vinext 测试和 Next.js 生产构建通过。提交 `beaeaf183a51a35484b25a2e5d90c870dafa7689` 的远程 CI 两个 Job 均成功，覆盖真实 PostgreSQL/pgvector、MinIO、依赖安全和前端构建。该证据仍不等于完整 Compose 长期运行、受保护分支发布治理或外部平台生产签收。
 
 ## 4. P0：真实生产流量前必须解决
 
@@ -1045,7 +1045,7 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 | 完整性 | 激活前、运行前哈希重算；篡改返回 409 或阻断工作流 | 不是数据库不可篡改存储或签名制品 |
 | 运行接入 | 实际 system prompt 进入 Provider，Provenance 记录来源/Release/哈希 | Mock 只证明契约；真实模型回归评测仍缺 |
 | 数据库 | Alembic 唯一 head `b84e0d3f7c92`，备份门槛 22 表 | 持久 PostgreSQL 联合恢复待新 head 签收 |
-| 质量门禁 | 76 passed、6 skipped，分支覆盖率 79.07%；前端 lint、双构建/测试、npm 高危审计通过 | PostgreSQL/MinIO 本地集成项跳过；远程新提交 CI 待推送后验证 |
+| 质量门禁 | 76 passed、6 skipped，分支覆盖率 79.07%；前端 lint、双构建/测试、npm 高危审计通过；CI #31359992207 双作业成功 | 本机 PostgreSQL/MinIO 服务项跳过；仍缺受保护分支必需检查、浏览器 E2E 与发布晋级 |
 
 ### 23.4 当前仍存在的 5 个不足
 
@@ -1061,7 +1061,7 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 2. 继续完成公众号发布与异常矩阵；抖音可用后补 OAuth、回调与指标，统一建设回调 Inbox/验签/去重和渠道幂等。
 3. 落地 OpenTelemetry、Prometheus、SLO、告警、值班手册与故障演练，并把 Provider 成本/错误/限流纳入看板。
 4. 用真实企业 IdP 和 PostgreSQL 签收 OIDC/MFA、设备会话、RLS、导出/删除/留存和审计归档。
-5. 在当前 head 完成联合恢复和远程 CI，再推进 PITR/异地不可变备份、SBOM/镜像签名、独立迁移、环境晋级与灰度回滚。
+5. 在当前 head 完成持久 PostgreSQL+MinIO 联合恢复，并把已通过的远程 CI 设为受保护分支必需检查；再推进 PITR/异地不可变备份、SBOM/镜像签名、独立迁移、环境晋级与灰度回滚。
 
 ### 23.6 距离成熟企业完整项目还差什么
 
