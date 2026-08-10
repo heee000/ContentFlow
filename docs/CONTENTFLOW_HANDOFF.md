@@ -1197,7 +1197,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 安全与 Prompt 治理专项 24 passed；全量后端 83 passed、6 skipped，分支覆盖率 79.38%，高于 75% 门槛；本机跳过项仍为需真实服务的 PostgreSQL/MinIO 集成测试。
 - Ruff 格式与静态检查通过；前端 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js 生产构建通过。
 - 新回归证明：生产配置关闭治理门禁时启动拒绝；builtin + 强制治理时 readiness 为 blocked；生成请求返回 409 且数据库中没有 `workflow.execute` Job。
-- 本阶段尚待推送后由 GitHub Actions 在真实 PostgreSQL/pgvector 与 MinIO 服务上签收；远程 CI 结果不得提前写成已通过。
+- 提交 `47fe3444d9a4a2f7c2c8a284c4e6b0b95fcad4c2` 的 [ContentFlow CI #31364881430](https://github.com/heee000/ContentFlow/actions/runs/31364881430) 已成功：Backend 在真实 PostgreSQL/pgvector 与 MinIO 服务上完成测试、覆盖率和 Python 安全审计，Frontend 完成 lint、Sites、Next.js 构建和 npm 安全审计。
 
 ### 持续复审：当前仍存在的 5 个不足
 

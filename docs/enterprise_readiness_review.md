@@ -1130,7 +1130,7 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 | 运行门禁 | 入队前 409 且无 Job；Worker 首次模型调用前二次复核 | 多副本配置漂移告警、策略决策审计与压测 |
 | 可操作性 | 管理 API/UI 暴露 readiness、block reason 与初始化顺序 | 邀请制 bootstrap、组织级向导、break-glass 与审批 SLA |
 | 回归证据 | 83 passed、6 skipped、79.38% 分支覆盖率；前端 lint/双构建通过 | 真实模型、浏览器 E2E、持续负载和故障注入 |
-| 远程环境 | 上一阶段 c95 CI 已通过 PostgreSQL/pgvector/MinIO | 本阶段提交仍需 CI；持久生产库升级和联合恢复未签收 |
+| 远程环境 | 提交 `47fe3444d9a4a2f7c2c8a284c4e6b0b95fcad4c2` 的 CI #31364881430 已通过 PostgreSQL/pgvector/MinIO、覆盖率和双端安全门禁 | 持久生产库升级和 PostgreSQL+MinIO 联合恢复仍未签收 |
 
 ### 25.3 当前仍存在的 5 个不足
 
