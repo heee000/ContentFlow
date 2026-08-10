@@ -42,7 +42,7 @@ tests:
               summary: ContentFlow API metrics target is unavailable
               description: Prometheus has failed to scrape the ContentFlow API for two minutes.
               runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
-      - eval_time: 12m
+      - eval_time: 13m
         alertname: ContentFlowHighHTTP5xxRate
         exp_alerts:
           - exp_labels:
