@@ -1166,7 +1166,7 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 | 标签安全 | 完整模板 route、固定 method/status/status_class，未知值归一；测试证明原始 ID 不出现 | 自动 cardinality budget、长期时序规模与保留策略 |
 | 运行信号 | HTTP 数量/延迟/并发，队列/最长等待、Worker、Workflow/Eval、发布对账 Gauge | Provider 成本/限流、DB pool/慢查询、对象存储/渠道专用指标 |
 | 多副本语义 | 每进程 Registry；文档规定 HTTP 聚合、全局 DB Gauge 使用 `max` 去重 | 多副本真实抓取、远程写、联邦与高可用 Prometheus |
-| 自动化 | 专项 26 passed、5 skipped；全量 88 passed、7 skipped、79.85% 分支覆盖率 | 真实 Prometheus/Alertmanager/Grafana、SLO/告警与故障演练 |
+| 自动化 | 专项 26 passed、5 skipped；全量 88 passed、7 skipped、79.85% 分支覆盖率；提交 `fe3ee101799e36dc05e644f51efbca8204cc7b02` 的 [CI #31367481260](https://github.com/heee000/ContentFlow/actions/runs/31367481260) 已通过真实 PostgreSQL/pgvector、MinIO 和双端安全门禁 | 真实 Prometheus/Alertmanager/Grafana、SLO/告警与故障演练 |
 
 ### 26.3 当前仍存在的 5 个不足
 

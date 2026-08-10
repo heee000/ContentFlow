@@ -89,7 +89,7 @@
 - [x] 当前 Prompt 治理 head 已由 [ContentFlow CI #31359992207](https://github.com/heee000/ContentFlow/actions/runs/31359992207) 完成后端 PostgreSQL/MinIO/安全与前端构建/安全签收。
 - [x] Prompt Eval head c95f1e4a8d73 已由 [ContentFlow CI #31362922394](https://github.com/heee000/ContentFlow/actions/runs/31362922394) 完成真实 PostgreSQL/pgvector、MinIO、覆盖率、双端构建与依赖安全签收。
 - [x] 生产受治理 Prompt 提交 `47fe3444d9a4a2f7c2c8a284c4e6b0b95fcad4c2` 已由 [ContentFlow CI #31364881430](https://github.com/heee000/ContentFlow/actions/runs/31364881430) 完成真实 PostgreSQL/pgvector、MinIO、覆盖率、双端构建与依赖安全签收。
-- [x] 受保护 Prometheus 指标已在本地覆盖鉴权、低基数标签、异常安全返回、生产 fail-fast 和数据库汇总；真实 PostgreSQL Collector 与远程双端门禁将在本阶段提交后由 CI 签收。
+- [x] 受保护 Prometheus 指标提交 `fe3ee101799e36dc05e644f51efbca8204cc7b02` 已由 [ContentFlow CI #31367481260](https://github.com/heee000/ContentFlow/actions/runs/31367481260) 签收鉴权、低基数标签、异常安全返回、生产 fail-fast、真实 PostgreSQL Collector、MinIO、覆盖率和双端构建/安全门禁。
 - [ ] 受保护分支必需检查、浏览器 E2E、双 Worker/SIGKILL/数据库闪断、PITR/异地恢复、SBOM、镜像签名、独立迁移与灰度回滚仍待补齐。
 - [ ] 2026-08-08 未重新跑完整 Compose 栈：Docker Hub 拉取 python:3.12-slim 时网络失败；PostgreSQL 16/pgvector 单服务的 SKIP LOCKED、内容冲突和取消/分发竞态验证已通过，但不能替代完整栈验收。
 

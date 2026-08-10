@@ -1234,7 +1234,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 
 - 可观测性/安全/PostgreSQL 专项 26 passed、5 skipped；全量后端 88 passed、7 skipped，分支覆盖率 79.85%，高于 75% 门槛。
 - 新测试覆盖：禁用/鉴权/OpenAPI 隐藏、完整模板路由、资源 ID 不泄露、未知 method/status 聚合、数据库 Gauge、Worker active/stale、Collector 异常脱敏和生产密钥约束。
-- 本机 PostgreSQL/pgvector 与 MinIO 服务不可用，因此 5 项 PostgreSQL 和 2 项 MinIO 集成测试由 GitHub CI 签收；其中新增真实 PostgreSQL Collector 测试会渲染全部运行指标。
+- 本机 PostgreSQL/pgvector 与 MinIO 服务不可用，因此本地跳过 5 项 PostgreSQL 和 2 项 MinIO 集成测试。提交 `fe3ee101799e36dc05e644f51efbca8204cc7b02` 的 [ContentFlow CI #31367481260](https://github.com/heee000/ContentFlow/actions/runs/31367481260) 已成功：Backend 在真实 PostgreSQL/pgvector 与 MinIO 上完成全部测试、Collector 渲染、覆盖率和 Python 安全审计；Frontend 完成 lint、Sites/Next 构建、测试与 npm 安全审计。
 
 ### 持续复审：当前仍存在的 5 个不足
 
