@@ -191,6 +191,101 @@ services:
     ports:
       - "${CONTENTFLOW_WEB_PORT:-3000}:3000"
 
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v3.13.1-distroless@sha256:214f8427c8fba80c327bb94a75feb802ae12f2d6ca30812aa6e7d22f09bbea80
+    restart: "${CONTENTFLOW_RESTART_POLICY:-unless-stopped}"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${CONTENTFLOW_PROMETHEUS_RETENTION:-15d}
+      - --web.listen-address=0.0.0.0:9090
+    depends_on:
+      api:
+        condition: service_healthy
+    secrets:
+      - contentflow_metrics_bearer_token
+    volumes:
+      - ./deploy/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/prometheus/contentflow.rules.yml:/etc/prometheus/contentflow.rules.yml:ro
+      - prometheus_data:/prometheus
+    expose:
+      - "9090"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/bin/promtool", "check", "healthy", "--url=http://localhost:9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  grafana-secret-check:
+    profiles: ["observability"]
+    image: grafana/grafana:13.1.0@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        test "$$(wc -c < /run/secrets/contentflow_grafana_admin_password)" -ge 32 &&
+        ! cmp -s /run/secrets/contentflow_grafana_admin_password
+        /run/secrets/contentflow_metrics_bearer_token
+    secrets:
+      - contentflow_grafana_admin_password
+      - contentflow_metrics_bearer_token
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:13.1.0@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
+    restart: "${CONTENTFLOW_RESTART_POLICY:-unless-stopped}"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      grafana-secret-check:
+        condition: service_completed_successfully
+    environment:
+      GF_SECURITY_ADMIN_USER: ${CONTENTFLOW_GRAFANA_ADMIN_USER:-contentflow-admin}
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/contentflow_grafana_admin_password
+      GF_SERVER_ROOT_URL: ${CONTENTFLOW_GRAFANA_ROOT_URL:-http://127.0.0.1:3301}
+      GF_SECURITY_COOKIE_SECURE: ${CONTENTFLOW_GRAFANA_COOKIE_SECURE:-false}
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    secrets:
+      - contentflow_grafana_admin_password
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${CONTENTFLOW_GRAFANA_BIND_ADDRESS:-127.0.0.1}:${CONTENTFLOW_GRAFANA_PORT:-3301}:3000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   postgres_data:
   minio_data:
+  prometheus_data:
+  grafana_data:
+
+secrets:
+  contentflow_metrics_bearer_token:
+    environment: CONTENTFLOW_METRICS_BEARER_TOKEN
+  contentflow_grafana_admin_password:
+    environment: CONTENTFLOW_GRAFANA_ADMIN_PASSWORD

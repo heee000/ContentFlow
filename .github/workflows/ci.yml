@@ -81,6 +81,21 @@ jobs:
       - name: Lint Python
         run: uv run --locked ruff check .
 
+      - name: Validate Prometheus configuration and rules
+        run: |
+          docker run --rm --entrypoint=/bin/promtool \
+            --volume "${{ github.workspace }}/deploy/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.13.1-distroless@sha256:214f8427c8fba80c327bb94a75feb802ae12f2d6ca30812aa6e7d22f09bbea80 \
+            check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint=/bin/promtool \
+            --volume "${{ github.workspace }}/deploy/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.13.1-distroless@sha256:214f8427c8fba80c327bb94a75feb802ae12f2d6ca30812aa6e7d22f09bbea80 \
+            check rules /etc/prometheus/contentflow.rules.yml
+          docker run --rm --entrypoint=/bin/promtool \
+            --volume "${{ github.workspace }}/deploy/observability/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.13.1-distroless@sha256:214f8427c8fba80c327bb94a75feb802ae12f2d6ca30812aa6e7d22f09bbea80 \
+            test rules /etc/prometheus/contentflow.rules.test.yml
+
       - name: Test against PostgreSQL and MinIO and enforce coverage
         run: >-
           uv run --locked pytest -q

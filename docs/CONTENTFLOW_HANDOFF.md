@@ -1255,3 +1255,43 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 ### 成熟度判断
 
 可观测性从仅有健康检查和结构化日志推进到可安全抓取、低基数、覆盖 API 与核心数据库运行状态的 L2 基线。综合项目仍约为 L2：已经能部署、治理和获得关键运行信号，但成熟企业交付还要求真实监控平台、长期 SLO/告警证据、端到端追踪、语义质量、多渠道、IAM/合规、供应链和跨故障域恢复共同成立。
+
+## 21.21 版本化监控资产与第十七轮复审
+
+### 已交付的监控运行资产
+
+1. Compose 新增可选 `observability` profile：Prometheus 3.13.1 distroless 与 Grafana 13.1.0 均固定多架构 manifest digest，使用独立持久卷；默认业务栈不受 profile 影响。
+2. Prometheus 从内部 `api:8000/metrics` 抓取，Bearer Token 通过 `credentials_file` 读取 Compose secret；Prometheus 只 `expose` 内部 9090，不向宿主映射端口。
+3. Grafana 管理密码通过独立 Compose secret 注入。一次性 `grafana-secret-check` 要求密码至少 32 字符且不同于指标 Token，失败时 Grafana 不启动，检查命令不输出任何秘密。
+4. Grafana 默认只绑定 `127.0.0.1:3301`，关闭匿名访问、注册、Gravatar、版本检查和统计上报；支持显式 root URL 与 Secure Cookie，生产仍必须置于 TLS/VPN/受控网关后。
+5. Prometheus 配置包含内部 API 与自身抓取、15 秒采集、30 秒规则计算和可配置 15 天默认本地 retention。
+6. 5 条 recording rules 固化总请求速率、5xx 比例、按模板路由 P95、最长队列等待和 Worker 状态聚合；全局数据库 Gauge 使用 `max`，HTTP 指标使用 `sum(rate(...))`，避免多副本重复计数。
+7. 8 条告警覆盖 API 不可抓取、5xx、P95、无活跃 Worker、陈旧 Worker、队列等待、人工发布对账和 Prometheus 规则计算失败。每条都有持续时间、warning/critical 严重度和仓库 runbook URL。
+8. Grafana 数据源、Dashboard provider 和 11 面板 Operations Overview 全部以只读文件 provisioning；UI 修改不是事实来源。Dashboard 覆盖 API、Worker、队列、Workflow、Prompt Eval 与发布对账。
+9. CI 使用同一固定 Prometheus 镜像执行 `check config`、`check rules` 和 `test rules`。行为测试用持续时序验证 7 类业务告警确实在规定时间后触发；Python 契约测试同时约束 secret、镜像摘要、loopback/内部端口、低基数表达式与多副本聚合。
+
+### 本阶段本地证据
+
+- 默认 Compose 与 `--profile observability` 配置均可解析；Docker 引擎当前不可用，因此尚未把 Prometheus/Grafana 容器在本机真实启动，不能把配置解析等同于运行签收。
+- 监控资产专项 4 passed；与指标 API 合并专项 7 passed。全量后端 92 passed、7 skipped，分支覆盖率 79.85%；全仓 Ruff 通过。
+- `uv.lock` 已加入测试专用 PyYAML 6.0.3。正式 promtool/真实 PostgreSQL/MinIO 与双端构建证据等待本阶段提交后的 GitHub CI。
+
+### 持续复审：当前仍存在的 5 个不足
+
+1. **告警通知闭环仍未签收**：仓库有规则和 runbook，但没有企业 Alertmanager/托管平台 receiver、路由、抑制、静默权限、值班日历、升级策略与真实通知演练；不能声称 7x24 运维已完成。
+2. **监控平台仍是单机参考拓扑**：缺 Prometheus/Grafana 高可用、remote-write/长期留存、租户访问控制、备份恢复、容量评估和目标环境真实运行；本机 Docker 不可用也使本轮缺少容器启动证据。
+3. **端到端可观测性仍不完整**：缺 OpenTelemetry Trace/exemplar 与集中日志关联，AI Provider 成本/限流、数据库池/慢查询、对象存储和渠道连接器深度指标尚未覆盖。
+4. **SLO 阈值尚未以生产数据校准**：当前 5xx/P95/队列阈值是保守起点，缺真实流量基线、SLO/错误预算、多副本负载/耐久和故障注入证据。
+5. **产品其余企业短板仍存在**：语义 AI Eval、真实多渠道异常矩阵、OIDC/MFA/SCIM、RLS/数据生命周期、PITR/异地、SBOM/签名与灰度回滚尚未共同签收。
+
+### 接下来最值得继续做的 5 项改进
+
+1. 在目标监控环境接入企业 Alertmanager/托管平台，配置 receiver、分组/抑制/升级、值班与静默权限，并用受控故障逐条验收通知和恢复消息。
+2. 建设 Prometheus HA、remote-write/长期留存和 Grafana 企业访问边界；对 Dashboard/规则做版本晋级、备份恢复和容量测试。
+3. 接入 OpenTelemetry，贯通 API—Job—Worker—AI/Eval—发布 Trace，并补 Provider 成本/限流、数据库、对象存储与渠道信号。
+4. 用真实负载建立 SLI 基线和 SLO/错误预算，校准当前阈值，执行多副本、数据库闪断、Worker 失联和队列积压演练。
+5. 并行推进语义 Eval/真实渠道与 IAM/RLS/数据生命周期/PITR/SBOM/签名/灰度发布，避免局部 SRE 改善掩盖企业整体短板。
+
+### 成熟度判断
+
+可观测性已从“安全 instrumentation”推进到“可版本化部署、规则、看板和告警行为测试”的 L2-L3 仓库基线；它解决了无抓取配置、无规则、无看板和无规则行为验证的问题。由于没有真实通知路由、HA/长期存储、目标环境运行、SLO 校准和端到端 Trace，仍不能称为成熟生产 SRE。综合项目继续约为 L2。

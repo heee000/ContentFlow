@@ -1187,3 +1187,39 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 ### 26.5 距离成熟企业项目的判断
 
 可观测性已从 L1 的零散健康/日志信号提升到 L2 的标准化、安全、低基数 instrumentation；这显著改善了可运营性，但还没有形成生产监控闭环。综合成熟度仍约 L2。只有指标平台、SLO/告警/值班、端到端追踪与成本容量长期运行证据，加上语义 AI 质量、真实多渠道、企业 IAM/合规、签名供应链和跨故障域恢复同时签收后，才接近成熟企业完整交付。
+
+## 27. 2026-08-10 第十七轮复审：版本化监控部署、规则与看板
+
+### 27.1 复审结论
+
+第十六轮只提供受保护指标端点，本轮补齐可交付的单机监控资产：固定摘要 Prometheus/Grafana profile、secret 文件注入与密码 preflight、版本化抓取/recording/alert rules、只读 Grafana provisioning、11 面板运维看板，以及 promtool 配置/语法/持续故障行为三层门禁。此前“没有 Prometheus/Grafana/规则/看板”的仓库缺口已关闭，但企业通知、HA、长期留存、SLO 与真实运行签收仍未关闭。
+
+### 27.2 证据与边界
+
+| 项目 | 当前证据 | 仍然缺少 |
+| --- | --- | --- |
+| 部署拓扑 | 可选 Compose profile；Prometheus 3.13.1 distroless、Grafana 13.1.0 固定 manifest digest；独立卷 | Kubernetes/多 AZ、HA、remote-write、容量和升级/恢复演练 |
+| Secret/暴露面 | metrics/Grafana secrets 文件注入；密码长度与分离 preflight；Prometheus 仅内部端口；Grafana 默认 loopback | 企业 KMS/Vault 动态轮换、TLS 网关、Grafana SSO/RBAC 与访问审计 |
+| 规则 | 5 recording、8 alerting；持续时间、严重度和 runbook；数据库 Gauge `max` 去重 | 真实流量阈值校准、SLO burn-rate、多窗口告警和告警噪声治理 |
+| 看板 | Git 管理的 Prometheus datasource、只读 provider、11 面板 API/Worker/队列/Workflow/Eval/发布总览 | Provider 成本、DB/对象/渠道、业务/租户安全聚合和长期趋势 |
+| 自动化 | 4 项 Python 资产契约、92 passed/7 skipped、79.85%；CI 已加入 promtool config/rules/行为测试 | 当前提交的远程 promtool 结果、真实容器启动与通知到达人证据 |
+
+### 27.3 当前仍存在的 5 个不足
+
+1. 规则尚未连接真实 Alertmanager receiver/托管通知、值班日历、升级/抑制/静默权限，也没有受控告警到达与恢复演练。
+2. 单机 profile 没有 Prometheus/Grafana HA、remote-write/长期留存、企业 SSO/RBAC、容量或升级/恢复证据；本机 Docker 引擎不可用，容器运行仍待签收。
+3. 缺 OpenTelemetry Trace/exemplar、集中日志关联，以及 Provider 成本/限流、数据库池/慢查询、对象存储和渠道深度信号。
+4. 告警阈值尚未以生产基线、SLO/错误预算和多副本负载/故障数据校准。
+5. 语义 Eval、真实多渠道、企业 IAM/RLS/数据生命周期、PITR/异地和签名供应链/灰度回滚仍是整体成熟度短板。
+
+### 27.4 可以继续改进的 5 个方向
+
+1. 接入企业 Alertmanager/托管告警，完成 receiver、路由、分组、抑制、升级、静默权限、值班和逐条故障演练。
+2. 将 Prometheus/Grafana 推进到 HA、remote-write/长期保留、SSO/RBAC、备份恢复和受保护版本晋级。
+3. 用 OpenTelemetry 贯通请求、队列、Worker、AI/Eval 和发布，并补 Provider/数据库/对象/渠道成本容量信号。
+4. 建立真实 SLI/SLO/错误预算与多窗口 burn-rate 规则，以负载、耐久和混沌演练校准当前阈值。
+5. 继续语义 AI Eval、多渠道异常矩阵、IAM/RLS/合规、PITR/异地与 SBOM/签名/灰度发布闭环。
+
+### 27.5 距离成熟企业项目的判断
+
+仓库现在不仅能暴露指标，还能以固定制品部署监控、加载版本化规则/看板并验证告警行为，可观测性仓库能力局部进入 L2-L3。成熟企业项目要求这些资产在目标环境持续运行并连接真实组织流程：通知必须到人、SLO 必须用真实数据校准、监控自身必须高可用可恢复、Trace/日志/成本必须关联。上述证据与产品其他短板未共同完成前，综合成熟度仍约 L2。

@@ -40,7 +40,7 @@ flowchart LR
 - 公众号封面素材、草稿创建、可选发布提交和基于 `publish_id` 的最终状态对账适配器
 - 小红书审核后 ZIP 投放包，不虚构公开发布能力
 - 10 个业务区的响应式运营工作台，包含全量内容/版本回看、人工指标录入、团队权限、Prompt/Eval 治理与审计查询
-- Alembic、Docker Compose、健康检查、结构化请求日志与受保护的低基数 Prometheus 指标
+- Alembic、Docker Compose、健康检查、结构化日志、受保护 Prometheus 指标、版本化告警规则与 Grafana 运维看板
 
 ## 目录
 
@@ -95,6 +95,7 @@ npm run dev:local
 - API 文档：`http://localhost:8000/docs`
 - 健康检查：`http://localhost:8000/health/ready`
 - Prometheus 指标：`http://localhost:8000/metrics`（仅在显式启用并携带独立 Bearer Token 时可用）
+- Grafana 运维看板：`http://127.0.0.1:3301`（仅启动 `observability` profile 后可用）
 
 首次使用在登录页切换到“注册”，创建账户与工作区。默认 API 地址为 `http://localhost:8000/api/v1`。
 
@@ -117,6 +118,15 @@ Compose 会启动：
 - `api`：先执行 Alembic，再启动 FastAPI
 - `worker`：消费持久化任务队列
 - `web`：Next.js standalone 运营工作台
+- `prometheus` / `grafana`：可选 `observability` profile，加载版本化抓取、记录/告警规则和只读运维看板
+
+启用监控 profile 前，设置独立的 32 位以上指标 Token 与 Grafana 管理员密码；两者不能相同。Prometheus 不映射宿主端口，Grafana 默认只绑定 `127.0.0.1:3301`：
+
+```powershell
+docker compose --profile observability up --build -d
+```
+
+完整安全边界、规则校验和生产剩余项见 `deploy/observability/README.md`。
 
 
 生产环境默认关闭公开注册。首次管理员账户应通过受控初始化窗口创建，完成后设置 `CONTENTFLOW_ALLOW_REGISTRATION=false`。生产启动校验会拒绝 SQLite、local 对象存储、通配 CORS、复用应用签名密钥加密凭据，以及未显式许可的 Mock/Hash Provider。

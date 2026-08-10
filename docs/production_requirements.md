@@ -26,6 +26,7 @@
 - [x] 审计日志覆盖注册/登录、内容修改、审批、生成、发布和连接器配置。
 - [x] 健康检查、就绪检查、结构化日志和工作台运行摘要。
 - [x] 受保护的 Prometheus 指标：默认关闭、生产强制开启并使用独立长 Token；HTTP/数据库指标使用固定低基数标签，不暴露租户或对象 ID。
+- [x] 可选 observability profile：固定摘要 Prometheus/Grafana、Compose secrets/preflight、版本化抓取与 recording/alert rules、promtool 故障行为测试、只读 provisioned Dashboard；Prometheus 不映射宿主端口。
 - [x] Docker Compose 一键启动 API、Worker、Web、PostgreSQL、pgvector 和 MinIO。
 - [x] 生产启动 fail-fast：拒绝 SQLite、local 存储、通配 CORS、弱/复用密钥、未知或缺凭据 Provider，以及未显式许可的 Mock/Hash 模式。
 - [x] 生产强制显式启用受治理 Prompt：内置基线未晋级时管理页显示阻断原因，生成请求在入队前返回 409，Worker 在首次模型调用前二次校验证据。
@@ -65,7 +66,7 @@
 
 - [x] Docker Compose 已在 PostgreSQL、pgvector、MinIO、API、Worker、Web 真实容器栈中启动并通过健康检查；就绪探针同时验证数据库与对象存储。
 - [x] `scripts/validate_stack.py` 已跑通“注册—多工作区/RBAC/审计—活动维护/归档—知识入库—RAG 生成/结构化排版—编辑版本—人工审核—素材—定时导出—投放包—指标—看板”。
-- [x] 后端 88 项测试通过、7 项 PostgreSQL/MinIO 集成测试在本机跳过；其中 PostgreSQL/pgvector 集成测试 5 项、MinIO 集成测试 2 项待 CI 执行，分支覆盖率 79.85%，Ruff、锁文件一致性和 `pip-audit` 均通过。
+- [x] 后端 92 项测试通过、7 项 PostgreSQL/MinIO 集成测试在本机跳过；其中 PostgreSQL/pgvector 集成测试 5 项、MinIO 集成测试 2 项待 CI 执行，分支覆盖率 79.85%，Ruff、锁文件一致性和 `pip-audit` 均通过。
 - [x] 前端 lint、Next.js 生产构建、vinext/Sites 测试通过，`npm audit` 为 0 项漏洞。
 - [x] PostgreSQL 并发验收通过：8 个并发连接器测试请求只创建 1 个 Job；两个 Worker 竞争过期租约时只有 1 个执行最终失败处理。
 - [x] 迁移前回滚包已按历史门槛恢复验证：Alembic `8b6c1f3a9d21`、17 张表和 39 个对象；临时资源均已清理。
@@ -90,6 +91,7 @@
 - [x] Prompt Eval head c95f1e4a8d73 已由 [ContentFlow CI #31362922394](https://github.com/heee000/ContentFlow/actions/runs/31362922394) 完成真实 PostgreSQL/pgvector、MinIO、覆盖率、双端构建与依赖安全签收。
 - [x] 生产受治理 Prompt 提交 `47fe3444d9a4a2f7c2c8a284c4e6b0b95fcad4c2` 已由 [ContentFlow CI #31364881430](https://github.com/heee000/ContentFlow/actions/runs/31364881430) 完成真实 PostgreSQL/pgvector、MinIO、覆盖率、双端构建与依赖安全签收。
 - [x] 受保护 Prometheus 指标提交 `fe3ee101799e36dc05e644f51efbca8204cc7b02` 已由 [ContentFlow CI #31367481260](https://github.com/heee000/ContentFlow/actions/runs/31367481260) 签收鉴权、低基数标签、异常安全返回、生产 fail-fast、真实 PostgreSQL Collector、MinIO、覆盖率和双端构建/安全门禁。
+- [x] Prometheus/Grafana 交付资产已在本地通过 4 项 YAML/JSON/Compose 契约测试、默认与 observability Compose 解析；固定 promtool 配置/规则/故障行为验证将在本阶段提交后由 CI 签收。
 - [ ] 受保护分支必需检查、浏览器 E2E、双 Worker/SIGKILL/数据库闪断、PITR/异地恢复、SBOM、镜像签名、独立迁移与灰度回滚仍待补齐。
 - [ ] 2026-08-08 未重新跑完整 Compose 栈：Docker Hub 拉取 python:3.12-slim 时网络失败；PostgreSQL 16/pgvector 单服务的 SKIP LOCKED、内容冲突和取消/分发竞态验证已通过，但不能替代完整栈验收。
 

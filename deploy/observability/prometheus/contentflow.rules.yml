@@ -1,0 +1,98 @@
+groups:
+  - name: contentflow-recording
+    interval: 30s
+    rules:
+      - record: contentflow:http_requests:rate5m
+        expr: sum(rate(contentflow_http_requests_total[5m]))
+      - record: contentflow:http_5xx_ratio:rate5m
+        expr: sum(rate(contentflow_http_requests_total{status_class="5xx"}[5m])) / clamp_min(sum(rate(contentflow_http_requests_total[5m])), 0.001)
+      - record: contentflow:http_request_duration_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (le, route) (rate(contentflow_http_request_duration_seconds_bucket[5m])))
+      - record: contentflow:queue_oldest_ready_age_seconds:max
+        expr: max(contentflow_queue_oldest_ready_age_seconds)
+      - record: contentflow:worker_nodes:max_by_state
+        expr: max by (state) (contentflow_worker_nodes)
+
+  - name: contentflow-alerts
+    interval: 30s
+    rules:
+      - alert: ContentFlowAPIDown
+        expr: up{job="contentflow-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: contentflow
+        annotations:
+          summary: ContentFlow API metrics target is unavailable
+          description: Prometheus has failed to scrape the ContentFlow API for two minutes.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - alert: ContentFlowHighHTTP5xxRate
+        expr: contentflow:http_requests:rate5m > 1 and contentflow:http_5xx_ratio:rate5m > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          service: contentflow
+        annotations:
+          summary: ContentFlow HTTP 5xx ratio is above 5 percent
+          description: The five-minute 5xx ratio remained above 5 percent with meaningful traffic for ten minutes.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - alert: ContentFlowHighP95Latency
+        expr: max(contentflow:http_request_duration_seconds:p95_5m) > 2
+        for: 10m
+        labels:
+          severity: warning
+          service: contentflow
+        annotations:
+          summary: ContentFlow API P95 latency is above two seconds
+          description: At least one route has exceeded two seconds P95 latency for ten minutes.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - alert: ContentFlowNoActiveWorkers
+        expr: max(contentflow_worker_nodes{state="active"}) < 1
+        for: 2m
+        labels:
+          severity: critical
+          service: contentflow
+        annotations:
+          summary: ContentFlow has no active Worker
+          description: The database heartbeat view reports no active Worker for two minutes.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - alert: ContentFlowStaleWorkerDetected
+        expr: max(contentflow_worker_nodes{state="stale"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: contentflow
+        annotations:
+          summary: ContentFlow has stale Worker heartbeats
+          description: At least one Worker heartbeat has remained stale for five minutes.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - alert: ContentFlowQueueOldestReadyTooHigh
+        expr: contentflow:queue_oldest_ready_age_seconds:max > 300
+        for: 5m
+        labels:
+          severity: critical
+          service: contentflow
+        annotations:
+          summary: ContentFlow queue wait exceeds five minutes
+          description: The oldest claimable queue item has exceeded five minutes for five minutes.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - alert: ContentFlowPublishReconciliationRequired
+        expr: max(contentflow_publish_reconciliation_required) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: contentflow
+        annotations:
+          summary: ContentFlow publish jobs require manual reconciliation
+          description: One or more publish jobs have required manual reconciliation for five minutes.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#发布自动对账与人工处置
+      - alert: ContentFlowPrometheusRuleEvaluationFailure
+        expr: increase(prometheus_rule_evaluation_failures_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: contentflow
+        annotations:
+          summary: Prometheus failed to evaluate a ContentFlow rule
+          description: Prometheus reported one or more rule evaluation failures in five minutes.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#监控基线与告警建议

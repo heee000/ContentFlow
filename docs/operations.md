@@ -136,7 +136,19 @@ python -m alembic history
 
 ## 监控基线与告警建议
 
-当前 `/health/ready` 同时检查 PostgreSQL 与对象存储；`/api/v1/admin/worker-health` 提供当前工作区的可操作诊断。启用受保护的 `/metrics` 后，Prometheus 可抓取 HTTP 请求数/延迟/并发和全局数据库运行 Gauge。推荐从以下规则开始，并在目标环境压测后校准阈值：
+当前 `/health/ready` 同时检查 PostgreSQL 与对象存储；`/api/v1/admin/worker-health` 提供当前工作区的可操作诊断。启用受保护的 `/metrics` 后，Prometheus 可抓取 HTTP 请求数/延迟/并发和全局数据库运行 Gauge。
+
+仓库提供可选 `observability` Compose profile。启动前必须把 `CONTENTFLOW_METRICS_ENABLED` 设为 `true`，设置不同的 32 位以上 `CONTENTFLOW_METRICS_BEARER_TOKEN` 与 `CONTENTFLOW_GRAFANA_ADMIN_PASSWORD`；HTTPS 环境还需设置真实 `CONTENTFLOW_GRAFANA_ROOT_URL` 和 `CONTENTFLOW_GRAFANA_COOKIE_SECURE=true`。默认 Grafana 只绑定 `127.0.0.1:3301`，Prometheus 不发布宿主端口：
+
+```powershell
+docker compose --profile observability up --build -d
+docker compose --profile observability ps
+docker compose exec prometheus /bin/promtool check config /etc/prometheus/prometheus.yml
+docker compose exec prometheus /bin/promtool check rules /etc/prometheus/contentflow.rules.yml
+docker compose exec prometheus /bin/promtool test rules /etc/prometheus/contentflow.rules.test.yml
+```
+
+Grafana secret preflight 会检查管理员密码长度且不允许与指标 Token 相同。抓取配置、5 条 recording rules、8 条 alerting rules、promtool 行为场景和 11 面板 Dashboard 均位于 `deploy/observability/`，由只读 provisioning 加载。以下是规则采用的核心 PromQL，阈值仍需在目标环境压测后校准：
 
 ```promql
 # 5 分钟 5xx 比例
@@ -158,7 +170,7 @@ up{job="contentflow-api"} == 0
 
 HTTP Counter/Histogram 来自各 API 进程，应按实例聚合。队列、Worker、Workflow/Eval 与发布对账 Gauge 都读取同一 PostgreSQL 全局视图，多 API 副本会重复暴露相同值，因此告警和看板使用 `max`，不能跨副本求和。
 
-现有指标只是一层安全、低基数的仓库基线。生产仍需部署 Prometheus/Alertmanager/Grafana 或等价平台，建立 recording/alert rules、SLO/错误预算、通知路由和值班手册；还需用 OpenTelemetry 和专用 Exporter 补齐 Provider/平台调用耗时与费用、数据库连接池/慢查询、对象存储错误、Trace 与结构化日志关联。
+可选 profile 已提供单机 Prometheus、规则和 Grafana 看板，但没有配置占位 Alertmanager receiver，避免把不存在的通知人伪装成闭环。生产仍需接入企业 Alertmanager/托管告警平台，完成 HA/remote-write/长期保留、SLO/错误预算、通知升级、静默权限、值班日历与故障演练；还需用 OpenTelemetry 和专用 Exporter 补齐 Provider/平台耗时与费用、数据库池/慢查询、对象存储错误、Trace 与集中日志关联。
 
 ## 故障处理
 

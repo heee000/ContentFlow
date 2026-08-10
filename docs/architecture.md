@@ -7,7 +7,8 @@
 ```mermaid
 flowchart TB
     Web["Next.js 运营工作台"] --> API["FastAPI + RBAC"]
-    Prometheus["Prometheus / 监控平台"] -->|"内部 Bearer 抓取"| API
+    Grafana["Grafana 运维看板"] --> Prometheus["Prometheus / 监控平台"]
+    Prometheus -->|"内部 Bearer 抓取"| API
     API --> DB["PostgreSQL / SQLite"]
     API --> Object["MinIO/S3 / 本地存储"]
     API --> Queue["数据库任务队列"]
@@ -114,7 +115,8 @@ flowchart TB
 - 每个 API 进程维护独立 Registry，记录按固定 method、完整 FastAPI 模板 route 和状态类别聚合的请求数、延迟直方图与并发数；未知方法统一为 `OTHER`，不会把原始资源 ID 写入标签。
 - 抓取时从 PostgreSQL 汇总 Job、最长就绪等待、Worker active/stale/stopped、Workflow/Eval 状态和发布人工对账数量。业务状态只使用固定集合，未知值聚合为 `unknown`，不暴露 workspace、用户或对象标识。
 - 数据库 Gauge 在每个 API 副本上表示同一个全局数据库视图；多副本查询应使用 `max` 去重。HTTP Counter/Histogram 则按实例用 `sum(rate(...))` 聚合。
-- 该基线还不包含 OpenTelemetry Trace、日志/Trace 关联、Provider 成本与外部平台耗时、数据库连接池/慢查询或对象存储错误，需要由后续统一可观测平台补齐。
+- 可选 Compose `observability` profile 使用固定摘要的 Prometheus 3.13.1 distroless 与 Grafana 13.1.0，Token/管理员密码经 Compose secrets 注入；Prometheus 不映射宿主端口，Grafana 默认仅绑定 loopback。
+- 仓库提供 5 条 recording rules、8 条 alerting rules、7 类故障 promtool 行为测试和 11 面板只读 Grafana Dashboard。当前仍没有企业 Alertmanager receiver、HA/remote-write、OpenTelemetry Trace、日志关联、Provider 成本、数据库慢查询或对象存储深度信号。
 
 ## 9. 前端
 

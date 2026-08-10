@@ -1,0 +1,104 @@
+rule_files:
+  - contentflow.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: sustained operational failures trigger bounded alerts
+    interval: 1m
+    input_series:
+      - series: up{job="contentflow-api",instance="api:8000"}
+        values: 0x20
+      - series: contentflow_http_requests_total{method="GET",route="/health/ready",status_class="2xx"}
+        values: 0+100x20
+      - series: contentflow_http_requests_total{method="GET",route="/health/ready",status_class="5xx"}
+        values: 0+10x20
+      - series: contentflow_http_request_duration_seconds_bucket{method="GET",route="/health/ready",le="0.5"}
+        values: 0+20x20
+      - series: contentflow_http_request_duration_seconds_bucket{method="GET",route="/health/ready",le="1"}
+        values: 0+80x20
+      - series: contentflow_http_request_duration_seconds_bucket{method="GET",route="/health/ready",le="2.5"}
+        values: 0+100x20
+      - series: contentflow_http_request_duration_seconds_bucket{method="GET",route="/health/ready",le="+Inf"}
+        values: 0+100x20
+      - series: contentflow_worker_nodes{state="active"}
+        values: 0x20
+      - series: contentflow_worker_nodes{state="stale"}
+        values: 1x20
+      - series: contentflow_queue_oldest_ready_age_seconds
+        values: 600x20
+      - series: contentflow_publish_reconciliation_required
+        values: 1x20
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ContentFlowAPIDown
+        exp_alerts:
+          - exp_labels:
+              instance: api:8000
+              job: contentflow-api
+              service: contentflow
+              severity: critical
+            exp_annotations:
+              summary: ContentFlow API metrics target is unavailable
+              description: Prometheus has failed to scrape the ContentFlow API for two minutes.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - eval_time: 12m
+        alertname: ContentFlowHighHTTP5xxRate
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: critical
+            exp_annotations:
+              summary: ContentFlow HTTP 5xx ratio is above 5 percent
+              description: The five-minute 5xx ratio remained above 5 percent with meaningful traffic for ten minutes.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - eval_time: 12m
+        alertname: ContentFlowHighP95Latency
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: warning
+            exp_annotations:
+              summary: ContentFlow API P95 latency is above two seconds
+              description: At least one route has exceeded two seconds P95 latency for ten minutes.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - eval_time: 12m
+        alertname: ContentFlowNoActiveWorkers
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: critical
+            exp_annotations:
+              summary: ContentFlow has no active Worker
+              description: The database heartbeat view reports no active Worker for two minutes.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - eval_time: 12m
+        alertname: ContentFlowStaleWorkerDetected
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: warning
+            exp_annotations:
+              summary: ContentFlow has stale Worker heartbeats
+              description: At least one Worker heartbeat has remained stale for five minutes.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - eval_time: 12m
+        alertname: ContentFlowQueueOldestReadyTooHigh
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: critical
+            exp_annotations:
+              summary: ContentFlow queue wait exceeds five minutes
+              description: The oldest claimable queue item has exceeded five minutes for five minutes.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#故障处理
+      - eval_time: 12m
+        alertname: ContentFlowPublishReconciliationRequired
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: warning
+            exp_annotations:
+              summary: ContentFlow publish jobs require manual reconciliation
+              description: One or more publish jobs have required manual reconciliation for five minutes.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#发布自动对账与人工处置
