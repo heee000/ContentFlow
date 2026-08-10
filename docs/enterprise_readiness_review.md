@@ -1202,7 +1202,7 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 | Secret/暴露面 | metrics/Grafana secrets 文件注入；密码长度与分离 preflight；Prometheus 仅内部端口；Grafana 默认 loopback | 企业 KMS/Vault 动态轮换、TLS 网关、Grafana SSO/RBAC 与访问审计 |
 | 规则 | 5 recording、8 alerting；持续时间、严重度和 runbook；数据库 Gauge `max` 去重 | 真实流量阈值校准、SLO burn-rate、多窗口告警和告警噪声治理 |
 | 看板 | Git 管理的 Prometheus datasource、只读 provider、11 面板 API/Worker/队列/Workflow/Eval/发布总览 | Provider 成本、DB/对象/渠道、业务/租户安全聚合和长期趋势 |
-| 自动化 | 4 项 Python 资产契约、92 passed/7 skipped、79.85%；CI 已加入 promtool config/rules/行为测试 | 当前提交的远程 promtool 结果、真实容器启动与通知到达人证据 |
+| 自动化 | 4 项 Python 资产契约、92 passed/7 skipped、79.85%；提交 `c9d73101e7318da5fed5e496ad9a78eb7fb09832` 的 CI #31374854714 已通过 promtool config/rules/行为测试、真实 PostgreSQL/MinIO 与双端门禁 | 真实监控容器长期运行与通知到达人证据 |
 
 ### 27.3 当前仍存在的 5 个不足
 
@@ -1237,7 +1237,7 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 | 文本/Embedding | Mock/Hash + 显式 OpenAI-compatible；无默认真实模型名 | 真实服务质量、费用、限流与故障矩阵 |
 | 图片/视频 | 中立 HTTP 同步/异步契约、任务轮询、结果大小限制、脱敏错误与下载/重定向域名允许列表 | 协议版本、幂等、取消、Webhook、能力发现与真实服务签收 |
 | 启动安全 | 真实 Provider 缺 Base/Key/模型名时 fail-fast | KMS/Vault、动态短凭据、轮换与配置签名 |
-| 自动化 | 全量 104 passed/7 skipped、81.11% 分支覆盖率；前端双构建与双端依赖审计通过；同版本 promtool config/rules/行为测试通过；CI secret 路径已修正 | 本阶段最终远程 CI、受保护分支与 PR 必需检查 |
+| 自动化 | 全量 104 passed/7 skipped、81.11% 分支覆盖率；提交 `c9d73101e7318da5fed5e496ad9a78eb7fb09832` 的 [CI #31374854714](https://github.com/heee000/ContentFlow/actions/runs/31374854714) 已通过 promtool、真实 PostgreSQL/MinIO、前端双构建与双端依赖审计 | 受保护分支与 PR 必需检查 |
 
 ### 28.3 当前仍存在的 5 个不足
 

@@ -1272,7 +1272,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 
 - 默认 Compose 与 `--profile observability` 配置均可解析；Docker 引擎当前不可用，因此尚未把 Prometheus/Grafana 容器在本机真实启动，不能把配置解析等同于运行签收。
 - 监控资产专项 4 passed；与指标 API 合并专项 7 passed。全量后端 92 passed、7 skipped，分支覆盖率 79.85%；全仓 Ruff 通过。
-- `uv.lock` 已加入测试专用 PyYAML 6.0.3。正式 promtool/真实 PostgreSQL/MinIO 与双端构建证据等待本阶段提交后的 GitHub CI。
+- `uv.lock` 已加入测试专用 PyYAML 6.0.3。提交 `c9d73101e7318da5fed5e496ad9a78eb7fb09832` 的 [ContentFlow CI #31374854714](https://github.com/heee000/ContentFlow/actions/runs/31374854714) 已完成正式 promtool config/rules/行为测试、真实 PostgreSQL/pgvector、MinIO、覆盖率和双端构建/安全签收。
 
 ### 持续复审：当前仍存在的 5 个不足
 
@@ -1313,7 +1313,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 全量后端 `104 passed、7 skipped`，分支覆盖率 `81.11%`，高于 75% 门槛；本机跳过项仍仅为需要真实 PostgreSQL/pgvector 和 MinIO 的集成测试。全仓 Ruff 静态检查与本轮文件格式检查通过。
 - 前端 ESLint、Sites/vinext 两项渲染测试、Next.js 生产构建通过；`npm audit` 与 `pip-audit --strict` 均为 0 个已知漏洞，`uv lock --check` 通过。
 - 默认与 observability Compose、Alembic 单 head、`.env.example`、严格 UTF-8、YAML/JSON 均通过；同版本 Prometheus 3.13.1 `check config`、`check rules` 和 `test rules` 已在本机通过。
-- 远程 CI 证据将在本阶段提交完成后更新；在此之前不把本轮称为远程签收。
+- 提交 `c9d73101e7318da5fed5e496ad9a78eb7fb09832` 的 [ContentFlow CI #31374854714](https://github.com/heee000/ContentFlow/actions/runs/31374854714) 已通过：Backend 16 个步骤、Frontend 11 个步骤均成功，包含 promtool、真实 PostgreSQL/pgvector、MinIO、104 项后端测试、分支覆盖率和双端依赖审计。
 
 ### 持续复审：当前仍存在的 5 个不足
 
