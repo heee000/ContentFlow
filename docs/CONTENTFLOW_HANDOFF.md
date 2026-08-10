@@ -1181,3 +1181,40 @@ Prompt 治理从“只能追溯内置常量”提升到“工作区不可变版�
 ### 成熟度判断
 
 Prompt/模型变更控制已从“人工审批后直接发布”推进到“不可变版本、双人职责分离、确定性自动 Eval、目标 Provider/模型绑定、切换失效和失败关闭”，AI 治理局部达到 L2-L3。它实质关闭了无评测证据仍可审批的缺口，但不能把结构断言等同于语义质量、合规或成本最优。综合项目仍约为 L2；成熟企业完整项目仍要求真实多平台、语义/安全/成本 Eval、企业 IAM/SRE/合规、签名制品和跨故障域灾备共同形成长期生产证据。
+
+## 21.19 生产受治理 Prompt 强制门禁与第十五轮复审
+
+### 已关闭的生产绕过风险
+
+1. `Settings` 新增 `require_governed_prompts`。开发/离线环境默认关闭以保持可测试性；生产环境必须显式设置 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true`，否则 API/Worker 启动 fail fast。Compose 的 API 与 Worker 默认启用该门禁。
+2. 生产不再允许工作区长期使用 builtin Prompt 生成。没有活动工作区 Release 时，创建运行请求直接返回明确 409，不创建 `WorkflowRun` 或队列 Job；Worker 仍在首次模型调用前复核，防止入队后 Release、Suite、Provider 或模型发生漂移。
+3. 即使已有活动 Release，入队前也会校验 Prompt/Suite 完整性，以及与该次请求 Provider/模型匹配的当前 passed Eval；完整性失败返回统一安全错误，普通门禁失败返回可操作原因。
+4. 管理 API 新增 `governance_required`、`ready_for_generation` 与 `generation_block_reason`。管理工作台用 active/blocked 徽标、阻断提示和五步初始化顺序展示真实可生成状态，不把“存在内置 Prompt”误报为生产就绪。
+5. 运维文档规定受限网络内的双管理员初始化：门禁保持开启，临时允许注册；完成 Eval 双人激活、真实目标模型评测、Prompt 双人审批和激活后关闭注册。禁止通过临时关闭治理门禁完成 bootstrap。
+
+### 本阶段验证证据
+
+- 安全与 Prompt 治理专项 24 passed；全量后端 83 passed、6 skipped，分支覆盖率 79.38%，高于 75% 门槛；本机跳过项仍为需真实服务的 PostgreSQL/MinIO 集成测试。
+- Ruff 格式与静态检查通过；前端 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js 生产构建通过。
+- 新回归证明：生产配置关闭治理门禁时启动拒绝；builtin + 强制治理时 readiness 为 blocked；生成请求返回 409 且数据库中没有 `workflow.execute` Job。
+- 本阶段尚待推送后由 GitHub Actions 在真实 PostgreSQL/pgvector 与 MinIO 服务上签收；远程 CI 结果不得提前写成已通过。
+
+### 持续复审：当前仍存在的 5 个不足
+
+1. **Eval 仍偏结构契约而非语义质量**：缺版本化知识快照、RAG recall/precision、引用支持度、事实性、注入/PII/版权、安全红队、重复采样置信度和真实 Token/费用阈值。
+2. **治理初始化仍是人工运维流程**：虽然已有安全顺序与双人约束，但没有一次性邀请令牌、组织级 bootstrap wizard、审批 SLA、break-glass 双人授权、周期复核和签名 Eval 制品。
+3. **真实渠道生产矩阵仍不完整**：公众号公开发布/最终 article_id 对账与异常矩阵未签；抖音企业账号未就绪，小红书仍为人工导出，通用事件 Inbox/验签/去重和平台原生幂等不足。
+4. **SRE 与成本运营证据不足**：缺 OpenTelemetry/Prometheus、端到端 Trace、SLI/SLO/告警、Provider 熔断/配额、生成/Eval 成本看板、多副本耐久、滚动升级和持续故障注入。
+5. **企业安全、合规与灾备仍未共同签收**：OIDC/SAML/MFA/SCIM、RLS、租户生命周期、不可篡改审计、PITR/异地/Object Lock、SBOM/镜像签名、独立迁移和灰度回滚仍缺长期证据。
+
+### 接下来最值得继续做的 5 项改进
+
+1. 扩展 Eval Registry：绑定知识与生成参数快照、人工金标和候选/基线，增加事实性、RAG、注入、PII/版权、安全、统计稳定性及真实账单阈值。
+2. 建设组织级安全初始化与治理运维：一次性邀请、bootstrap 完成状态、审批 SLA、双人 break-glass、定期再认证和签名 Eval 数据集/结果制品。
+3. 在公众号授权边界内补齐发布/对账异常矩阵；抖音就绪后签收 OAuth、上传、发布、回调和指标，同时统一 Inbox、验签、去重和幂等状态机。
+4. 接入 OTel/Prometheus，定义 API、数据库、队列、Worker、对象存储、AI/Eval、发布与成本 SLO，配套告警、容量、值班和混沌演练。
+5. 用真实企业 IdP/PostgreSQL 和恢复环境签收 IAM/RLS/租户生命周期/审计归档，再完成 c95 联合恢复、PITR/异地不可变恢复、SBOM/签名、独立迁移与灰度回滚。
+
+### 成熟度判断
+
+本轮把 AI 治理从“有 Release/Eval，但生产仍可停留在 builtin”推进到“生产必须显式启用治理、入队前可见阻断、Worker 二次复核、安全 bootstrap 有操作手册”。AI 变更控制继续位于 L2-L3，综合成熟度仍约 L2：它已是一套可部署、可治理、可持续验证的产品基线，但距离成熟企业完整交付还缺语义质量、组织治理、真实多渠道、SRE/成本、企业 IAM/合规和跨故障域灾备的长期共同证据。

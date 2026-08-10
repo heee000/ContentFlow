@@ -96,6 +96,9 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /版本化 Prompt Eval 套件/);
   assert.match(app, /创建不可变 Eval 套件草稿/);
   assert.match(app, /需先通过当前 Eval 套件/);
+  assert.match(app, /生成已被治理策略阻断/);
+  assert.match(app, /ready_for_generation/);
+  assert.match(app, /生产初始化顺序/);
   assert.match(app, /prompt-eval/);
   assert.match(app, /人工发布/);
   assert.match(app, /生成记录/);

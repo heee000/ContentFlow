@@ -130,6 +130,9 @@ class ActivePromptSetResponse(BaseModel):
 
 class PromptGovernanceResponse(BaseModel):
     active: ActivePromptSetResponse
+    governance_required: bool
+    ready_for_generation: bool
+    generation_block_reason: str | None
     releases: list[PromptReleaseResponse]
 
 
@@ -250,7 +253,7 @@ class CampaignResponse(ORMModel):
 
 
 class WorkflowRunRequest(BaseModel):
-    provider: str | None = None
+    provider: str | None = Field(default=None, max_length=80)
     regenerate_platforms: list[Platform] = Field(default_factory=list)
 
 

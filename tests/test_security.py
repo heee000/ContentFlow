@@ -29,6 +29,7 @@ def production_settings(**overrides) -> Settings:
         "s3_access_key": "access",
         "s3_secret_key": "secret",
         "allow_mock_providers": True,
+        "require_governed_prompts": True,
     }
     values.update(overrides)
     return Settings(**values)
@@ -178,6 +179,11 @@ class RuntimeSettingsTest(unittest.TestCase):
     def test_production_requires_s3_storage(self):
         settings = production_settings(storage_backend="local")
         with self.assertRaisesRegex(ValueError, "S3-compatible"):
+            settings.validate_runtime()
+
+    def test_production_requires_governed_prompts(self):
+        settings = production_settings(require_governed_prompts=False)
+        with self.assertRaisesRegex(ValueError, "REQUIRE_GOVERNED_PROMPTS"):
             settings.validate_runtime()
 
     def test_production_requires_separate_credential_key(self):

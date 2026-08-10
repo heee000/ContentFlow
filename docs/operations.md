@@ -11,6 +11,7 @@
 - 明确的 `CONTENTFLOW_CORS_ORIGINS`，不得包含 `*`
 - Web 映射端口与跨域来源一致；例如 `CONTENTFLOW_WEB_PORT=3300` 时，CORS 列表需包含 `http://localhost:3300`
 - 真实生产设置 `CONTENTFLOW_ALLOW_MOCK_PROVIDERS=false`，并配置文本、Embedding、图片、视频 Provider 所需的 Base URL、API Key 和 Workspace ID
+- 显式设置 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true`；生产启动会拒绝关闭，Compose 的 API/Worker 默认启用
 - 初始管理员创建完成后设置 `CONTENTFLOW_ALLOW_REGISTRATION=false`
 - 根据入口网关限制设置 `CONTENTFLOW_MAX_UPLOAD_BYTES`；应用默认上限为 100 MiB
 
@@ -18,6 +19,20 @@
 密钥轮换时先把新值设为 `CONTENTFLOW_CREDENTIAL_ENCRYPTION_KEY`，把旧凭据密钥加入 JSON 数组 `CONTENTFLOW_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`，所有 API/Worker 实例同时部署后重新创建平台连接，确认新密钥可解密，再移除旧密钥。应用签名密钥与凭据加密密钥不得复用，也不得只保存在同一台主机的 `.env` 中。
 
 仓库不会在生产环境自动 `create_all`。API 容器启动前执行 `alembic upgrade head`；迁移失败时服务不会启动。
+
+## 受治理 Prompt 的生产初始化
+
+生产环境不存在“先用内置 Prompt 顶着运行”的旁路。`CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true` 时，管理页会显示生成就绪状态；没有活动的受治理 Prompt，或活动 Prompt 缺少与当前 Eval 套件、Provider 和模型完全匹配的通过证据时，创建生成任务直接返回 409，Worker 在真正调用模型前还会再次复核。
+
+首次部署按以下顺序初始化：
+
+1. 保持 `CONTENTFLOW_ENVIRONMENT=production` 与 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true`，临时设置 `CONTENTFLOW_ALLOW_REGISTRATION=true`；初始化入口必须限制在 VPN、堡垒机或 IP 白名单内。
+2. 注册两名独立管理员账户；第一名创建目标工作区，并在“团队管理”中把第二名加入该工作区且设为管理员。
+3. 第一名创建覆盖 plan/generate/review 的 Eval 套件，第二名激活；套件创建者不得自行激活。
+4. 第一名基于内置安全基线创建 Prompt 草稿，用生产目标 Provider/模型运行评测；通过后由第二名审批，再由有权限的管理员激活。
+5. 确认管理页 Prompt 状态为可生成，执行一次受控生成；随后设置 `CONTENTFLOW_ALLOW_REGISTRATION=false` 并重新部署全部 API 实例。
+
+不要为初始化临时关闭治理门禁，也不要把注册入口直接暴露到公网。目标 Provider/模型、活动 Eval 套件或 Prompt 哈希变化会使旧证据失效，必须重新评测。
 
 ## Docker Compose
 

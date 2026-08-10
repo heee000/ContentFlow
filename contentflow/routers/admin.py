@@ -328,6 +328,33 @@ def require_eval_gate_or_409(
         ) from error
 
 
+def prompt_generation_readiness(
+    session: Session,
+    *,
+    active_release_id: str | None,
+    settings: AppSettings,
+) -> tuple[bool, str | None]:
+    if active_release_id is None:
+        if settings.require_governed_prompts:
+            return (
+                False,
+                "当前环境要求受治理 Prompt；请先创建并激活 Eval 套件，"
+                "再完成 Prompt 评测、双人审批与激活",
+            )
+        return True, None
+
+    release = session.get(PromptRelease, active_release_id)
+    if release is None:
+        return False, "当前生效 Prompt 版本不存在"
+    try:
+        require_current_passed_eval(session, release, settings)
+    except (EvalIntegrityError, PromptIntegrityError):
+        return False, "当前 Prompt 或 Eval 套件完整性校验失败"
+    except ValueError as error:
+        return False, str(error)
+    return True, None
+
+
 def lock_workspace(session: Session, workspace_id: str) -> Workspace:
     query = select(Workspace).where(Workspace.id == workspace_id)
     if session.bind and session.bind.dialect.name == "postgresql":
@@ -361,7 +388,7 @@ def get_prompt_release_or_404(
     "/prompt-releases",
     response_model=PromptGovernanceResponse,
 )
-def list_prompt_releases(principal: Admin, session: Db):
+def list_prompt_releases(principal: Admin, session: Db, settings: AppSettings):
     releases = list(
         session.scalars(
             select(PromptRelease)
@@ -376,6 +403,11 @@ def list_prompt_releases(principal: Admin, session: Db):
             status_code=status.HTTP_409_CONFLICT,
             detail="当前生效 Prompt 的完整性校验失败，请暂停生成并联系管理员",
         ) from error
+    ready_for_generation, generation_block_reason = prompt_generation_readiness(
+        session,
+        active_release_id=active.release_id,
+        settings=settings,
+    )
     return PromptGovernanceResponse(
         active={
             "source": active.source,
@@ -384,6 +416,9 @@ def list_prompt_releases(principal: Admin, session: Db):
             "prompts": dict(active.prompts),
             "prompt_hashes": dict(active.hashes),
         },
+        governance_required=settings.require_governed_prompts,
+        ready_for_generation=ready_for_generation,
+        generation_block_reason=generation_block_reason,
         releases=[prompt_release_response(release) for release in releases],
     )
 

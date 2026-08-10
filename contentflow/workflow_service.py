@@ -51,6 +51,24 @@ def execute_workflow_run(
     if campaign is None or campaign.workspace_id != run.workspace_id:
         raise ValueError("工作流关联的活动不存在")
 
+    prompt_set = resolve_active_prompt_set(session, run.workspace_id)
+    if not prompt_set.release_id and settings.require_governed_prompts:
+        raise ValueError(
+            "当前环境要求受治理 Prompt；请先完成 Eval 套件、Prompt 评测、双人审批与激活"
+        )
+    provider_override = run.request_json.get("provider")
+    provider = build_text_provider(settings, provider_override)
+    if prompt_set.release_id:
+        release = session.get(PromptRelease, prompt_set.release_id)
+        if release is None or release.workspace_id != run.workspace_id:
+            raise ValueError("工作流关联的 Prompt 版本不存在")
+        require_current_passed_eval(
+            session,
+            release,
+            settings,
+            provider_override,
+        )
+
     run.status = "running"
     run.current_stage = "knowledge_retrieval"
     run.started_at = datetime.now(timezone.utc)
@@ -78,19 +96,6 @@ def execute_workflow_run(
     )
     knowledge_payload = [chunk.to_dict() for chunk in retrieved]
 
-    provider_override = run.request_json.get("provider")
-    provider = build_text_provider(settings, provider_override)
-    prompt_set = resolve_active_prompt_set(session, run.workspace_id)
-    if prompt_set.release_id:
-        release = session.get(PromptRelease, prompt_set.release_id)
-        if release is None or release.workspace_id != run.workspace_id:
-            raise ValueError("工作流关联的 Prompt 版本不存在")
-        require_current_passed_eval(
-            session,
-            release,
-            settings,
-            provider_override,
-        )
     provenance = AIProvenanceRecorder(
         provider,
         embedding_provider=settings.embedding_provider,

@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..db import get_db
-from ..dependencies import CurrentPrincipal, Principal, require_role
-from ..entities import Campaign, WorkflowRun
+from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
+from ..entities import Campaign, PromptRelease, WorkflowRun
 from ..job_queue import enqueue_job
+from ..prompt_eval import EvalIntegrityError, require_current_passed_eval
+from ..prompt_governance import PromptIntegrityError, resolve_active_prompt_set
 from ..schemas import WorkflowRunRequest, WorkflowRunResponse
 from .campaigns import get_campaign_or_404
 
@@ -53,12 +55,40 @@ def create_run(
     payload: WorkflowRunRequest,
     principal: Editor,
     session: Db,
+    settings: AppSettings,
 ):
     campaign: Campaign = get_campaign_or_404(
         session, principal.workspace_id, campaign_id
     )
     if campaign.status == "archived":
         raise HTTPException(status_code=409, detail="归档活动不能生成内容")
+    try:
+        prompt_set = resolve_active_prompt_set(session, principal.workspace_id)
+        if not prompt_set.release_id and settings.require_governed_prompts:
+            raise ValueError(
+                "当前环境要求受治理 Prompt；请先完成 Eval 套件、"
+                "Prompt 评测、双人审批与激活"
+            )
+        if prompt_set.release_id:
+            release = session.get(PromptRelease, prompt_set.release_id)
+            if release is None or release.workspace_id != principal.workspace_id:
+                raise ValueError("工作流关联的 Prompt 版本不存在")
+            require_current_passed_eval(
+                session,
+                release,
+                settings,
+                payload.provider,
+            )
+    except (EvalIntegrityError, PromptIntegrityError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="当前 Prompt 或 Eval 套件完整性校验失败，已禁止生成",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
     run = WorkflowRun(
         workspace_id=principal.workspace_id,
         campaign_id=campaign.id,
@@ -100,4 +130,3 @@ def get_run(run_id: str, principal: CurrentPrincipal, session: Db):
     if run is None:
         raise HTTPException(status_code=404, detail="运行记录不存在")
     return run
-

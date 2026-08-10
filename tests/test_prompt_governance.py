@@ -4,13 +4,20 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from contentflow import db
 from contentflow.api import create_app
-from contentflow.entities import Campaign, PromptEvalRun, PromptRelease, WorkflowRun
+from contentflow.entities import (
+    Campaign,
+    Job,
+    PromptEvalRun,
+    PromptRelease,
+    WorkflowRun,
+)
 from contentflow.prompt_governance import (
     PromptIntegrityError,
     resolve_active_prompt_set,
@@ -212,6 +219,9 @@ class PromptGovernanceTest(unittest.TestCase):
         )
         self.assertEqual(baseline.status_code, 200, baseline.text)
         self.assertEqual(baseline.json()["active"]["source"], "builtin")
+        self.assertFalse(baseline.json()["governance_required"])
+        self.assertTrue(baseline.json()["ready_for_generation"])
+        self.assertIsNone(baseline.json()["generation_block_reason"])
         self.assertEqual(baseline.json()["releases"], [])
 
         invalid = self.client.post(
@@ -432,6 +442,72 @@ class PromptGovernanceTest(unittest.TestCase):
         with db.SessionLocal() as session:
             with self.assertRaises(PromptIntegrityError):
                 resolve_active_prompt_set(session, self.workspace_id)
+
+    def test_required_governance_blocks_builtin_prompt_before_enqueue(self):
+        self.settings.require_governed_prompts = True
+        governance = self.client.get(
+            "/api/v1/admin/prompt-releases",
+            headers=self.owner_headers,
+        )
+        self.assertEqual(governance.status_code, 200, governance.text)
+        self.assertTrue(governance.json()["governance_required"])
+        self.assertFalse(governance.json()["ready_for_generation"])
+        self.assertIn("受治理 Prompt", governance.json()["generation_block_reason"])
+
+        campaign = self.client.post(
+            "/api/v1/campaigns",
+            headers=self.owner_headers,
+            json={
+                "name": "生产 Prompt 门禁活动",
+                "product_name": "ContentFlow",
+                "objective": "验证未完成治理时禁止生成",
+                "audience": "企业内容运营人员",
+                "platforms": ["wechat"],
+            },
+        )
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        invalid_provider = self.client.post(
+            f"/api/v1/campaigns/{campaign.json()['id']}/runs",
+            headers=self.owner_headers,
+            json={"provider": "x" * 81},
+        )
+        self.assertEqual(invalid_provider.status_code, 422, invalid_provider.text)
+        blocked = self.client.post(
+            f"/api/v1/campaigns/{campaign.json()['id']}/runs",
+            headers=self.owner_headers,
+            json={"provider": "mock"},
+        )
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertIn("受治理 Prompt", blocked.text)
+        with db.SessionLocal() as session:
+            queued = session.scalar(
+                select(Job).where(Job.job_type == "workflow.execute")
+            )
+            self.assertIsNone(queued)
+
+        with (
+            patch("contentflow.workflow_service.build_text_provider") as text_provider,
+            patch(
+                "contentflow.workflow_service.build_embedding_provider"
+            ) as embedding_provider,
+            db.SessionLocal() as session,
+        ):
+            direct_run = WorkflowRun(
+                workspace_id=self.workspace_id,
+                campaign_id=campaign.json()["id"],
+                status="queued",
+                current_stage="queued",
+                provider="mock",
+                trace_id="governed-prompt-runtime-guard",
+                request_json={"provider": "mock"},
+            )
+            session.add(direct_run)
+            session.flush()
+            with self.assertRaisesRegex(ValueError, "受治理 Prompt"):
+                execute_workflow_run(session, direct_run, self.settings)
+            session.rollback()
+            text_provider.assert_not_called()
+            embedding_provider.assert_not_called()
 
 
 if __name__ == "__main__":

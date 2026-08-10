@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     auth_refresh_ip_attempts: int = Field(default=300, ge=1, le=100_000)
     allow_registration: bool = True
     allow_mock_providers: bool = False
+    require_governed_prompts: bool = False
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:3000",
@@ -160,6 +161,10 @@ class Settings(BaseSettings):
             raise ValueError("Production requires shared authentication rate limiting")
         if self.production and self.storage_backend != "s3":
             raise ValueError("Production requires S3-compatible object storage")
+        if self.production and not self.require_governed_prompts:
+            raise ValueError(
+                "Production requires CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true"
+            )
         if self.production and (
             not self.credential_encryption_key
             or len(self.credential_encryption_key) < 32

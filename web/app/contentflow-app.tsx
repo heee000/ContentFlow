@@ -245,6 +245,9 @@ type PromptGovernance = {
     prompts: Record<PromptStage, string>;
     prompt_hashes: Record<PromptStage, string>;
   };
+  governance_required: boolean;
+  ready_for_generation: boolean;
+  generation_block_reason: string | null;
   releases: PromptRelease[];
 };
 
@@ -2764,10 +2767,26 @@ function AdministrationView({
             <p className="eyebrow">AI governance</p>
             <h2>Prompt 审批、发布与回滚</h2>
           </div>
-          {promptGovernance ? <StatusBadge value="active" /> : null}
+          {promptGovernance ? (
+            <StatusBadge
+              value={promptGovernance.ready_for_generation ? "active" : "blocked"}
+            />
+          ) : null}
         </div>
         {promptGovernance ? (
           <>
+            {!promptGovernance.ready_for_generation ? (
+              <p className="permission-note" role="status">
+                生成已被治理策略阻断：{promptGovernance.generation_block_reason}
+              </p>
+            ) : null}
+            {promptGovernance.governance_required
+              && promptGovernance.active.source === "builtin" ? (
+                <p className="form-note">
+                  生产初始化顺序：添加第二名管理员；创建 Eval 套件并由对方激活；
+                  创建 Prompt 草稿；使用当前目标模型运行评测；最后由另一名管理员审批并激活。
+                </p>
+              ) : null}
             <div className="prompt-active-summary">
               <div>
                 <small>当前来源</small>
