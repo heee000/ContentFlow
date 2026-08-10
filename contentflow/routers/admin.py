@@ -867,7 +867,7 @@ def evaluate_prompt_release(
         ) from error
 
     provider = (payload.provider or settings.text_provider).strip().lower()
-    if provider not in {"mock", "dashscope", "openai-compatible"}:
+    if provider not in {"mock", "openai-compatible"}:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"不支持的文本模型 Provider: {provider}",

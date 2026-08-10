@@ -2,7 +2,7 @@
 
 ContentFlow 是一套可部署的 AI 内容营销自动化系统，覆盖“内容策划 → 生产 → 审核 → 分发 → 数据复盘”主链路。项目包含 FastAPI 服务、持久化任务队列、RAG/pgvector、模型与平台适配层、对象存储、权限与审计、运营工作台、数据库迁移、Docker Compose 和自动化测试。
 
-默认配置完全离线：文本、图片与视频任务使用明确标注的 Mock Provider，不调用付费模型，也不会冒充真实发布。配置百炼和平台授权后，同一套工作流可以切换到真实模型、抖音发布和公众号草稿/发布能力；小红书保持审核后导出模式。
+默认配置完全离线：文本、图片与视频任务使用明确标注的 Mock Provider，不调用付费模型，也不会冒充真实发布。配置中立的模型/媒体 Provider 和平台授权后，同一套工作流可以切换到真实模型、抖音发布和公众号草稿/发布能力；小红书保持审核后导出模式。
 
 ## 完整业务流程
 
@@ -27,13 +27,13 @@ flowchart LR
 - PBKDF2 密码哈希、HMAC 签名访问令牌、Fernet 平台凭据加密
 - 活动 Brief、运行批次、内容版本、平台结构化排版/分镜、素材、渠道、发布、指标和审计持久化
 - Markdown/TXT/CSV/JSON 知识导入、切块、引用追踪
-- 离线 Hash Embedding；生产环境支持 OpenAI 兼容/百炼 Embedding
+- 离线 Hash Embedding；生产环境支持显式配置的 OpenAI-compatible Embedding
 - PostgreSQL + pgvector 1024 维向量列和 HNSW 余弦索引
-- Mock/OpenAI 兼容/百炼文本生成
+- Mock/OpenAI-compatible 文本生成
 - 每次文本生成记录 Provider、模型、Prompt 来源/发布版本、Prompt/输入/输出摘要、分阶段时延和 Provider 返回的 Token 用量；不在运行追溯中复制原始 Prompt，也不虚构 Token 或成本
 - 工作区 Prompt Registry：不可变草稿、另一名管理员审批/拒绝、激活与历史回滚；激活和运行前校验正文 SHA-256，审计只保存版本与哈希
 - 版本化 Prompt Eval：不可变确定性用例、双人激活、异步 Worker 执行、Prompt/套件/目标 Provider 与模型绑定；当前套件未通过时审批、激活、回滚和每次实际生成均失败关闭
-- Mock/Wan 图片与异步视频生成，生成结果写入本地存储或 S3/MinIO
+- Mock/中立 HTTP 图片与异步视频生成，生成结果写入本地存储或 S3/MinIO
 - 人工审核门禁、内容版本校验、旧素材失效
 - 小红书卡片结构、抖音逐镜头脚本和公众号章节结构随版本保存并进入投放链路
 - 抖音视频上传/创建/数据回收适配器
@@ -134,20 +134,32 @@ docker compose --profile observability up --build -d
 
 浏览器会话默认使用 15 分钟访问令牌和 14 天旋转刷新令牌；二者只通过 `HttpOnly`、`SameSite=Lax` Cookie 传输，生产环境自动启用 `Secure`，前端不再保存 Bearer Token。Web 与 API 应部署在同一站点的 HTTPS 域名下；`CONTENTFLOW_AUTH_COOKIE_DOMAIN` 默认留空以使用范围最小的 host-only Cookie。生产构建会把 API Origin 固定为 `NEXT_PUBLIC_CONTENTFLOW_API_BASE` 并生成 CSP；只有 HTTPS API 构建才启用 HSTS 与请求升级。本地开发仍可修改 API 地址。登录、注册和刷新由 PostgreSQL 共享限流保护，限流键不保存邮箱/IP 明文；只有经过明确信任的反向代理才配置 `CONTENTFLOW_TRUSTED_PROXY_HOPS`。脚本和受控 CLI 仍可使用登录响应中的短期 Bearer Token。
 
-## 切换百炼
+## 配置真实 AI Provider
+
+文本与 Embedding 使用显式配置的 OpenAI-compatible 端点，不预设云厂商或模型：
 
 ```dotenv
-CONTENTFLOW_TEXT_PROVIDER=dashscope
-CONTENTFLOW_EMBEDDING_PROVIDER=dashscope
-CONTENTFLOW_IMAGE_PROVIDER=dashscope
-CONTENTFLOW_VIDEO_PROVIDER=dashscope
-CONTENTFLOW_DASHSCOPE_API_KEY=...
-CONTENTFLOW_DASHSCOPE_WORKSPACE_ID=...
-CONTENTFLOW_DASHSCOPE_REGION=beijing
+CONTENTFLOW_TEXT_PROVIDER=openai-compatible
+CONTENTFLOW_EMBEDDING_PROVIDER=openai-compatible
+CONTENTFLOW_MODEL_API_BASE=https://models.example.com/v1
+CONTENTFLOW_MODEL_API_KEY=...
+CONTENTFLOW_TEXT_MODEL=configured-text-model
+CONTENTFLOW_EMBEDDING_MODEL=configured-embedding-model
 ```
 
-文本与 Embedding 使用百炼 OpenAI 兼容接口；图片调用 Wan 多模态生成接口；视频调用异步视频生成接口并由 Worker 轮询。百炼不同地域的 API Key、Workspace 和 Endpoint 不能混用，详见[阿里云百炼文档](https://help.aliyun.com/zh/model-studio/what-is-model-studio)。
+图片与视频使用 ContentFlow 定义的中立 HTTP 媒体契约；部署方可以连接内部模型网关或独立适配服务：
 
+```dotenv
+CONTENTFLOW_IMAGE_PROVIDER=http
+CONTENTFLOW_VIDEO_PROVIDER=http
+CONTENTFLOW_MEDIA_API_BASE=https://media.example.com/v1
+CONTENTFLOW_MEDIA_API_KEY=...
+CONTENTFLOW_MEDIA_DOWNLOAD_ALLOWED_HOSTS=["assets.example.com"]
+CONTENTFLOW_IMAGE_MODEL=configured-image-model
+CONTENTFLOW_VIDEO_MODEL=configured-video-model
+```
+
+HTTP 媒体契约使用 `POST /images/generations`、`POST /videos/generations` 和 `GET /videos/generations/{task_id}`；图片可返回受限 base64 或下载 URL，视频可同步完成或返回任务 ID 后由 Worker 轮询。生产启动会拒绝缺少端点、密钥、模型名或精确下载域名允许列表的真实 Provider 配置；下载器还会校验重定向后的最终域名。
 ## 平台连接边界
 
 - 抖音：需要开放平台应用、用户 OAuth、`access_token` 和 `open_id`，能力还受应用 scope 与平台审核状态限制。适配器按“上传视频 → 创建作品 → 拉取视频数据”拆分。

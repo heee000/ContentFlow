@@ -75,15 +75,15 @@ class Settings(BaseSettings):
     video_provider: str = "mock"
     model_api_base: str | None = None
     model_api_key: str | None = None
-    text_model: str = "qwen-plus"
-    embedding_model: str = "text-embedding-v4"
+    text_model: str | None = None
+    embedding_model: str | None = None
     embedding_dimensions: int = 1024
 
-    dashscope_workspace_id: str | None = None
-    dashscope_api_key: str | None = None
-    dashscope_region: str = "beijing"
-    dashscope_image_model: str = "wan2.6-t2i"
-    dashscope_video_model: str = "wan2.7-t2v-2026-06-12"
+    media_api_base: str | None = None
+    media_api_key: str | None = None
+    media_download_allowed_hosts: list[str] = Field(default_factory=list)
+    image_model: str | None = None
+    video_model: str | None = None
 
     worker_poll_seconds: float = Field(default=1.0, gt=0, le=60)
     worker_lease_seconds: int = Field(default=300, ge=3, le=86_400)
@@ -91,12 +91,10 @@ class Settings(BaseSettings):
     worker_heartbeat_seconds: int = Field(default=10, ge=1, le=300)
     worker_stale_seconds: int = Field(default=45, ge=3, le=1800)
     worker_queue_stall_seconds: int = Field(default=300, ge=10, le=86_400)
-    publish_reconciliation_initial_delay_seconds: int = Field(
-        default=15, ge=1, le=3600
-    )
+    publish_reconciliation_initial_delay_seconds: int = Field(default=15, ge=1, le=3600)
     publish_reconciliation_max_attempts: int = Field(default=20, ge=1, le=100)
 
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins", "media_download_allowed_hosts", mode="before")
     @classmethod
     def split_origins(cls, value):
         if isinstance(value, str):
@@ -198,13 +196,13 @@ class Settings(BaseSettings):
                 "Previous credential encryption keys must be at least 32 characters"
             )
         supported_providers = {
-            "text": ({"mock", "openai-compatible", "dashscope"}, self.text_provider),
+            "text": ({"mock", "openai-compatible"}, self.text_provider),
             "embedding": (
-                {"hash", "openai-compatible", "dashscope"},
+                {"hash", "openai-compatible"},
                 self.embedding_provider,
             ),
-            "image": ({"mock", "dashscope", "wan"}, self.image_provider),
-            "video": ({"mock", "dashscope", "wan"}, self.video_provider),
+            "image": ({"mock", "http"}, self.image_provider),
+            "video": ({"mock", "http"}, self.video_provider),
         }
         invalid = [
             f"{kind}={provider}"
@@ -231,30 +229,39 @@ class Settings(BaseSettings):
             self.text_provider == "openai-compatible"
             or self.embedding_provider == "openai-compatible"
         )
-        if uses_openai_compatible and (
-            not self.model_api_base or not self.model_api_key
-        ):
-            raise ValueError(
-                "OpenAI-compatible providers require "
-                "CONTENTFLOW_MODEL_API_BASE and CONTENTFLOW_MODEL_API_KEY"
-            )
-        uses_dashscope = (
-            self.text_provider == "dashscope"
-            or self.embedding_provider == "dashscope"
-            or self.image_provider in {"dashscope", "wan"}
-            or self.video_provider in {"dashscope", "wan"}
-        )
-        if uses_dashscope and not self.dashscope_api_key:
-            raise ValueError(
-                "DashScope/Wan providers require CONTENTFLOW_DASHSCOPE_API_KEY"
-            )
-        if (
-            self.text_provider == "dashscope" or self.embedding_provider == "dashscope"
-        ) and not self.dashscope_workspace_id:
-            raise ValueError(
-                "DashScope text/embedding providers require "
-                "CONTENTFLOW_DASHSCOPE_WORKSPACE_ID"
-            )
+        if uses_openai_compatible:
+            required = {
+                "CONTENTFLOW_MODEL_API_BASE": self.model_api_base,
+                "CONTENTFLOW_MODEL_API_KEY": self.model_api_key,
+            }
+            if self.text_provider == "openai-compatible":
+                required["CONTENTFLOW_TEXT_MODEL"] = self.text_model
+            if self.embedding_provider == "openai-compatible":
+                required["CONTENTFLOW_EMBEDDING_MODEL"] = self.embedding_model
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise ValueError(
+                    "OpenAI-compatible provider configuration missing: "
+                    + ", ".join(missing)
+                )
+        uses_http_media = self.image_provider == "http" or self.video_provider == "http"
+        if uses_http_media:
+            required = {
+                "CONTENTFLOW_MEDIA_API_BASE": self.media_api_base,
+                "CONTENTFLOW_MEDIA_API_KEY": self.media_api_key,
+                "CONTENTFLOW_MEDIA_DOWNLOAD_ALLOWED_HOSTS": (
+                    self.media_download_allowed_hosts
+                ),
+            }
+            if self.image_provider == "http":
+                required["CONTENTFLOW_IMAGE_MODEL"] = self.image_model
+            if self.video_provider == "http":
+                required["CONTENTFLOW_VIDEO_MODEL"] = self.video_model
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise ValueError(
+                    "HTTP media provider configuration missing: " + ", ".join(missing)
+                )
         if self.storage_backend == "s3":
             required = {
                 "CONTENTFLOW_S3_ENDPOINT_URL": self.s3_endpoint_url,

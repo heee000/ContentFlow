@@ -124,7 +124,7 @@ class AIProvenanceTest(unittest.TestCase):
             api_base="https://provider.test/v1",
             api_key="not-recorded",
             model="configured-model",
-            provider_name="dashscope",
+            provider_name="provider-proxy",
         )
 
         result = provider.complete_json(
@@ -140,7 +140,7 @@ class AIProvenanceTest(unittest.TestCase):
             request_payload["messages"][0]["content"],
             "approved custom review prompt",
         )
-        self.assertEqual(provider.provider_name, "dashscope")
+        self.assertEqual(provider.provider_name, "provider-proxy")
         self.assertEqual(provider.model_name, "configured-model")
         self.assertEqual(
             provider.last_call_metadata,

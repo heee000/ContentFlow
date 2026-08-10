@@ -216,6 +216,41 @@ class RuntimeSettingsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MODEL_API_BASE"):
             settings.validate_runtime()
 
+    def test_live_model_providers_require_explicit_model_names(self):
+        settings = production_settings(
+            text_provider="openai-compatible",
+            model_api_base="https://models.example/v1",
+            model_api_key="model-key",
+        )
+        with self.assertRaisesRegex(ValueError, "CONTENTFLOW_TEXT_MODEL"):
+            settings.validate_runtime()
+
+    def test_http_media_provider_requires_explicit_contract_configuration(self):
+        settings = production_settings(
+            image_provider="http",
+            video_provider="http",
+        )
+        with self.assertRaisesRegex(ValueError, "CONTENTFLOW_MEDIA_API_BASE"):
+            settings.validate_runtime()
+
+    def test_vendor_neutral_live_provider_configuration_is_accepted(self):
+        settings = production_settings(
+            text_provider="openai-compatible",
+            embedding_provider="openai-compatible",
+            image_provider="http",
+            video_provider="http",
+            model_api_base="https://models.example/v1",
+            model_api_key="model-key",
+            text_model="configured-text-model",
+            embedding_model="configured-embedding-model",
+            media_api_base="https://media.example/v1",
+            media_api_key="media-key",
+            media_download_allowed_hosts=["assets.example"],
+            image_model="configured-image-model",
+            video_model="configured-video-model",
+        )
+        settings.validate_runtime()
+
     def test_production_accepts_explicit_offline_validation_mode(self):
         production_settings().validate_runtime()
 

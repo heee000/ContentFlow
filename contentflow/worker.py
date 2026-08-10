@@ -314,7 +314,11 @@ def _store_generation(
     settings: Settings,
     generation,
 ) -> None:
-    data = download_generated_media(generation)
+    data = download_generated_media(
+        generation,
+        max_bytes=settings.max_upload_bytes,
+        allowed_hosts=tuple(settings.media_download_allowed_hosts),
+    )
     filename = generation.filename or (
         "asset.png" if asset.kind == "image" else "asset.mp4"
     )

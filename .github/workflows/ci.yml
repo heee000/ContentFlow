@@ -83,8 +83,12 @@ jobs:
 
       - name: Validate Prometheus configuration and rules
         run: |
+          metrics_token_file="${RUNNER_TEMP}/contentflow_metrics_bearer_token"
+          umask 077
+          printf '%s' 'ci-only-prometheus-token-000000000000' > "${metrics_token_file}"
           docker run --rm --entrypoint=/bin/promtool \
             --volume "${{ github.workspace }}/deploy/observability/prometheus:/etc/prometheus:ro" \
+            --volume "${metrics_token_file}:/run/secrets/contentflow_metrics_bearer_token:ro" \
             prom/prometheus:v3.13.1-distroless@sha256:214f8427c8fba80c327bb94a75feb802ae12f2d6ca30812aa6e7d22f09bbea80 \
             check config /etc/prometheus/prometheus.yml
           docker run --rm --entrypoint=/bin/promtool \

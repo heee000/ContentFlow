@@ -1,7 +1,7 @@
 # ContentFlow 项目交接文档
 
 > 更新日期：2026-08-10
-> 适用仓库：`F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow`
+> 适用仓库：ContentFlow 仓库根目录
 > GitHub：<https://github.com/heee000/ContentFlow>
 > 当前分支：`main`
 > 当前基准提交：`4a9f8da Add versioned prompt evaluation gates`
@@ -71,9 +71,9 @@ ContentFlow 面向营销内容生产，把一份活动 Brief 和品牌/产品知
 | 异步任务 | 数据库 Job 队列 + 独立 Python Worker | 不依赖 Redis/Celery |
 | 本地存储 | `.contentflow/storage` | 按工作区隔离文件路径 |
 | 生产存储 | MinIO/S3 | 通过 `ObjectStorage` 抽象切换 |
-| 文本模型 | Mock / OpenAI-compatible / DashScope | 当前本机默认 Mock |
-| Embedding | Hash / OpenAI-compatible / DashScope | 当前本机默认 1024 维 Hash |
-| 图片/视频 | Mock / DashScope Wan | 当前本机默认 Mock |
+| 文本模型 | Mock / OpenAI-compatible | 当前本机默认 Mock |
+| Embedding | Hash / OpenAI-compatible | 当前本机默认 1024 维 Hash |
+| 图片/视频 | Mock / 中立 HTTP 媒体契约 | 当前本机默认 Mock |
 | 发布连接器 | 小红书导出、抖音、公众号 | 真实能力受外部账号、scope 和平台审核限制 |
 
 Python 项目版本为 `0.2.0`，要求 Python 3.11+。前端要求 Node.js 22.13+。
@@ -99,7 +99,7 @@ ContentFlow/
 │  ├─ embeddings.py              Embedding Provider
 │  ├─ text_generation.py         当前文本 Provider 选择入口
 │  ├─ providers.py               Mock/OpenAI-compatible 文本实现；还含旧入口
-│  ├─ media_providers.py         Mock/Wan 图片和视频
+│  ├─ media_providers.py         Mock/中立 HTTP 图片和视频 Provider
 │  ├─ connectors.py              小红书/抖音/公众号连接器
 │  ├─ object_storage.py          Local/S3 对象存储
 │  ├─ review.py                  确定性规则审核与一次自动修复
@@ -131,7 +131,7 @@ ContentFlow/
 仓库路径：
 
 ```powershell
-Set-Location 'F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow'
+Set-Location '.'
 ```
 
 终端 1：API。
@@ -144,14 +144,14 @@ Set-Location 'F:\实习\定向简历\阿里AI内容营销自动化系统开发\C
 终端 2：Worker。没有 Worker 时，Job 会一直停在 `queued`。
 
 ```powershell
-Set-Location 'F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow'
+Set-Location '.'
 & 'F:\python\python.exe' -m contentflow.worker
 ```
 
 终端 3：Web。
 
 ```powershell
-Set-Location 'F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow\web'
+Set-Location 'web'
 npm run dev:local
 ```
 
@@ -279,7 +279,7 @@ PostgreSQL 下使用 `FOR UPDATE SKIP LOCKED`，允许多个 Worker 并发领取
 
 ### 7.3 当前边界
 
-Hash Embedding 只用于离线可复现验收，不具备真实语义向量质量。真实效果评估必须切换 OpenAI-compatible 或 DashScope Embedding，并重新索引知识库；不能用 Hash 模式的结果宣称线上 RAG 质量。
+Hash Embedding 只用于离线可复现验收，不具备真实语义向量质量。真实效果评估必须切换 OpenAI-compatible Embedding，并重新索引知识库；不能用 Hash 模式的结果宣称线上 RAG 质量。
 
 当前没有独立 Reranker、混合 BM25、Query 改写或系统化召回评测集，这些可以作为后续改进方向。
 
@@ -291,7 +291,6 @@ Hash Embedding 只用于离线可复现验收，不具备真实语义向量质�
 
 - `mock`：离线、确定性、无需密钥；当前本机默认。
 - `openai-compatible`：调用 `/chat/completions`，要求 API Base、API Key 和模型名。
-- `dashscope`：通过百炼工作区的 OpenAI 兼容地址调用。
 
 Provider 按 `plan / generate / review` 三个阶段接收结构化 JSON，并要求返回 JSON 对象。温度当前为 0.3。
 
@@ -301,7 +300,6 @@ Provider 按 `plan / generate / review` 三个阶段接收结构化 JSON，并�
 
 - `hash`
 - `openai-compatible`
-- `dashscope`
 
 PostgreSQL 迁移固定向量维度为 1024；使用其他维度会被运行时校验拒绝。
 
@@ -309,8 +307,8 @@ PostgreSQL 迁移固定向量维度为 1024；使用其他维度会被运行时�
 
 - Mock 图片会生成明确标注的离线预览 PNG。
 - Mock 视频只生成 `storyboard.json`，不是 MP4。
-- DashScope/Wan 图片通常同步返回下载地址。
-- DashScope/Wan 视频异步返回 task ID，由 Worker 轮询，成功后再转存本地或 S3。
+- HTTP 图片契约支持受限 base64 或下载地址。
+- HTTP 视频契约可异步返回 task ID，由 Worker 轮询，成功后再转存本地或 S3。
 - 模型生成素材下载上限为 100MB。
 
 ### 8.4 重要表达边界
@@ -552,7 +550,7 @@ npm run build
 - `npm test` 的 Sites/vinext 构建链。
 - Docker Compose 的 PostgreSQL + pgvector + MinIO 全栈验收。
 - `scripts/validate_stack.py`。
-- 真实 DashScope/Wan 调用。
+- 真实 外部模型/媒体 Provider 调用。
 - 真实抖音或公众号账号发布。
 
 因此，仓库文档中既有的容器验收记录可以作为历史材料，但不能说这些外部路径在 2026-08-03 本轮被重新验证过。
@@ -607,13 +605,13 @@ npm run build
 - 已实现 FastAPI + SQLAlchemy + 数据库 Job 队列 + Worker 的全栈主链路。
 - 已实现多工作区、RBAC、内容版本、人工审核、素材任务、发布排期和审计。
 - 已实现 SQLite 本地模式，以及 PostgreSQL/pgvector、S3/MinIO 的生产适配和迁移配置。
-- 已实现 Mock、OpenAI-compatible、DashScope/Wan Provider 适配层。
+- 已实现 Mock、OpenAI-compatible 和中立 HTTP 媒体 Provider 适配层。
 - 已实现小红书 ZIP 导出、抖音 API，以及公众号草稿/可选提交和 `publish_id` 状态查询连接器代码。
 - 当前工作区全量 Ruff 通过、后端 51 个测试通过，前端 Next.js 生产构建和 TypeScript 检查通过。
 
 ### 不能据此夸大的内容
 
-- 不能把本地 Mock 演示说成真实千问、Wan 或其他付费模型调用。
+- 不能把本地 Mock 演示说成真实外部模型或付费媒体服务调用。
 - 不能把小红书导出包说成自动发布。
 - 不能把 HTTP Mock/契约测试说成真实平台账号已经验收。
 - 不能声称已经验证生产级高并发、成本或稳定性。
@@ -676,7 +674,7 @@ npm run build
 
 ```text
 请接手并继续完善以下 ContentFlow 项目：
-F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
+.
 
 第一步请完整阅读 docs/CONTENTFLOW_HANDOFF.md，然后执行只读的 git status --short、git diff 和关键文件检查。当前工作区存在尚未提交的用户修改，不要 reset、checkout、覆盖、提交或推送。
 
@@ -730,7 +728,7 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 1. 当时发布只完成保守防重和人工对账；21.8 已部分关闭微信公众号查询式自动对账，平台幂等键、抖音确定对账、回调验签/去重和 Outbox 仍未实现。
 2. Worker 已具备优雅停机、数据库节点心跳和管理员队列健康接口；仍缺可观测指标、自动告警、编排层健康探针，以及在 CI 中持续运行的 PostgreSQL 双 Worker 长任务/进程终止故障注入。
 3. 浏览器令牌仍在 localStorage，尚无企业 SSO/MFA、会话撤销、安全 Cookie、CSP 和共享限流。
-4. 真实 DashScope/Wan、抖音、公众号测试租户与 RAG 评测集仍未签收。
+4. 真实 外部模型/媒体 Provider、抖音、公众号测试租户与 RAG 评测集仍未签收。
 5. 一致性备份、对象级校验、PITR、KMS/TLS/WAF、CI/CD、SLO 和数据治理仍是企业成熟度主要差距。
 
 更完整的风险分级、证据和路线图见 docs/enterprise_readiness_review.md。
@@ -843,7 +841,7 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 
 ### 当前仍最关键的 5 个不足
 
-1. 真实外部闭环仍未签收：公众号、抖音、DashScope/Wan 和对象存储需要隔离租户的成功、超时、限流、审核、授权过期与重复回调证据；跨平台 Outbox、平台幂等键、回调验签和事件去重仍缺。
+1. 真实外部闭环仍未签收：公众号、抖音、外部模型/媒体 Provider 和对象存储需要隔离租户的成功、超时、限流、审核、授权过期与重复回调证据；跨平台 Outbox、平台幂等键、回调验签和事件去重仍缺。
 2. 企业身份与会话仍不足：OIDC/SAML、MFA、短 Access Token、旋转 Refresh Token、jti 撤销、HttpOnly/SameSite Cookie、设备/登录审计、CSP 和 Redis 共享限流均未落地。
 3. CI 只是仓库基线：尚无远程首次运行、受保护分支必需检查、独立迁移 Job、环境晋级、灰度/回滚；MinIO 联合验证、浏览器 E2E、双 Worker、SIGKILL、数据库闪断、负载和混沌测试未进入持续门禁。
 4. 可观测和 SRE 运营未闭环：缺 Prometheus/OpenTelemetry、SLO/告警、Provider 熔断与配额治理、编排层探针/扩缩、容量模型、On-call、事故复盘和变更治理。
@@ -852,7 +850,7 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 ### 接下来最值得继续做的 5 项改进
 
 1. 先扩展 CI：加入 MinIO 真实对象测试、Alembic 升降级、Playwright、双 Worker 长任务、SIGTERM/SIGKILL 和数据库闪断；随后在远程仓库启用 backend/frontend 必需检查与分支保护。
-2. 用隔离公众号、抖音和 DashScope/Wan 租户完成外部验收，补回调验签/去重、渠道级幂等与 Outbox，并把质量、费用和配额阈值变成门禁。
+2. 用隔离公众号、抖音和 外部模型/媒体 Provider 租户完成外部验收，补回调验签/去重、渠道级幂等与 Outbox，并把质量、费用和配额阈值变成门禁。
 3. 以 OIDC 为首选重构认证与浏览器会话，配套 MFA、短令牌、刷新旋转、撤销、HttpOnly Cookie、CSP、共享限流和登录审计。
 4. 接入 Prometheus/OpenTelemetry，覆盖 API、数据库、队列、Worker、Provider、对账、成本和质量 SLI；建立 SLO、告警、Runbook、容量与故障演练。
 5. 落地 RLS/PITR/异地备份和当前版本联合恢复，建立租户导出/删除/留存制度；为构建产物生成 SBOM、执行镜像扫描并签名。
@@ -880,7 +878,7 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 
 ### 当前仍最关键的 5 个不足
 
-1. 真实公众号、抖音、DashScope/Wan 仍未完成隔离租户签收；跨平台 Outbox、幂等键、回调验签/去重和成本/质量阈值仍缺。
+1. 真实公众号、抖音、外部模型/媒体 Provider 仍未完成隔离租户签收；跨平台 Outbox、幂等键、回调验签/去重和成本/质量阈值仍缺。
 2. 企业身份与会话仍缺 OIDC/SAML、MFA、刷新旋转与撤销、HttpOnly/SameSite Cookie、CSP、登录审计和 Redis 共享限流。
 3. CI 已覆盖 PostgreSQL/pgvector/MinIO，但尚无远程运行与分支保护；Alembic downgrade、浏览器 E2E、双 Worker、SIGKILL、数据库闪断、负载/混沌、独立迁移和灰度回滚未闭环。
 4. 可观测与 SRE 仍缺 Metrics/Trace/SLO/告警、Provider 熔断与配额、编排层探针/扩缩、容量模型、On-call 和事故/变更治理。
@@ -890,7 +888,7 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 
 1. 在 CI 补 Alembic 升降级、Playwright、双 Worker 长任务、SIGTERM/SIGKILL 和数据库闪断；远程首次通过后启用受保护分支必需检查。
 2. 重跑当前 head 的 PostgreSQL+MinIO 联合备份/隔离恢复，并加入对象逐项哈希、S3 版本保留/Object Lock、PITR 和异地恢复证据。
-3. 用隔离外部租户完成公众号、抖音与 DashScope/Wan 成功/失败矩阵，落地回调事件表、验签、去重、Outbox 与渠道级幂等。
+3. 用隔离外部租户完成公众号、抖音与 外部模型/媒体 Provider 成功/失败矩阵，落地回调事件表、验签、去重、Outbox 与渠道级幂等。
 4. 以 OIDC 为首选完成企业认证与浏览器会话治理，配套 MFA、短令牌、刷新旋转、撤销、安全 Cookie、CSP、共享限流和登录审计。
 5. 接入 Prometheus/OpenTelemetry，建立 API、数据库、对象存储、队列、Worker、Provider、发布、成本与质量 SLO、告警、容量和故障演练。
 
@@ -925,7 +923,7 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 
 ### 第七轮复审新增发现：当前最关键的 5 个不足
 
-1. 真实公众号、抖音、DashScope/Wan 与 RAG 质量/成本仍未形成可审计签收矩阵；抖音无可靠查询键时仍需人工，跨平台 Outbox、回调验签/去重和渠道级幂等未完成。
+1. 真实公众号、抖音、外部模型/媒体 Provider 与 RAG 质量/成本仍未形成可审计签收矩阵；抖音无可靠查询键时仍需人工，跨平台 Outbox、回调验签/去重和渠道级幂等未完成。
 2. 浏览器令牌仍在 localStorage，Access Token 默认 480 分钟；只有 HS256/exp，没有 Refresh Token 旋转、jti 撤销、OIDC/MFA、安全 Cookie、登录/设备审计和跨实例共享限流。
 3. 生产 Dockerfile 已改为使用固定 `uv==0.11.2` 与 `uv sync --locked`，但 Docker 引擎不可用使镜像构建尚未签收；Compose 服务/基础镜像仍多为可变 tag，API 容器启动时自行迁移，远程必需检查、独立迁移 Job、SBOM/签名和灰度回滚仍缺。
 4. 可观测和运行平台仍是 L1-L2：没有 Prometheus/OpenTelemetry、SLO/告警、Provider 熔断/配额、资源 requests/limits、自动扩缩、多区高可用和持续故障注入。
@@ -980,7 +978,7 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 
 ### 第八轮复审：当前最关键的 5 个不足
 
-1. **真实外部业务仍未签收**：微信公众号、抖音、DashScope/Wan 缺受控租户的成功、超时、限流、授权过期、审核拒绝和成本/质量矩阵。
+1. **真实外部业务仍未签收**：微信公众号、抖音、外部模型/媒体 Provider 缺受控租户的成功、超时、限流、授权过期、审核拒绝和成本/质量矩阵。
 2. **企业身份仍未完成**：本地数据库会话已关闭 localStorage 长令牌、刷新和撤销缺口，但仍无 OIDC/SAML、MFA、企业 IdP 生命周期、设备会话管理、异常登录检测、nonce/strict-dynamic CSP 与非对称签名密钥轮换。
 3. **跨平台发布一致性仍不完整**：缺统一 Outbox、平台幂等键、回调验签/去重和抖音无查询键场景的自动收敛，不能承诺严格端到端 exactly-once。
 4. **SRE 与规模化证据不足**：缺 Prometheus/OpenTelemetry、Trace、SLO/告警、容量模型、浏览器 E2E、多副本压力、数据库闪断和滚动升级持续演练。
@@ -1080,7 +1078,7 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 
 1. 新增稳定 Prompt 集版本与逐模板 SHA-256 清单；每次工作流记录实际 Provider、模型和 Embedding 身份。
 2. 策划、分平台生成与自动修复均记录调用序号、阶段、平台、开始时间、时延、响应模型、输入输出摘要与字节数。
-3. OpenAI 兼容与百炼响应中的 Token 用量按 Provider 原值保存；Mock 或 Provider 未上报时明确标记 `not_reported`，不估算账单。
+3. OpenAI 兼容与特定云模型平台响应中的 Token 用量按 Provider 原值保存；Mock 或 Provider 未上报时明确标记 `not_reported`，不估算账单。
 4. 追溯数据保存在 `WorkflowRun.result_json.ai_provenance`；成功审计写入 Provider/模型/调用次数/Token 来源，终态失败也保留已完成调用证据。
 5. 追溯记录不复制原始 Prompt、知识文本或模型正文；异常只记录脱敏错误类型。
 6. 活动页新增按需展开的“生成记录”，最多读取最近 5 次运行，普通查看者也可核对模型、Prompt 版本、调用次数、Token 来源和追踪摘要。
@@ -1295,3 +1293,44 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 ### 成熟度判断
 
 可观测性已从“安全 instrumentation”推进到“可版本化部署、规则、看板和告警行为测试”的 L2-L3 仓库基线；它解决了无抓取配置、无规则、无看板和无规则行为验证的问题。由于没有真实通知路由、HA/长期存储、目标环境运行、SLO 校准和端到端 Trace，仍不能称为成熟生产 SRE。综合项目继续约为 L2。
+## 21.22 供应商中立化纠偏、CI 稳定与第十八轮复审
+
+### 产品边界纠偏
+
+用户已明确：ContentFlow 是独立的内容营销自动化产品，不针对任何单一云厂商或特定模型做产品定位、默认值、专用流程或验收设计。可以采用通用协议和可替换适配器，但所有生产配置必须显式选择，文档和界面不得暗示项目与某一厂商绑定。
+
+### 本轮已完成
+
+1. 文本与 Embedding Provider 收敛为 `mock/hash` 和显式配置的 `openai-compatible`；删除供应商专用地址拼装、密钥、地域、工作区和 provider 分支。
+2. 删除预设文本/Embedding 模型名。真实 Provider 必须显式提供 API Base、API Key 和模型名，缺任一项均在启动时失败关闭。
+3. 图片/视频由供应商专用实现改为 ContentFlow 中立 HTTP 媒体契约：`POST /images/generations`、`POST /videos/generations`、`GET /videos/generations/{task_id}`。图片支持受限 base64 或下载 URL，视频支持同步完成或异步轮询。
+4. HTTP 媒体响应不复制原始错误体；内联内容与下载内容都受大小上限约束，任务 ID 进入路径前编码，凭据只进入 Authorization 请求头；生产必须配置精确下载域名允许列表，初始 URL 与重定向目标都要通过校验。
+5. README、架构、运维、用户手册、能力、验收、生产清单和历史成熟度记录均改为供应商中立表述；已跟踪文件专项扫描不再包含被废止的厂商/模型定向引用。
+6. GitHub 推送始终使用普通 `git push origin main`，没有 force。邮件来自推送后自动触发的 Actions 失败。Prometheus CI 已补只读占位 metrics secret，使 `promtool check config` 能验证生产 `credentials_file` 而不需要真实秘密。
+
+### 当前验证证据
+
+- 全量后端 `104 passed、7 skipped`，分支覆盖率 `81.11%`，高于 75% 门槛；本机跳过项仍仅为需要真实 PostgreSQL/pgvector 和 MinIO 的集成测试。全仓 Ruff 静态检查与本轮文件格式检查通过。
+- 前端 ESLint、Sites/vinext 两项渲染测试、Next.js 生产构建通过；`npm audit` 与 `pip-audit --strict` 均为 0 个已知漏洞，`uv lock --check` 通过。
+- 默认与 observability Compose、Alembic 单 head、`.env.example`、严格 UTF-8、YAML/JSON 均通过；同版本 Prometheus 3.13.1 `check config`、`check rules` 和 `test rules` 已在本机通过。
+- 远程 CI 证据将在本阶段提交完成后更新；在此之前不把本轮称为远程签收。
+
+### 持续复审：当前仍存在的 5 个不足
+
+1. **真实模型/媒体服务尚未签收**：中立契约已有实现和 MockTransport 证据，但没有目标服务的成功、超时、限流、鉴权过期、内容审核、成本和质量矩阵。
+2. **媒体契约治理仍是第一版**：缺显式协议版本、能力发现、服务端幂等键、取消、回调验签/去重、任务过期和兼容性政策。
+3. **AI 网关与成本控制不足**：缺按工作区/模型的预算、配额、并发、熔断、退避、降级、账单核对和供应商切换演练。
+4. **密钥与配置治理未企业化**：模型/媒体密钥仍通过环境变量进入应用，尚无 KMS/Vault 动态凭据、轮换审计、配置签名和环境策略证明。
+5. **交付治理仍会产生噪声**：Actions 能阻止错误合入后的假签收，但 main 仍可直接推送，缺受保护分支、必需检查、预合并 PR、失败通知分级和面向维护者的状态面板。
+
+### 接下来最值得继续做的 5 项改进
+
+1. 建立供应商无关的 Provider conformance suite，用受控测试服务覆盖协议版本、错误分类、超时/限流、幂等、取消、轮询、下载过期和响应大小。
+2. 发布 HTTP 媒体契约 v1 Schema/OpenAPI，加入 capability discovery、Idempotency-Key、Webhook 签名与 Inbox 去重，并保留人工收敛路径。
+3. 增加 AI gateway policy：工作区/模型配额、并发、熔断、退避、降级、Token/媒体成本账本和月度账单核对。
+4. 接入企业 Secret Manager/KMS，采用文件或工作负载身份注入、双密钥轮换、最小权限和不泄密审计。
+5. 启用 PR + 受保护 main + 必需 CI，区分代码失败、外部网络和通知级别；把提交前本地门禁与远程状态汇总进发布清单，减少重复失败邮件。
+
+### 成熟度判断
+
+本轮关闭了“产品默认绑定单一厂商/模型”的定位和实现风险，并保留了可替换的真实 Provider 路径；架构中立性由 L1-L2 提升到 L2 基线。综合成熟度仍约 L2：真正的企业交付还需要真实 Provider 合同签收、协议治理、成本与密钥平台、受保护交付流程，以及既有多渠道、SRE、IAM、数据治理和灾备能力共同形成长期证据。

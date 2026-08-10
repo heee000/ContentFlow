@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import io
 import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -28,11 +31,9 @@ class MediaProvider(Protocol):
         kind: str,
         prompt: str,
         metadata: dict[str, Any],
-    ) -> MediaGeneration:
-        ...
+    ) -> MediaGeneration: ...
 
-    def poll(self, external_task_id: str) -> MediaGeneration:
-        ...
+    def poll(self, external_task_id: str) -> MediaGeneration: ...
 
 
 def _image_size(ratio: str) -> tuple[int, int]:
@@ -114,23 +115,22 @@ class MockMediaProvider:
         raise ValueError(f"离线素材任务不需要轮询: {external_task_id}")
 
 
-class DashScopeMediaProvider:
+class HTTPMediaProvider:
+    """Vendor-neutral HTTP adapter using the ContentFlow media contract."""
+
     def __init__(self, settings: Settings, client: httpx.Client | None = None):
-        if not settings.dashscope_api_key:
-            raise ValueError("使用 DashScope 素材模型需要 CONTENTFLOW_DASHSCOPE_API_KEY")
+        if not settings.media_api_base or not settings.media_api_key:
+            raise ValueError(
+                "HTTP 素材 Provider 需要 CONTENTFLOW_MEDIA_API_BASE 和 "
+                "CONTENTFLOW_MEDIA_API_KEY"
+            )
         self.settings = settings
         self.client = client or httpx.Client(timeout=90)
-        self.base_url = self._base_url(settings.dashscope_region)
+        self.base_url = settings.media_api_base.rstrip("/")
         self.headers = {
-            "Authorization": f"Bearer {settings.dashscope_api_key}",
+            "Authorization": f"Bearer {settings.media_api_key}",
             "Content-Type": "application/json",
         }
-
-    @staticmethod
-    def _base_url(region: str) -> str:
-        if region.lower() in {"singapore", "intl", "international"}:
-            return "https://dashscope-intl.aliyuncs.com"
-        return "https://dashscope.aliyuncs.com"
 
     def generate(
         self,
@@ -140,119 +140,156 @@ class DashScopeMediaProvider:
         metadata: dict[str, Any],
     ) -> MediaGeneration:
         if kind == "image":
+            if not self.settings.image_model:
+                raise ValueError("HTTP 图片 Provider 缺少 CONTENTFLOW_IMAGE_MODEL")
+            width, height = _image_size(str(metadata.get("ratio") or "1:1"))
             response = self.client.post(
-                f"{self.base_url}/api/v1/services/aigc/multimodal-generation/generation",
+                f"{self.base_url}/images/generations",
                 headers=self.headers,
                 json={
-                    "model": self.settings.dashscope_image_model,
-                    "input": {"messages": [{"role": "user", "content": [{"text": prompt}]}]},
-                    "parameters": {
-                        "size": self._wan_size(str(metadata.get("ratio") or "1:1")),
-                        "n": 1,
-                    },
+                    "model": self.settings.image_model,
+                    "prompt": prompt,
+                    "size": f"{width}x{height}",
+                    "metadata": metadata,
                 },
             )
             response.raise_for_status()
-            body = response.json()
-            result = ((body.get("output") or {}).get("choices") or [{}])[0]
-            content = (result.get("message") or {}).get("content") or []
-            image_url = next(
-                (
-                    part.get("image")
-                    for part in content
-                    if isinstance(part, dict) and part.get("image")
-                ),
-                None,
-            )
-            if not image_url:
-                raise RuntimeError(f"DashScope 图片响应缺少下载地址: {body}")
-            return MediaGeneration(
-                status="ready",
-                download_url=image_url,
-                mime_type="image/png",
-                filename="wan-image.png",
-                metadata={"request_id": body.get("request_id")},
-            )
-
+            return self._image_result(self._response_body(response))
+        if kind != "video":
+            raise ValueError(f"HTTP 素材 Provider 不支持 kind={kind}")
+        if not self.settings.video_model:
+            raise ValueError("HTTP 视频 Provider 缺少 CONTENTFLOW_VIDEO_MODEL")
         response = self.client.post(
-            f"{self.base_url}/api/v1/services/aigc/video-generation/video-synthesis",
-            headers={**self.headers, "X-DashScope-Async": "enable"},
+            f"{self.base_url}/videos/generations",
+            headers=self.headers,
             json={
-                "model": self.settings.dashscope_video_model,
-                "input": {"prompt": prompt},
-                "parameters": {
-                    "size": self._wan_video_size(
-                        str(metadata.get("ratio") or "16:9")
-                    ),
-                },
+                "model": self.settings.video_model,
+                "prompt": prompt,
+                "metadata": metadata,
             },
         )
         response.raise_for_status()
-        body = response.json()
-        task_id = (body.get("output") or {}).get("task_id")
-        if not task_id:
-            raise RuntimeError(f"DashScope 视频响应缺少 task_id: {body}")
-        return MediaGeneration(
-            status="processing",
-            external_task_id=task_id,
-            metadata={"request_id": body.get("request_id")},
-        )
+        return self._video_result(self._response_body(response))
 
     def poll(self, external_task_id: str) -> MediaGeneration:
+        if not external_task_id.strip():
+            raise ValueError("HTTP 视频任务 ID 不能为空")
         response = self.client.get(
-            f"{self.base_url}/api/v1/tasks/{external_task_id}",
+            f"{self.base_url}/videos/generations/{quote(external_task_id, safe='')}",
             headers=self.headers,
         )
         response.raise_for_status()
-        body = response.json()
-        output = body.get("output") or {}
-        status = str(output.get("task_status") or "").upper()
-        if status in {"PENDING", "RUNNING"}:
-            return MediaGeneration(status="processing", external_task_id=external_task_id)
-        if status != "SUCCEEDED":
-            raise RuntimeError(
-                f"DashScope 视频任务失败: {output.get('message') or status or body}"
-            )
-        url = output.get("video_url") or (output.get("results") or [{}])[0].get(
-            "url"
+        return self._video_result(
+            self._response_body(response), fallback_id=external_task_id
         )
-        if not url:
-            raise RuntimeError(f"DashScope 视频完成但缺少下载地址: {body}")
+
+    @staticmethod
+    def _response_body(response: httpx.Response) -> dict[str, Any]:
+        try:
+            body = response.json()
+        except ValueError as error:
+            raise RuntimeError("HTTP 素材响应不是有效 JSON") from error
+        if not isinstance(body, dict):
+            raise RuntimeError("HTTP 素材响应顶层必须是对象")
+        return body
+
+    @staticmethod
+    def _result_item(body: dict[str, Any]) -> dict[str, Any]:
+        data = body.get("data")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data[0]
+        if isinstance(data, dict):
+            return data
+        return body
+
+    @staticmethod
+    def _request_metadata(body: dict[str, Any]) -> dict[str, Any]:
+        request_id = body.get("request_id") or body.get("requestId")
+        return {"request_id": str(request_id)} if request_id else {}
+
+    def _image_result(self, body: dict[str, Any]) -> MediaGeneration:
+        item = self._result_item(body)
+        encoded = item.get("b64_json")
+        if isinstance(encoded, str) and encoded:
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as error:
+                raise RuntimeError("HTTP 图片响应包含无效 base64 数据") from error
+            return MediaGeneration(
+                status="ready",
+                content=content,
+                mime_type=str(item.get("mime_type") or "image/png"),
+                filename=str(item.get("filename") or "generated-image.png"),
+                metadata=self._request_metadata(body),
+            )
+        url = item.get("url") or item.get("download_url")
+        if not isinstance(url, str) or not url:
+            raise RuntimeError("HTTP 图片响应缺少 url、download_url 或 b64_json")
         return MediaGeneration(
             status="ready",
-            external_task_id=external_task_id,
             download_url=url,
-            mime_type="video/mp4",
-            filename="wan-video.mp4",
-            metadata={"request_id": body.get("request_id")},
+            mime_type=str(item.get("mime_type") or "image/png"),
+            filename=str(item.get("filename") or "generated-image.png"),
+            metadata=self._request_metadata(body),
         )
 
-    @staticmethod
-    def _wan_size(ratio: str) -> str:
-        return {
-            "3:4": "1104*1472",
-            "4:3": "1472*1104",
-            "1:1": "1328*1328",
-            "9:16": "928*1664",
-            "16:9": "1664*928",
-        }.get(ratio, "1328*1328")
-
-    @staticmethod
-    def _wan_video_size(ratio: str) -> str:
-        return {
-            "9:16": "720*1280",
-            "1:1": "960*960",
-            "16:9": "1280*720",
-        }.get(ratio, "1280*720")
+    def _video_result(
+        self,
+        body: dict[str, Any],
+        *,
+        fallback_id: str | None = None,
+    ) -> MediaGeneration:
+        item = self._result_item(body)
+        status = str(item.get("status") or body.get("status") or "").lower()
+        task_id = item.get("id") or item.get("task_id") or fallback_id
+        url = item.get("url") or item.get("download_url")
+        metadata = self._request_metadata(body)
+        if status in {"queued", "pending", "processing", "running"} or (
+            not status and task_id and not url
+        ):
+            if not task_id:
+                raise RuntimeError("HTTP 视频响应缺少异步任务 ID")
+            return MediaGeneration(
+                status="processing",
+                external_task_id=str(task_id),
+                metadata=metadata,
+            )
+        if status in {"ready", "completed", "succeeded"} or (
+            not status and isinstance(url, str) and url
+        ):
+            if not isinstance(url, str) or not url:
+                raise RuntimeError("HTTP 视频完成响应缺少下载地址")
+            return MediaGeneration(
+                status="ready",
+                external_task_id=str(task_id) if task_id else fallback_id,
+                download_url=url,
+                mime_type=str(item.get("mime_type") or "video/mp4"),
+                filename=str(item.get("filename") or "generated-video.mp4"),
+                metadata=metadata,
+            )
+        raise RuntimeError(f"HTTP 视频任务返回未知状态: {status or 'missing'}")
 
 
 def build_media_provider(settings: Settings, kind: str) -> MediaProvider:
-    provider_name = settings.image_provider if kind == "image" else settings.video_provider
+    provider_name = (
+        settings.image_provider if kind == "image" else settings.video_provider
+    )
     if provider_name == "mock":
         return MockMediaProvider()
-    if provider_name in {"dashscope", "wan"}:
-        return DashScopeMediaProvider(settings)
+    if provider_name == "http":
+        return HTTPMediaProvider(settings)
     raise ValueError(f"不支持的素材生成 provider: {provider_name}")
+
+
+def _validate_download_url(url: str, allowed_hosts: tuple[str, ...]) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("素材下载地址必须是有效的 HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("素材下载地址不得包含 URL 凭据")
+    normalized_hosts = {host.strip().lower() for host in allowed_hosts if host.strip()}
+    if normalized_hosts and parsed.hostname.lower() not in normalized_hosts:
+        raise ValueError("素材下载地址不在允许的域名列表中")
 
 
 def download_generated_media(
@@ -260,19 +297,25 @@ def download_generated_media(
     *,
     client: httpx.Client | None = None,
     max_bytes: int = 100 * 1024 * 1024,
+    allowed_hosts: tuple[str, ...] = (),
 ) -> bytes:
     if generation.content is not None:
+        if len(generation.content) > max_bytes:
+            raise ValueError("模型生成素材超过大小限制")
         return generation.content
     if not generation.download_url:
         raise ValueError("素材生成结果没有内容或下载地址")
+    _validate_download_url(generation.download_url, allowed_hosts)
     http = client or httpx.Client(timeout=120, follow_redirects=True)
     with http.stream("GET", generation.download_url) as response:
+        for hop in (*response.history, response):
+            _validate_download_url(str(hop.url), allowed_hosts)
         response.raise_for_status()
         chunks: list[bytes] = []
         size = 0
         for chunk in response.iter_bytes():
             size += len(chunk)
             if size > max_bytes:
-                raise ValueError("模型生成素材超过 100MB 限制")
+                raise ValueError("模型生成素材超过大小限制")
             chunks.append(chunk)
     return b"".join(chunks)

@@ -14,7 +14,7 @@ ContentFlow 面向需要持续生产、审核和分发多平台内容的运营�
 
 - FastAPI、SQLAlchemy、Alembic 与 PostgreSQL/SQLite 双模式数据层
 - pgvector/HNSW 向量检索与离线 Hash Embedding
-- OpenAI 兼容、阿里云百炼及本地 Mock Provider 适配
+- OpenAI-compatible 文本/Embedding、中立 HTTP 媒体契约及本地 Mock Provider 适配
 - 数据库任务队列、租约、幂等键、指数退避与失败记录
 - MinIO/S3 兼容对象存储和受控文件下载
 - 多工作区隔离、RBAC、凭据加密和审计日志

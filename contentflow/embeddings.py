@@ -12,8 +12,7 @@ class EmbeddingProvider(Protocol):
     dimensions: int
     model_name: str
 
-    def encode(self, text: str) -> list[float]:
-        ...
+    def encode(self, text: str) -> list[float]: ...
 
 
 class HashEmbeddingProvider:
@@ -69,41 +68,19 @@ class OpenAICompatibleEmbeddingProvider:
         return [float(value) for value in vector]
 
 
-def dashscope_compatible_base(settings: Settings) -> str:
-    if not settings.dashscope_workspace_id:
-        raise ValueError(
-            "DashScope OpenAI 兼容接口需要 CONTENTFLOW_DASHSCOPE_WORKSPACE_ID"
-        )
-    region = settings.dashscope_region.lower()
-    if region in {"singapore", "intl", "international"}:
-        return (
-            f"https://{settings.dashscope_workspace_id}."
-            "singapore.maas.aliyuncs.com/compatible-mode/v1"
-        )
-    return (
-        f"https://{settings.dashscope_workspace_id}."
-        "cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-    )
-
-
 def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
     if settings.embedding_provider == "hash":
         return HashEmbeddingProvider(settings.embedding_dimensions)
     if settings.embedding_provider == "openai-compatible":
-        if not settings.model_api_base or not settings.model_api_key:
-            raise ValueError("OpenAI 兼容 Embedding 缺少 API Base 或 API Key")
+        if (
+            not settings.model_api_base
+            or not settings.model_api_key
+            or not settings.embedding_model
+        ):
+            raise ValueError("OpenAI 兼容 Embedding 缺少 API Base、API Key 或模型名")
         return OpenAICompatibleEmbeddingProvider(
             api_base=settings.model_api_base,
             api_key=settings.model_api_key,
-            model=settings.embedding_model,
-            dimensions=settings.embedding_dimensions,
-        )
-    if settings.embedding_provider == "dashscope":
-        if not settings.dashscope_api_key:
-            raise ValueError("DashScope Embedding 缺少 API Key")
-        return OpenAICompatibleEmbeddingProvider(
-            api_base=dashscope_compatible_base(settings),
-            api_key=settings.dashscope_api_key,
             model=settings.embedding_model,
             dimensions=settings.embedding_dimensions,
         )

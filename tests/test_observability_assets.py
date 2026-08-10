@@ -32,20 +32,13 @@ def test_prometheus_scrape_uses_secret_file_and_fixed_target():
 
 
 def test_alert_rules_have_bounded_operations_contracts():
-    config = _yaml(
-        OBSERVABILITY_ROOT / "prometheus" / "contentflow.rules.yml"
-    )
+    config = _yaml(OBSERVABILITY_ROOT / "prometheus" / "contentflow.rules.yml")
     groups = config["groups"]
     assert {group["name"] for group in groups} == {
         "contentflow-recording",
         "contentflow-alerts",
     }
-    alerts = [
-        rule
-        for group in groups
-        for rule in group["rules"]
-        if "alert" in rule
-    ]
+    alerts = [rule for group in groups for rule in group["rules"] if "alert" in rule]
     assert len(alerts) == 8
     assert {rule["labels"]["severity"] for rule in alerts} == {
         "warning",
@@ -91,19 +84,14 @@ def test_grafana_assets_are_immutable_and_use_safe_global_aggregation():
 
     dashboard = json.loads(
         (
-            OBSERVABILITY_ROOT
-            / "grafana"
-            / "dashboards"
-            / "contentflow-overview.json"
+            OBSERVABILITY_ROOT / "grafana" / "dashboards" / "contentflow-overview.json"
         ).read_text(encoding="utf-8")
     )
     assert dashboard["uid"] == "contentflow-operations"
     assert dashboard["editable"] is False
     assert len(dashboard["panels"]) == 11
     expressions = [
-        target["expr"]
-        for panel in dashboard["panels"]
-        for target in panel["targets"]
+        target["expr"] for panel in dashboard["panels"] for target in panel["targets"]
     ]
     assert all(
         panel["datasource"]["uid"] == "contentflow-prometheus"
@@ -115,6 +103,20 @@ def test_grafana_assets_are_immutable_and_use_safe_global_aggregation():
     assert any(
         "sum by (route, status_class)" in expression for expression in expressions
     )
+
+
+def test_ci_mounts_placeholder_secret_for_promtool_config_validation():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert (
+        'metrics_token_file="${RUNNER_TEMP}/contentflow_metrics_bearer_token"'
+        in workflow
+    )
+    assert "umask 077" in workflow
+    assert (
+        '"${metrics_token_file}:/run/secrets/contentflow_metrics_bearer_token:ro"'
+    ) in workflow
+    assert "check config /etc/prometheus/prometheus.yml" in workflow
+    assert "test rules /etc/prometheus/contentflow.rules.test.yml" in workflow
 
 
 def test_compose_observability_profile_pins_images_and_secrets():

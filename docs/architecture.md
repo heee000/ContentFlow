@@ -15,7 +15,7 @@ flowchart TB
     Worker["ContentFlow Worker"] --> Queue
     Worker --> DB
     Worker --> Object
-    Worker --> Models["Qwen / Wan / Mock"]
+    Worker --> Models["OpenAI-compatible / HTTP media / Mock"]
     Worker --> Platforms["抖音 / 公众号 / 小红书导出"]
 ```
 
@@ -43,7 +43,7 @@ flowchart TB
 
 - SQLite/离线验收：向量保存在 JSON 字段，应用内计算余弦相似度。
 - PostgreSQL：初始迁移创建 `vector(1024)` 的 `knowledge_vectors` 表和 HNSW 余弦索引；查询使用 `<=>` 完成近邻检索。
-- Provider：Hash Embedding 用于可复现测试；OpenAI 兼容与百炼 Provider 用于生产。
+- Provider：Hash Embedding 用于可复现测试；OpenAI-compatible 文本/Embedding 与中立 HTTP 媒体 Provider 用于生产。
 
 生成结果保存引用的 `source_chunk_ids`，让审核人员能够追踪内容使用了哪些知识块。
 

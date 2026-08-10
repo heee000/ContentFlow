@@ -31,7 +31,7 @@
 - [x] 生产启动 fail-fast：拒绝 SQLite、local 存储、通配 CORS、弱/复用密钥、未知或缺凭据 Provider，以及未显式许可的 Mock/Hash 模式。
 - [x] 生产强制显式启用受治理 Prompt：内置基线未晋级时管理页显示阻断原因，生成请求在入队前返回 409，Worker 在首次模型调用前二次校验证据。
 - [x] 凭据使用独立主密钥加密，支持历史密钥回退；审计递归脱敏 token/secret/password/API Key 变体。
-- [x] local/S3 上传都有 100 MiB 默认上限；S3 使用有界临时文件流式上传，失败会清理本地临时文件。
+- [x] local/S3 上传都有 100 MiB 默认上限；S3 使用有界临时文件流式上传，失败会清理本地临时文件；外部媒体内联/下载结果同样有界，并校验 HTTP(S)、URL 凭据、下载域名允许列表和重定向目标。
 - [x] API/Web 安全响应头、API `no-store`、不泄露内部细节的统一 500；ready 同时检查数据库和对象存储。
 - [x] Next 与 Sites 共用 CSP；生产 API Origin 固定，HTTPS 构建启用 HSTS/请求升级且禁止 `unsafe-eval`，本地 HTTP 构建保持可用。
 - [x] Python/Node 已知漏洞审计、PostgreSQL+MinIO 备份与随机临时数据库恢复校验具有可执行命令。
@@ -40,14 +40,14 @@
 
 本节 `[x]` 表示适配器代码和 Mock/HTTP 契约已实现，不表示真实外部账号、付费模型或平台审核已验收。
 
-- [x] 文本模型：Mock 与 OpenAI 兼容接口，支持阿里云百炼兼容模式。
+- [x] 文本模型：Mock 与显式配置的 OpenAI-compatible 接口，不预设云厂商或模型。
 - [x] AI 生成追溯：工作流保存 Provider/模型、Prompt 来源与发布版本、模板哈希、分阶段调用、摘要、时延和 Provider 返回的 Token 用量；失败证据可追踪且不复制原始 Prompt/正文，不虚构成本。
 - [x] Prompt Registry：工作区不可变版本、创建者与审批者分离、拒绝、激活、回滚、租户隔离、激活/运行前哈希校验和脱敏审计。
 - [x] Prompt Eval：版本化不可变确定性用例、创建/激活职责分离、异步运行、Prompt/Suite/目标 Provider/模型证据绑定、切换失效、审批/激活/回滚/运行时失败关闭与不保存模型正文。
 - [x] 生产 Prompt 可用性：禁止以 builtin 来源长期生成，提供可见 readiness/block reason 和双管理员安全初始化顺序；API 入队前与 Worker 运行时均失败关闭。
 - [x] Embedding：本地哈希向量、OpenAI 兼容 embedding 与 pgvector 检索。
-- [x] 图片：阿里云百炼/万相图片生成适配器，结果转存对象存储。
-- [x] 视频：万相异步创建、轮询、超时、失败与结果转存。
+- [x] 图片：中立 HTTP 生成契约，支持受限 base64 或下载 URL 并转存对象存储。
+- [x] 视频：中立 HTTP 异步创建、轮询、超时、失败与结果转存。
 - [x] 抖音：OAuth 凭据校验、视频上传/创建和数据拉取；图片发布与审核回调不冒充已实现。
 - [x] 公众号：封面素材、草稿和可选发布提交；可用能力由账号接口权限决定。
 - [x] 小红书：在缺少公开发布资质时提供审核后的导出包，不伪造自动发布成功。
@@ -66,7 +66,7 @@
 
 - [x] Docker Compose 已在 PostgreSQL、pgvector、MinIO、API、Worker、Web 真实容器栈中启动并通过健康检查；就绪探针同时验证数据库与对象存储。
 - [x] `scripts/validate_stack.py` 已跑通“注册—多工作区/RBAC/审计—活动维护/归档—知识入库—RAG 生成/结构化排版—编辑版本—人工审核—素材—定时导出—投放包—指标—看板”。
-- [x] 后端 92 项测试通过、7 项 PostgreSQL/MinIO 集成测试在本机跳过；其中 PostgreSQL/pgvector 集成测试 5 项、MinIO 集成测试 2 项待 CI 执行，分支覆盖率 79.85%，Ruff、锁文件一致性和 `pip-audit` 均通过。
+- [x] 后端 104 项测试通过、7 项 PostgreSQL/MinIO 集成测试在本机跳过；其中 PostgreSQL/pgvector 集成测试 5 项、MinIO 集成测试 2 项待 CI 执行，分支覆盖率 81.11%，Ruff、锁文件一致性和 `pip-audit` 均通过。
 - [x] 前端 lint、Next.js 生产构建、vinext/Sites 测试通过，`npm audit` 为 0 项漏洞。
 - [x] PostgreSQL 并发验收通过：8 个并发连接器测试请求只创建 1 个 Job；两个 Worker 竞争过期租约时只有 1 个执行最终失败处理。
 - [x] 迁移前回滚包已按历史门槛恢复验证：Alembic `8b6c1f3a9d21`、17 张表和 39 个对象；临时资源均已清理。
@@ -105,7 +105,7 @@
 
 ### 最终生产发布门禁
 
-- [ ] 使用目标租户的真实 DashScope 与 Wan 凭据完成调用，记录请求模式、错误、时延、令牌/成本，以及视频任务轮询、下载和过期行为。
+- [ ] 使用目标环境的真实模型与媒体 Provider 完成调用，记录请求模式、错误、时延、令牌/成本，以及视频任务轮询、下载和过期行为。
 - [x] 在用户授权和 `auto_publish=false` 前提下完成微信公众号真实鉴权、素材/草稿计数与一份“不发布”草稿验收；未调用公开发布提交接口。
 - [ ] 完成真实抖音 OAuth 发布/指标回收，以及微信公众号公开发布、最终 `article_id` 对账和异常矩阵验收。
 - [ ] 部署真实 TLS 网关/WAF、全业务/租户配额限流，以及集中式密钥管理与轮换流程。

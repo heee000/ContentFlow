@@ -10,7 +10,7 @@
 - S3/MinIO Endpoint、Bucket 和凭据；生产启动会拒绝 local 存储
 - 明确的 `CONTENTFLOW_CORS_ORIGINS`，不得包含 `*`
 - Web 映射端口与跨域来源一致；例如 `CONTENTFLOW_WEB_PORT=3300` 时，CORS 列表需包含 `http://localhost:3300`
-- 真实生产设置 `CONTENTFLOW_ALLOW_MOCK_PROVIDERS=false`，并配置文本、Embedding、图片、视频 Provider 所需的 Base URL、API Key 和 Workspace ID
+- 真实生产设置 `CONTENTFLOW_ALLOW_MOCK_PROVIDERS=false`；文本/Embedding 显式配置 `MODEL_API_BASE`、`MODEL_API_KEY` 和模型名，图片/视频显式配置中立 HTTP 媒体契约的 `MEDIA_API_BASE`、`MEDIA_API_KEY`、模型名和精确的 `MEDIA_DOWNLOAD_ALLOWED_HOSTS`
 - 显式设置 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true`；生产启动会拒绝关闭，Compose 的 API/Worker 默认启用
 - 显式设置 `CONTENTFLOW_METRICS_ENABLED=true`，并从密钥管理系统注入独立的 32 位以上 `CONTENTFLOW_METRICS_BEARER_TOKEN`；不得与应用签名或凭据加密密钥复用
 - 初始管理员创建完成后设置 `CONTENTFLOW_ALLOW_REGISTRATION=false`

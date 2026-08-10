@@ -169,7 +169,7 @@ ContentFlow 已经具备完整的内容营销业务闭环、PostgreSQL/pgvector�
 
 证据：
 
-- docs/production_requirements.md 仍把真实 DashScope/Wan、抖音、公众号和 RAG 评测列为未完成；
+- docs/production_requirements.md 仍把真实 外部模型/媒体 Provider、抖音、公众号和 RAG 评测列为未完成；
 - 公众号指标接口和小红书自动指标能力仍明确未实现；
 - 当前自动测试主要使用 Mock Provider 和连接器 MockTransport。
 
@@ -479,7 +479,7 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 
 ### 阶段 B：完成真实生产签收
 
-1. DashScope/Wan 真实调用；
+1. 外部模型/媒体 Provider 真实调用；
 2. 抖音和公众号测试账号全路径；
 3. RAG/生成评测集与质量阈值；
 4. Provider 重试、熔断、限流和成本记录；
@@ -553,7 +553,7 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 2. 建立 PostgreSQL/pgvector/MinIO CI，加入 Alembic、双 Worker、进程终止、Playwright、依赖审计和覆盖率门禁。
 3. 改造企业会话：OIDC 优先；否则采用短 Access Token、旋转 Refresh Token、HttpOnly Cookie、jti 撤销、CSP 和 Redis 共享限流。
 4. 接入 Prometheus/OpenTelemetry，先覆盖 API、数据库、队列租约、Provider、发布对账和成本指标，再定义 SLO 与告警。
-5. 使用隔离测试租户完成真实 DashScope/Wan、抖音、公众号和 RAG 质量矩阵，并把 Prompt/模型/知识版本、费用和评测阈值纳入发布门禁。
+5. 使用隔离测试租户完成真实 外部模型/媒体 Provider、抖音、公众号和 RAG 质量矩阵，并把 Prompt/模型/知识版本、费用和评测阈值纳入发布门禁。
 
 ### 11.4 新增审查证据与解释
 
@@ -624,7 +624,7 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 
 ### 13.3 第三轮当时最关键的 5 个不足（最新见 14.3）
 
-1. 真实外部业务尚未签收：DashScope/Wan、抖音和公众号仍缺目标测试租户证据；发布只有保守防重与人工对账，没有平台幂等、查询式自动对账、回调验签和去重闭环。
+1. 真实外部业务尚未签收：外部模型/媒体 Provider、抖音和公众号仍缺目标测试租户证据；发布只有保守防重与人工对账，没有平台幂等、查询式自动对账、回调验签和去重闭环。
 2. 企业身份与会话体系不足：没有 OIDC/SAML、MFA、Refresh Token 旋转、会话撤销、HttpOnly Cookie、设备/登录审计和跨实例共享限流；浏览器仍保存 Bearer Token。
 3. 软件供应链与交付门禁不足：没有正式 CI/CD、受控迁移 Job、环境晋级、灰度/回滚、CODEOWNERS、SBOM、镜像签名和覆盖率门禁；PostgreSQL 关键场景仍依赖本机手工验收。
 4. 可观测与运营自动化不足：Worker 心跳现在可查询，但没有 Prometheus 指标、OpenTelemetry Trace、SLO、自动告警、编排层探针、资源限制、自动扩缩、节点清理/确认机制和故障注入。
@@ -738,7 +738,7 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 ### 15.4 接下来最值得继续做的 5 项改进
 
 1. **把 CI 扩为真实系统门禁**：加入 MinIO、Alembic 升降级、Playwright、双 Worker、长任务进程终止、数据库闪断和镜像构建；远程首次通过后设置 backend/frontend 为受保护分支必需检查。
-2. **签收真实外部链路**：使用隔离租户覆盖公众号、抖音、DashScope/Wan 的完整成功与失败矩阵，补回调事件表、验签、去重、Outbox 和渠道幂等键。
+2. **签收真实外部链路**：使用隔离租户覆盖公众号、抖音、外部模型/媒体 Provider 的完整成功与失败矩阵，补回调事件表、验签、去重、Outbox 和渠道幂等键。
 3. **完成企业认证与会话治理**：OIDC 优先，配套 MFA、短 Access Token、刷新旋转、jti 撤销、HttpOnly/SameSite Cookie、CSP、Redis 限流和登录审计。
 4. **建立 SRE 运营闭环**：接入 Prometheus/OpenTelemetry，定义 API/队列/Provider/发布/成本/质量 SLI-SLO、告警、Runbook、容量模型和故障演练。
 5. **完成恢复、治理与供应链证明**：落地 RLS、PITR、异地备份和当前 head 联合恢复；建立生命周期制度，并生成 SBOM、扫描和签名镜像。
@@ -779,7 +779,7 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 
 ### 16.3 当前仍然最关键的 5 个不足
 
-1. **真实外部业务未签收**：公众号、抖音和 DashScope/Wan 仍缺权限、配额、审核、限流、超时成功、重复事件、质量和成本矩阵；Outbox/幂等/验签去重未完成。
+1. **真实外部业务未签收**：公众号、抖音和 外部模型/媒体 Provider 仍缺权限、配额、审核、限流、超时成功、重复事件、质量和成本矩阵；Outbox/幂等/验签去重未完成。
 2. **企业 IAM 与会话不足**：缺 SSO/MFA、刷新旋转/撤销、安全 Cookie、CSP、登录/设备审计和共享限流。
 3. **自动交付仍未远程闭环**：本地 CI 等价验证已覆盖 PostgreSQL/MinIO，但未有远程运行、分支保护、Playwright、故障注入、独立迁移、环境晋级和灰度回滚。
 4. **SRE 与容量运营不足**：缺 Metrics/Trace/SLO/告警、Provider 熔断/预算、对象存储监控、自动探针/扩缩、容量模型、On-call 和事故治理。
@@ -789,7 +789,7 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 
 1. **扩展故障与 E2E CI**：Alembic 升降级、Playwright、双 Worker、长任务 SIGTERM/SIGKILL、数据库闪断、对象存储短暂不可用和负载门禁。
 2. **完成当前版本灾备签收**：重跑 PostgreSQL+MinIO 联合备份与隔离恢复，加入逐对象哈希、PITR、版本保留/Object Lock、异地恢复和 RPO/RTO。
-3. **签收真实外部链路**：隔离租户覆盖公众号、抖音、DashScope/Wan 全矩阵，落地回调事件表、验签、去重、Outbox 和渠道级幂等。
+3. **签收真实外部链路**：隔离租户覆盖公众号、抖音、外部模型/媒体 Provider 全矩阵，落地回调事件表、验签、去重、Outbox 和渠道级幂等。
 4. **完成企业身份与会话治理**：OIDC/MFA、短令牌、刷新旋转、撤销、HttpOnly/SameSite Cookie、CSP、Redis 限流和登录审计。
 5. **建立可观测与治理闭环**：Prometheus/OpenTelemetry、SLO/告警、容量/成本/质量治理、RLS/生命周期、SBOM、扫描签名和组织化发布/事故流程。
 
@@ -821,7 +821,7 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 
 ### 17.3 当前仍然最关键的 5 个不足
 
-1. **真实业务与 AI 治理证据不足**：公众号、抖音、DashScope/Wan 尚未完成受控账号的成功/超时/限流/授权过期/审核矩阵；没有跨平台 Outbox、完整回调闭环、稳定模型/Prompt 版本、评测集和成本质量阈值。
+1. **真实业务与 AI 治理证据不足**：公众号、抖音、外部模型/媒体 Provider 尚未完成受控账号的成功/超时/限流/授权过期/审核矩阵；没有跨平台 Outbox、完整回调闭环、稳定模型/Prompt 版本、评测集和成本质量阈值。
 2. **企业 IAM 与浏览器会话不足**：成员关系会在每次请求回查，这是已有保护；但 localStorage 长 Access Token、HS256 单签名密钥、无 refresh/jti/iss/aud、无 OIDC/MFA/登录设备审计和共享限流仍不满足企业会话治理。
 3. **生产制品与发布治理没有闭环**：Dockerfile 已切到固定 uv 与 `uv sync --locked`，隔离安装通过，但 Docker Engine 不可用导致镜像未构建签收；Compose 基础/服务镜像未全面固定 digest，API 副本自行执行迁移，远程 CI、分支保护、独立迁移、环境晋级、SBOM、签名和回滚证据仍缺。
 4. **SRE、容量与高可用不足**：有结构化日志、readiness、Worker 心跳和队列健康，但无 Prometheus/Trace/SLO/告警、Provider 熔断与预算、容器资源限制/只读文件系统、自动扩缩、多区数据面、负载/耐久和持续故障注入。
@@ -877,7 +877,7 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 
 ### 18.3 当前仍然最关键的 5 个不足
 
-1. **真实租户和 AI 治理未签收**：公众号、抖音、DashScope/Wan 仍缺错误矩阵、限流、授权过期、审核、成本和质量证据。
+1. **真实租户和 AI 治理未签收**：公众号、抖音、外部模型/媒体 Provider 仍缺错误矩阵、限流、授权过期、审核、成本和质量证据。
 2. **企业 IAM 只完成本地会话基线**：缺 OIDC/SAML、MFA、企业目录生命周期、设备会话 UI、异常登录检测、非对称签名与集中密钥轮换。
 3. **发布一致性不是端到端 exactly-once**：缺统一 Outbox、平台幂等键、回调验签/去重以及抖音不确定提交的自动查询收敛。
 4. **生产运营证据不足**：缺浏览器 E2E、多副本负载/耐久、Metrics/Trace/SLO、告警、On-call、数据库闪断与滚动升级持续演练。
@@ -1223,3 +1223,38 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 ### 27.5 距离成熟企业项目的判断
 
 仓库现在不仅能暴露指标，还能以固定制品部署监控、加载版本化规则/看板并验证告警行为，可观测性仓库能力局部进入 L2-L3。成熟企业项目要求这些资产在目标环境持续运行并连接真实组织流程：通知必须到人、SLO 必须用真实数据校准、监控自身必须高可用可恢复、Trace/日志/成本必须关联。上述证据与产品其他短板未共同完成前，综合成熟度仍约 L2。
+## 28. 2026-08-10 第十八轮复审：供应商中立架构与 CI 噪声治理
+
+### 28.1 复审结论
+
+此前默认模型、配置字段、媒体实现和真实验收待办都隐含单一供应商假设，与产品实际边界不符。本轮已移除这些默认与专用分支：文本/Embedding 使用显式 OpenAI-compatible 端点，媒体使用 ContentFlow 中立 HTTP 契约，真实模型名和端点不再由仓库预设。Actions 邮件被确认是普通 push 后的质量门禁失败，而非强制推送或认证错误；Prometheus 校验所需的只读占位 secret 已在 CI 中补齐。
+
+### 28.2 证据与边界
+
+| 项目 | 当前证据 | 仍然缺少 |
+| --- | --- | --- |
+| 产品定位 | 已跟踪文件专项扫描无被废止的厂商/模型定向引用 | 品牌/销售材料和未来变更的持续 lint 约束 |
+| 文本/Embedding | Mock/Hash + 显式 OpenAI-compatible；无默认真实模型名 | 真实服务质量、费用、限流与故障矩阵 |
+| 图片/视频 | 中立 HTTP 同步/异步契约、任务轮询、结果大小限制、脱敏错误与下载/重定向域名允许列表 | 协议版本、幂等、取消、Webhook、能力发现与真实服务签收 |
+| 启动安全 | 真实 Provider 缺 Base/Key/模型名时 fail-fast | KMS/Vault、动态短凭据、轮换与配置签名 |
+| 自动化 | 全量 104 passed/7 skipped、81.11% 分支覆盖率；前端双构建与双端依赖审计通过；同版本 promtool config/rules/行为测试通过；CI secret 路径已修正 | 本阶段最终远程 CI、受保护分支与 PR 必需检查 |
+
+### 28.3 当前仍存在的 5 个不足
+
+1. 真实模型/媒体 Provider 的兼容、质量、费用、限流、审核和故障证据仍缺。
+2. HTTP 媒体契约缺版本化、能力发现、幂等、取消、Webhook 验签/去重和兼容承诺。
+3. 缺统一 AI gateway 的租户预算、配额、熔断、降级、成本账本与供应商切换演练。
+4. 模型与媒体秘密尚未接入企业 KMS/Vault 和工作负载身份，配置变更也无签名与策略证明。
+5. main 可直接推送，缺 PR 预合并、必需检查、失败分类/降噪和发布状态汇总。
+
+### 28.4 可以继续改进的 5 个方向
+
+1. 建立 Provider conformance suite 和可复现的真实服务验收矩阵。
+2. 固化 HTTP 媒体契约 v1，补 Schema、幂等、取消、能力发现与签名回调 Inbox。
+3. 建设 AI gateway 预算、配额、熔断、退避、降级和成本核对。
+4. 用 Secret Manager/KMS、短凭据和双密钥轮换替代长期环境变量密钥。
+5. 启用 PR、受保护 main、必需 CI 与分级通知，发布前统一展示本地和远程证据。
+
+### 28.5 距离成熟企业项目的判断
+
+供应商中立性已经从口号变成设置、实现、部署和文档的一致约束，局部达到 L2。它消除了不必要的商业绑定，但不等于真实 Provider 已生产签收。综合成熟度仍约 L2；还需与真实多渠道、SLO/追踪、企业 IAM、RLS/数据生命周期、PITR/异地、签名供应链和组织运行流程共同闭环。
