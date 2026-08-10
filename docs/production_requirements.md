@@ -105,7 +105,7 @@
 
 ### 最终生产发布门禁
 
-- [x] 仓库已发布供应商中立的 Media Contract v1 OpenAPI、版本头、稳定生成幂等键、请求参数白名单、永久/暂时错误分类、有界 `Retry-After` 和 Worker 终态回归测试。
+- [x] 仓库已发布供应商中立的 Media Contract v1 OpenAPI、版本头、稳定生成幂等键、请求参数白名单、永久/暂时错误分类、有界 `Retry-After` 和 Worker 终态回归测试；实现提交 `58238f3fc694da4ab884ed3d0c158b9e49bc593e` 已由 [ContentFlow CI #31390831127](https://github.com/heee000/ContentFlow/actions/runs/31390831127) 完成真实 PostgreSQL/pgvector、MinIO、Linux、覆盖率、双构建和双端安全审计签收。
 - [ ] 使用目标环境的真实模型与媒体 Provider 完成调用和 v1 conformance matrix，记录请求模式、错误、时延、令牌/成本、同键不重复计费，以及视频任务轮询、下载和过期行为。
 - [x] 在用户授权和 `auto_publish=false` 前提下完成微信公众号真实鉴权、素材/草稿计数与一份“不发布”草稿验收；未调用公开发布提交接口。
 - [ ] 完成真实抖音 OAuth 发布/指标回收，以及微信公众号公开发布、最终 `article_id` 对账和异常矩阵验收。

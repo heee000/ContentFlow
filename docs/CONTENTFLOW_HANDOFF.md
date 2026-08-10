@@ -1352,7 +1352,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 测试覆盖版本回显、幂等头、同资产同版本键稳定、内容版本换键、参数最小化、`video_storyboard` 路由、400/429 分类、`Retry-After`、无效响应脱敏、内联大小、下载 allowlist 与重定向拒绝。
 - 全量后端 `116 passed、7 skipped`，另有 8 个参数子用例通过，分支覆盖率 `81.35%`；全仓 Ruff 通过。本机跳过项仍仅为需要真实 PostgreSQL/pgvector 和 MinIO 的集成测试。
 - 前端 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js 生产构建通过；`npm audit` 与 `pip-audit --strict` 均为 0 个已知漏洞，`uv lock --check` 通过。
-- 默认与 observability Compose 使用仅当前命令有效的占位 secret 解析通过；Alembic 保持单 head `c95f1e4a8d73`，关键监控资产/迁移/安全专项 `40 passed`。远程 CI 仍必须补真实 PostgreSQL/pgvector、MinIO 和 Linux 运行证据。
+- 默认与 observability Compose 使用仅当前命令有效的占位 secret 解析通过；Alembic 保持单 head `c95f1e4a8d73`，关键监控资产/迁移/安全专项 `40 passed`。实现提交 `58238f3fc694da4ab884ed3d0c158b9e49bc593e` 的 [ContentFlow CI #31390831127](https://github.com/heee000/ContentFlow/actions/runs/31390831127) 已成功，Backend 与 Frontend 两个 Job 均通过，补齐真实 PostgreSQL/pgvector、MinIO、Linux、覆盖率、双构建和双端依赖审计证据。
 
 ### 持续复审：当前仍存在的 5 个不足
 
