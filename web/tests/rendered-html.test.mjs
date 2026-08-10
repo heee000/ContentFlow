@@ -93,6 +93,10 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /创建者不能自行审批/);
   assert.match(app, /查看正文与哈希/);
   assert.match(app, /prompt-releases/);
+  assert.match(app, /版本化 Prompt Eval 套件/);
+  assert.match(app, /创建不可变 Eval 套件草稿/);
+  assert.match(app, /需先通过当前 Eval 套件/);
+  assert.match(app, /prompt-eval/);
   assert.match(app, /人工发布/);
   assert.match(app, /生成记录/);
   assert.match(app, /提示词版本/);

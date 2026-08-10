@@ -6,16 +6,18 @@ import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from contentflow import db
 from contentflow.api import create_app
-from contentflow.entities import Campaign, PromptRelease, WorkflowRun
+from contentflow.entities import Campaign, PromptEvalRun, PromptRelease, WorkflowRun
 from contentflow.prompt_governance import (
     PromptIntegrityError,
     resolve_active_prompt_set,
 )
 from contentflow.prompts import PROMPTS, calculate_prompt_hashes
 from contentflow.settings import Settings
+from contentflow.worker import Worker
 from contentflow.workflow_service import execute_workflow_run
 
 
@@ -28,6 +30,7 @@ class PromptGovernanceTest(unittest.TestCase):
             secret_key="prompt-governance-test-secret",
             local_storage_dir=root / "storage",
             allow_registration=True,
+            text_provider="mock",
         )
         self.client = TestClient(create_app(self.settings))
         self.client.__enter__()
@@ -76,11 +79,77 @@ class PromptGovernanceTest(unittest.TestCase):
         self.reviewer_headers = {
             "Authorization": f"Bearer {reviewer_login.json()['access_token']}"
         }
+        suite = self.client.post(
+            "/api/v1/admin/prompt-eval/suites",
+            headers=self.owner_headers,
+            json={
+                "name": "Prompt governance gold suite",
+                "description": "Deterministic approval gate fixture",
+                "cases": self.eval_cases(),
+            },
+        )
+        self.assertEqual(suite.status_code, 201, suite.text)
+        activated = self.client.post(
+            f"/api/v1/admin/prompt-eval/suites/{suite.json()['id']}/activate",
+            headers=self.reviewer_headers,
+        )
+        self.assertEqual(activated.status_code, 200, activated.text)
+        self.worker = Worker(
+            settings=self.settings,
+            session_factory=db.SessionLocal,
+            worker_id="prompt-governance-worker",
+        )
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
         db.engine.dispose()
         self.temp_dir.cleanup()
+
+    @staticmethod
+    def eval_cases() -> list[dict[str, object]]:
+        brief = {
+            "product_name": "ContentFlow",
+            "city": "北京",
+            "must_include": ["人工复核"],
+            "product_facts": ["整理内容工作流"],
+            "call_to_action": "查看完整路线",
+        }
+        return [
+            {
+                "name": "plan-contract",
+                "stage": "plan",
+                "input_json": {"brief": brief, "knowledge": []},
+                "required_paths": [
+                    "content_angle",
+                    "key_message",
+                    "posting_window",
+                ],
+            },
+            {
+                "name": "wechat-generation-contract",
+                "stage": "generate",
+                "input_json": {
+                    "brief": brief,
+                    "platform": "wechat",
+                    "plan": {},
+                    "knowledge": [],
+                },
+                "required_paths": ["title", "body", "layout"],
+                "required_substrings": ["ContentFlow"],
+            },
+            {
+                "name": "review-contract",
+                "stage": "review",
+                "input_json": {
+                    "brief": brief,
+                    "platform": "wechat",
+                    "content": {"title": "测试", "body": "测试正文"},
+                    "knowledge": [],
+                },
+                "required_paths": ["risk_level"],
+                "expected_values": {"passed": True},
+            },
+        ]
 
     @staticmethod
     def prompts(label: str) -> dict[str, str]:
@@ -102,6 +171,24 @@ class PromptGovernanceTest(unittest.TestCase):
         return response.json()
 
     def approve(self, release_id: str):
+        evaluation = self.client.post(
+            f"/api/v1/admin/prompt-releases/{release_id}/evaluate",
+            headers=self.owner_headers,
+            json={"provider": "mock"},
+        )
+        self.assertEqual(evaluation.status_code, 202, evaluation.text)
+        self.assertTrue(self.worker.run_once())
+        eval_state = self.client.get(
+            "/api/v1/admin/prompt-eval",
+            headers=self.owner_headers,
+        )
+        self.assertEqual(eval_state.status_code, 200, eval_state.text)
+        run = next(
+            item
+            for item in eval_state.json()["runs"]
+            if item["id"] == evaluation.json()["id"]
+        )
+        self.assertEqual(run["status"], "passed", run)
         response = self.client.post(
             f"/api/v1/admin/prompt-releases/{release_id}/approve",
             headers=self.reviewer_headers,
@@ -285,6 +372,46 @@ class PromptGovernanceTest(unittest.TestCase):
                 provenance["prompt_hashes"],
                 calculate_prompt_hashes(self.prompts("runtime")),
             )
+            session.rollback()
+
+        with db.SessionLocal() as session:
+            passed_eval = session.scalar(
+                select(PromptEvalRun).where(
+                    PromptEvalRun.prompt_release_id == release["id"],
+                    PromptEvalRun.status == "passed",
+                )
+            )
+            self.assertIsNotNone(passed_eval)
+            passed_eval.provider = "stale-model-provider"
+            session.commit()
+
+        with db.SessionLocal() as session:
+            campaign = Campaign(
+                workspace_id=self.workspace_id,
+                created_by=release["created_by_user_id"],
+                name="Prompt model drift campaign",
+                product_name="ContentFlow",
+                objective="验证目标模型变更后运行时失败关闭",
+                audience="企业内容运营人员",
+                platforms=["wechat"],
+                status="active",
+                brief={"city": "北京"},
+            )
+            session.add(campaign)
+            session.flush()
+            drift_run = WorkflowRun(
+                workspace_id=self.workspace_id,
+                campaign_id=campaign.id,
+                status="queued",
+                current_stage="queued",
+                provider="mock",
+                trace_id="prompt-model-drift-trace",
+                request_json={"provider": "mock"},
+            )
+            session.add(drift_run)
+            session.flush()
+            with self.assertRaisesRegex(ValueError, "目标模型门禁"):
+                execute_workflow_run(session, drift_run, self.settings)
             session.rollback()
 
         with db.SessionLocal() as session:

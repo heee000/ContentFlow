@@ -133,6 +133,72 @@ class PromptGovernanceResponse(BaseModel):
     releases: list[PromptReleaseResponse]
 
 
+class PromptEvalCaseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=160)
+    stage: Literal["plan", "generate", "review"]
+    input_json: dict[str, Any]
+    required_paths: list[str] = Field(default_factory=list, max_length=100)
+    expected_values: dict[str, Any] = Field(default_factory=dict)
+    required_substrings: list[str] = Field(default_factory=list, max_length=100)
+    forbidden_substrings: list[str] = Field(default_factory=list, max_length=100)
+    max_output_bytes: int = Field(default=100_000, ge=256, le=1_000_000)
+
+
+class PromptEvalSuiteCreate(BaseModel):
+    name: str = Field(min_length=3, max_length=160)
+    description: str = Field(default="", max_length=2000)
+    cases: list[PromptEvalCaseInput] = Field(min_length=3, max_length=60)
+
+
+class PromptEvalRequest(BaseModel):
+    provider: str | None = Field(default=None, max_length=80)
+
+
+class PromptEvalSuiteResponse(ORMModel):
+    id: str
+    workspace_id: str
+    version_number: int
+    version: str
+    status: Literal["draft", "active", "retired"]
+    name: str
+    description: str
+    cases: list[dict[str, Any]]
+    suite_hash: str
+    created_by_user_id: str
+    activated_by_user_id: str | None
+    activated_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PromptEvalRunResponse(ORMModel):
+    id: str
+    workspace_id: str
+    prompt_release_id: str
+    suite_id: str
+    status: Literal["queued", "running", "passed", "failed", "error"]
+    requested_provider: str
+    provider: str | None
+    model: str | None
+    prompt_hashes: dict[str, str]
+    suite_hash: str
+    result_json: dict[str, Any]
+    error: str | None
+    created_by_user_id: str
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PromptEvalGovernanceResponse(BaseModel):
+    active_suite: PromptEvalSuiteResponse | None
+    suites: list[PromptEvalSuiteResponse]
+    runs: list[PromptEvalRunResponse]
+
+
 class SessionResponse(BaseModel):
     user: UserResponse
     workspace: WorkspaceResponse

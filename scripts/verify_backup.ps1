@@ -2,9 +2,9 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$BackupPath,
-    [string]$ExpectedAlembicRevision = "b84e0d3f7c92",
+    [string]$ExpectedAlembicRevision = "c95f1e4a8d73",
     [ValidateRange(1, 10000)]
-    [int]$MinimumPublicTableCount = 22
+    [int]$MinimumPublicTableCount = 24
 )
 
 $ErrorActionPreference = "Stop"

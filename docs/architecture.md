@@ -29,7 +29,9 @@ flowchart TB
 - `PublishJob`：定时发布、内容版本、外部 ID 和响应摘要
 - `MetricSnapshot`：同一发布任务的分时指标快照
 - `Job`：异步任务、幂等键、租约、重试与错误
-- `AuditLog`：操作者、动作、实体和脱敏元数据
+- AuditLog：操作者、动作、实体和脱敏元数据
+- PromptRelease：工作区三阶段 Prompt 的不可变发布版本、哈希与双人决策
+- PromptEvalSuite / PromptEvalRun：版本化确定性用例快照、目标模型运行结果与哈希化证据
 
 所有业务查询都带 `workspace_id`，API 不接受客户端自行指定工作区。用户可创建多个工作区，并通过服务端校验成员关系后换取目标工作区令牌；管理员可管理成员角色，系统阻止移除自己或降级最后一名管理员。
 
@@ -57,7 +59,7 @@ flowchart TB
 
 小红书的卡片结构、抖音的逐镜头脚本和公众号的章节结构保存在 `layout_json`，并与正文一起写入每条 `ContentRevision`。抖音分镜会进入视频素材任务，小红书排版结构会进入人工投放包。
 
-每次文本模型调用由工作流级追溯器记录到 `WorkflowRun.result_json.ai_provenance`：Provider/模型、Prompt 来源、工作区发布 ID/版本和模板哈希、调用阶段与平台、输入输出 SHA-256/字节数、时延、响应模型以及 Provider 原样返回的 Token 用量。工作流在第一次模型调用前解析当前工作区唯一的 `active` Prompt Release；没有自定义发布时使用内置安全基线。工作区 Release 的正文会在激活和运行前重新计算 SHA-256，记录值不一致时失败关闭，不会静默回退。追溯记录不复制原始 Prompt、知识文本或模型正文；失败时也会保留已完成调用和脱敏错误类型。Mock Provider 明确标记为离线确定性模型，Token 来源标记为未上报。
+每次文本模型调用由工作流级追溯器记录到 `WorkflowRun.result_json.ai_provenance`：Provider/模型、Prompt 来源、工作区发布 ID/版本和模板哈希、调用阶段与平台、输入输出 SHA-256/字节数、时延、响应模型以及 Provider 原样返回的 Token 用量。工作流在第一次模型调用前解析当前工作区唯一的 `active` Prompt Release；没有自定义发布时使用内置安全基线。工作区 Release 的正文会在激活和运行前重新计算 SHA-256，记录值不一致时失败关闭，不会静默回退。候选 Release 必须先由 `prompt_eval.execute` Worker 使用当前活动 Eval 套件和当前配置的目标 Provider/模型运行；只有 Prompt 哈希、Suite 哈希、Suite 版本、实际 Provider 与模型都匹配的 `passed` 证据才能用于审批、激活或回滚。切换活动套件或目标模型会立即使旧证据失效。评测结果只保存输出哈希、字节数、确定性断言失败项与 AI provenance，不保存模型正文。追溯记录同样不复制原始 Prompt、知识文本或模型正文；失败时保留已完成调用和脱敏错误类型。Mock Provider 明确标记为离线确定性模型，Token 来源标记为未上报。
 
 审核通过后才会为 `Asset` 入队；编辑内容会增加版本号、清空批准人、把旧素材标记为 `stale` 并创建新素材计划。发布 Worker 再检查：
 
@@ -78,7 +80,8 @@ flowchart TB
 - 失败任务采用指数退避，并限制最大尝试次数
 - 外部异步视频任务使用 `asset.poll`，未完成不会被标成业务失败
 - 微信发布提交使用 `publish.reconcile` 查询最终 `article_id`；查询前后分离事务，人工状态优先于迟到响应
-- 最终失败会回写 Workflow、Document、Asset、PublishJob 或 Connector 状态
+- 最终失败会回写 Workflow、PromptEvalRun、Document、Asset、PublishJob 或 Connector 状态
+- prompt_eval.execute 复用相同租约/重试机制；终态失败只持久化错误类型和脱敏 provenance
 
 ## 6. 存储
 

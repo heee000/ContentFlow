@@ -248,6 +248,114 @@ type PromptGovernance = {
   releases: PromptRelease[];
 };
 
+type PromptEvalCase = {
+  name: string;
+  stage: PromptStage;
+  input_json: Record<string, unknown>;
+  required_paths?: string[];
+  expected_values?: Record<string, unknown>;
+  required_substrings?: string[];
+  forbidden_substrings?: string[];
+  max_output_bytes?: number;
+};
+
+type PromptEvalSuite = {
+  id: string;
+  workspace_id: string;
+  version_number: number;
+  version: string;
+  status: "draft" | "active" | "retired";
+  name: string;
+  description: string;
+  cases: PromptEvalCase[];
+  suite_hash: string;
+  created_by_user_id: string;
+  activated_by_user_id: string | null;
+  activated_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type PromptEvalRun = {
+  id: string;
+  workspace_id: string;
+  prompt_release_id: string;
+  suite_id: string;
+  status: "queued" | "running" | "passed" | "failed" | "error";
+  requested_provider: string;
+  provider: string | null;
+  model: string | null;
+  prompt_hashes: Record<PromptStage, string>;
+  suite_hash: string;
+  result_json: Record<string, unknown>;
+  error: string | null;
+  created_by_user_id: string;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type PromptEvalGovernance = {
+  active_suite: PromptEvalSuite | null;
+  suites: PromptEvalSuite[];
+  runs: PromptEvalRun[];
+};
+
+const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
+  {
+    name: "plan-output-contract",
+    stage: "plan",
+    input_json: {
+      brief: {
+        product_name: "ContentFlow",
+        city: "北京",
+        must_include: ["人工复核"],
+        product_facts: ["整理内容工作流"],
+        call_to_action: "查看完整方案",
+      },
+      knowledge: [],
+    },
+    required_paths: ["content_angle", "key_message", "posting_window"],
+  },
+  {
+    name: "wechat-generation-contract",
+    stage: "generate",
+    input_json: {
+      brief: {
+        product_name: "ContentFlow",
+        city: "北京",
+        must_include: ["人工复核"],
+        product_facts: ["整理内容工作流"],
+        call_to_action: "查看完整方案",
+      },
+      platform: "wechat",
+      plan: {},
+      knowledge: [],
+    },
+    required_paths: ["title", "body", "layout"],
+    required_substrings: ["ContentFlow"],
+  },
+  {
+    name: "review-output-contract",
+    stage: "review",
+    input_json: {
+      brief: {
+        product_name: "ContentFlow",
+        city: "北京",
+        must_include: ["人工复核"],
+        product_facts: ["整理内容工作流"],
+        call_to_action: "查看完整方案",
+      },
+      platform: "wechat",
+      content: { title: "测试标题", body: "测试正文" },
+      knowledge: [],
+    },
+    required_paths: ["risk_level"],
+    expected_values: { passed: true },
+  },
+];
+
 type DataState = {
   dashboard: DashboardSummary;
   campaigns: Campaign[];
@@ -262,6 +370,7 @@ type DataState = {
   members: Member[];
   auditLogs: AuditLog[];
   promptGovernance: PromptGovernance | null;
+  promptEval: PromptEvalGovernance | null;
 };
 
 const EMPTY_DATA: DataState = {
@@ -284,6 +393,7 @@ const EMPTY_DATA: DataState = {
   members: [],
   auditLogs: [],
   promptGovernance: null,
+  promptEval: null,
   metrics: {
     sample_count: 0,
     impressions: 0,
@@ -330,6 +440,7 @@ const STATUS: Record<string, string> = {
   draft_created: "已建草稿",
   exported: "已导出",
   export_only: "导出模式",
+  error: "执行错误",
   failed: "失败",
   generating: "生成中",
   indexed: "已索引",
@@ -337,6 +448,7 @@ const STATUS: Record<string, string> = {
   invalid: "连接异常",
   needs_review: "待审核",
   pending: "等待中",
+  passed: "已通过评测",
   pending_test: "待测试",
   planned: "待生成",
   processing: "处理中",
@@ -635,6 +747,7 @@ export function ContentFlowApp() {
         members,
         auditLogs,
         promptGovernance,
+        promptEval,
       ] = await Promise.all([
         api<DashboardSummary>("/dashboard/summary"),
         api<Campaign[]>("/campaigns"),
@@ -655,6 +768,9 @@ export function ContentFlowApp() {
         session?.role === "admin"
           ? api<PromptGovernance>("/admin/prompt-releases")
           : Promise.resolve(null),
+        session?.role === "admin"
+          ? api<PromptEvalGovernance>("/admin/prompt-eval")
+          : Promise.resolve(null),
       ]);
       setData({
         dashboard,
@@ -670,6 +786,7 @@ export function ContentFlowApp() {
         members,
         auditLogs,
         promptGovernance,
+        promptEval,
       });
       setError("");
     } catch (caught) {
@@ -942,6 +1059,7 @@ export function ContentFlowApp() {
               members={data.members}
               auditLogs={data.auditLogs}
               promptGovernance={data.promptGovernance}
+              promptEval={data.promptEval}
               onWorkspaceCreated={createAndActivateWorkspace}
               onChanged={() => loadData()}
               flash={flash}
@@ -2346,6 +2464,7 @@ function AdministrationView({
   members,
   auditLogs,
   promptGovernance,
+  promptEval,
   onWorkspaceCreated,
   onChanged,
   flash,
@@ -2355,6 +2474,7 @@ function AdministrationView({
   members: Member[];
   auditLogs: AuditLog[];
   promptGovernance: PromptGovernance | null;
+  promptEval: PromptEvalGovernance | null;
   onWorkspaceCreated: (name: string) => Promise<void>;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
@@ -2435,6 +2555,85 @@ function AdministrationView({
   }
 
 
+
+  async function createPromptEvalSuite(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    let cases: unknown;
+    try {
+      cases = JSON.parse(String(form.get("cases") || "[]"));
+      if (!Array.isArray(cases)) throw new Error("用例必须是 JSON 数组");
+    } catch (caught) {
+      setError(caught instanceof Error ? `Eval 用例 JSON 无效：${caught.message}` : "Eval 用例 JSON 无效");
+      return;
+    }
+    setBusy("eval-suite-create");
+    setError("");
+    try {
+      await api<PromptEvalSuite>("/admin/prompt-eval/suites", {
+        method: "POST",
+        body: {
+          name: String(form.get("name") || ""),
+          description: String(form.get("description") || ""),
+          cases,
+        },
+      });
+      formElement.reset();
+      flash("Eval 套件草稿已创建，需由另一名管理员激活");
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function activatePromptEvalSuite(suite: PromptEvalSuite) {
+    const verb = suite.status === "retired" ? "重新激活" : "激活";
+    if (!window.confirm(
+      `确认${verb} ${suite.version}？现有 Prompt 的旧评测证据将立即失效。`,
+    )) return;
+    setBusy(`eval-suite-${suite.id}`);
+    setError("");
+    try {
+      await api<PromptEvalSuite>(
+        `/admin/prompt-eval/suites/${suite.id}/activate`,
+        { method: "POST" },
+      );
+      flash(`${suite.version} 已成为当前 Eval 门禁`);
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function evaluatePromptRelease(release: PromptRelease) {
+    setBusy(`eval-release-${release.id}`);
+    setError("");
+    try {
+      await api<PromptEvalRun>(
+        `/admin/prompt-releases/${release.id}/evaluate`,
+        { method: "POST", body: {} },
+      );
+      flash(`${release.version} 评测已进入队列，页面会自动刷新结果`);
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function currentEvalRun(releaseId: string) {
+    const activeSuiteId = promptEval?.active_suite?.id;
+    if (!activeSuiteId) return undefined;
+    return promptEval.runs.find(
+      (run) => run.prompt_release_id === releaseId && run.suite_id === activeSuiteId,
+    );
+  }
 
   async function createPromptRelease(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2605,7 +2804,7 @@ function AdministrationView({
                 <h3>基于当前生效版本创建新草稿</h3>
                 <p className="form-note">
                   草稿创建后不可修改；创建者不能自行审批，必须由另一名管理员复核。
-                  审计日志只保存版本与哈希，不保存 Prompt 正文。
+                  审批与激活前还必须通过当前 Eval 套件。审计日志只保存版本与哈希，不保存 Prompt 正文。
                 </p>
               </div>
               <label>
@@ -2651,12 +2850,128 @@ function AdministrationView({
       <section className="panel admin-section">
         <div className="panel-heading">
           <div>
+            <p className="eyebrow">Evaluation gate</p>
+            <h2>版本化 Prompt Eval 套件</h2>
+          </div>
+          {promptEval?.active_suite
+            ? <StatusBadge value="active" />
+            : <StatusBadge value="blocked" />}
+        </div>
+        {promptEval?.active_suite ? (
+          <>
+            <div className="prompt-active-summary">
+              <div><small>当前套件</small><strong>{promptEval.active_suite.version}</strong></div>
+              <div><small>名称</small><strong>{promptEval.active_suite.name}</strong></div>
+              <div><small>确定性用例</small><strong>{promptEval.active_suite.cases.length}</strong></div>
+              <div><small>Suite 哈希</small><code>{promptEval.active_suite.suite_hash.slice(0, 12)}</code></div>
+            </div>
+            <details className="eval-suite-details">
+              <summary>查看当前门禁的完整用例快照</summary>
+              <pre>{JSON.stringify(promptEval.active_suite.cases, null, 2)}</pre>
+            </details>
+          </>
+        ) : (
+          <p className="permission-note">
+            当前没有生效的 Eval 套件，所有 Prompt 审批与激活都会 fail closed。
+          </p>
+        )}
+        <form className="stack-form prompt-release-form" onSubmit={createPromptEvalSuite}>
+          <div>
+            <p className="eyebrow">Immutable suite</p>
+            <h3>创建不可变 Eval 套件草稿</h3>
+            <p className="form-note">
+              套件必须覆盖 plan、generate、review，并为每个用例提供确定性断言。
+              创建者不能自行激活；运行结果不保存模型正文，只保存哈希、字节数与失败项。
+            </p>
+          </div>
+          <div className="form-grid">
+            <label>
+              套件名称
+              <input name="name" required minLength={3} maxLength={160} placeholder="公众号内容质量基线 2026-Q3" />
+            </label>
+            <label>
+              说明
+              <input name="description" maxLength={2000} placeholder="覆盖输出契约、必要事实与风险边界" />
+            </label>
+          </div>
+          <label>
+            用例 JSON
+            <textarea
+              className="eval-case-editor"
+              name="cases"
+              required
+              defaultValue={JSON.stringify(DEFAULT_PROMPT_EVAL_CASES, null, 2)}
+              spellCheck={false}
+            />
+            <small>支持 required_paths、expected_values、required_substrings、forbidden_substrings 和 max_output_bytes。</small>
+          </label>
+          <Button busy={busy === "eval-suite-create"} type="submit">创建 Eval 套件草稿</Button>
+        </form>
+        <DataTable
+          headers={["套件", "名称 / 哈希", "用例", "创建时间", "状态", "操作"]}
+          rows={(promptEval?.suites || []).map((suite) => [
+            <code key="version">{suite.version}</code>,
+            <div className="prompt-release-details" key="name">
+              <strong>{suite.name}</strong>
+              <small>SHA-256 {suite.suite_hash}</small>
+            </div>,
+            String(suite.cases.length),
+            formatDateTime(suite.created_at),
+            <StatusBadge key="status" value={suite.status} />,
+            <div className="table-actions" key="actions">
+              {suite.status === "active" ? <span>当前门禁</span> : null}
+              {suite.status !== "active" && suite.created_by_user_id === currentSession.user.id
+                ? <span>等待其他管理员</span>
+                : null}
+              {suite.status !== "active" && suite.created_by_user_id !== currentSession.user.id ? (
+                <button
+                  className="table-link"
+                  disabled={busy === `eval-suite-${suite.id}`}
+                  onClick={() => void activatePromptEvalSuite(suite)}
+                >
+                  {suite.status === "retired" ? "重新激活" : "激活"}
+                </button>
+              ) : null}
+            </div>,
+          ])}
+          empty="还没有 Eval 套件；创建并由另一名管理员激活后才能审批 Prompt"
+        />
+      </section>
+
+      <section className="panel admin-section">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Evaluation history</p>
+            <h2>最近 {promptEval?.runs.length || 0} 次 Prompt 评测</h2>
+          </div>
+        </div>
+        <DataTable
+          headers={["时间", "Prompt", "套件", "Provider / 模型", "结果", "证据"]}
+          rows={(promptEval?.runs || []).map((run) => [
+            formatDateTime(run.created_at),
+            <code key="release">{run.prompt_release_id.slice(0, 8)}</code>,
+            <code key="suite">{run.suite_id.slice(0, 8)}</code>,
+            `${run.provider || run.requested_provider} / ${run.model || "等待执行"}`,
+            <StatusBadge key="status" value={run.status} />,
+            <details className="eval-run-details" key="evidence">
+              <summary>哈希化结果</summary>
+              <pre>{JSON.stringify(run.result_json, null, 2)}</pre>
+              {run.error ? <p className="inline-error">{run.error}</p> : null}
+            </details>,
+          ])}
+          empty="还没有 Prompt 评测记录"
+        />
+      </section>
+
+      <section className="panel admin-section">
+        <div className="panel-heading">
+          <div>
             <p className="eyebrow">Release history</p>
             <h2>{promptGovernance?.releases.length || 0} 个工作区 Prompt 版本</h2>
           </div>
         </div>
         <DataTable
-          headers={["版本", "变更摘要", "创建 / 复核", "时间", "状态", "操作"]}
+          headers={["版本", "变更摘要", "创建 / 复核", "时间", "当前 Eval", "状态", "操作"]}
           rows={(promptGovernance?.releases || []).map((release) => [
             <code key="version">{release.version}</code>,
             <div className="prompt-release-details" key="summary">
@@ -2675,6 +2990,20 @@ function AdministrationView({
             </div>,
             `${memberName(release.created_by_user_id)} / ${memberName(release.reviewed_by_user_id)}`,
             formatDateTime(release.created_at),
+            <div className="table-actions" key="eval">
+              {currentEvalRun(release.id) ? (
+                <StatusBadge value={currentEvalRun(release.id)?.status || "queued"} />
+              ) : <span>无当前证据</span>}
+              {release.status !== "rejected" && promptEval?.active_suite ? (
+                <button
+                  className="table-link"
+                  disabled={busy === `eval-release-${release.id}`}
+                  onClick={() => void evaluatePromptRelease(release)}
+                >
+                  {currentEvalRun(release.id) ? "重新评测" : "运行评测"}
+                </button>
+              ) : null}
+            </div>,
             <StatusBadge key="status" value={release.status} />,
             <div className="table-actions" key="actions">
               {release.status === "draft"
@@ -2682,7 +3011,11 @@ function AdministrationView({
                   <>
                     <button
                       className="table-link"
-                      disabled={busy === `prompt-${release.id}`}
+                      disabled={
+                        busy === `prompt-${release.id}`
+                        || currentEvalRun(release.id)?.status !== "passed"
+                      }
+                      title={currentEvalRun(release.id)?.status === "passed" ? "审批" : "需先通过当前 Eval 套件"}
                       onClick={() => void reviewPromptRelease(release, "approve")}
                     >
                       审批
@@ -2703,7 +3036,11 @@ function AdministrationView({
               {release.status === "approved" ? (
                 <button
                   className="table-link"
-                  disabled={busy === `prompt-${release.id}`}
+                  disabled={
+                    busy === `prompt-${release.id}`
+                    || currentEvalRun(release.id)?.status !== "passed"
+                  }
+                  title={currentEvalRun(release.id)?.status === "passed" ? "激活" : "需先通过当前 Eval 套件"}
                   onClick={() => void reviewPromptRelease(release, "activate")}
                 >
                   激活
@@ -2712,7 +3049,11 @@ function AdministrationView({
               {release.status === "retired" ? (
                 <button
                   className="table-link"
-                  disabled={busy === `prompt-${release.id}`}
+                  disabled={
+                    busy === `prompt-${release.id}`
+                    || currentEvalRun(release.id)?.status !== "passed"
+                  }
+                  title={currentEvalRun(release.id)?.status === "passed" ? "回滚" : "需先通过当前 Eval 套件"}
                   onClick={() => void reviewPromptRelease(release, "activate")}
                 >
                   回滚

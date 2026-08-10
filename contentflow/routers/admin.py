@@ -14,10 +14,22 @@ from ..entities import (
     AuditLog,
     Job,
     Membership,
+    PromptEvalRun,
+    PromptEvalSuite,
     PromptRelease,
     User,
     WorkerNode,
     Workspace,
+)
+from ..job_queue import enqueue_job
+from ..prompt_eval import (
+    EvalIntegrityError,
+    calculate_suite_hash,
+    eval_suite_version,
+    get_active_eval_suite,
+    normalize_eval_cases,
+    require_current_passed_eval,
+    verify_eval_suite,
 )
 from ..prompt_governance import (
     PromptIntegrityError,
@@ -32,6 +44,11 @@ from ..schemas import (
     MemberCreate,
     MemberResponse,
     MemberUpdate,
+    PromptEvalGovernanceResponse,
+    PromptEvalRequest,
+    PromptEvalRunResponse,
+    PromptEvalSuiteCreate,
+    PromptEvalSuiteResponse,
     PromptGovernanceResponse,
     PromptReleaseCreate,
     PromptReleaseResponse,
@@ -251,6 +268,66 @@ def prompt_release_response(release: PromptRelease) -> PromptReleaseResponse:
     )
 
 
+def prompt_eval_suite_response(suite: PromptEvalSuite) -> PromptEvalSuiteResponse:
+    return PromptEvalSuiteResponse(
+        id=suite.id,
+        workspace_id=suite.workspace_id,
+        version_number=suite.version_number,
+        version=eval_suite_version(suite.version_number),
+        status=suite.status,
+        name=suite.name,
+        description=suite.description,
+        cases=list(suite.cases_json),
+        suite_hash=suite.suite_hash,
+        created_by_user_id=suite.created_by_user_id,
+        activated_by_user_id=suite.activated_by_user_id,
+        activated_at=suite.activated_at,
+        created_at=suite.created_at,
+        updated_at=suite.updated_at,
+    )
+
+
+def prompt_eval_run_response(run: PromptEvalRun) -> PromptEvalRunResponse:
+    return PromptEvalRunResponse(
+        id=run.id,
+        workspace_id=run.workspace_id,
+        prompt_release_id=run.prompt_release_id,
+        suite_id=run.suite_id,
+        status=run.status,
+        requested_provider=run.requested_provider,
+        provider=run.provider,
+        model=run.model,
+        prompt_hashes=dict(run.prompt_hashes_json),
+        suite_hash=run.suite_hash,
+        result_json=dict(run.result_json or {}),
+        error=run.error,
+        created_by_user_id=run.created_by_user_id,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+    )
+
+
+def require_eval_gate_or_409(
+    session: Session,
+    release: PromptRelease,
+    settings: AppSettings,
+) -> tuple[PromptEvalSuite, PromptEvalRun]:
+    try:
+        return require_current_passed_eval(session, release, settings)
+    except (EvalIntegrityError, PromptIntegrityError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Prompt 或当前 Eval 套件完整性校验失败，禁止审批或激活",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+
+
 def lock_workspace(session: Session, workspace_id: str) -> Workspace:
     query = select(Workspace).where(Workspace.id == workspace_id)
     if session.bind and session.bind.dialect.name == "postgresql":
@@ -380,6 +457,7 @@ def approve_prompt_release(
     payload: PromptReviewRequest,
     principal: Admin,
     session: Db,
+    settings: AppSettings,
 ):
     release = get_prompt_release_or_404(
         session,
@@ -397,6 +475,7 @@ def approve_prompt_release(
             status_code=status.HTTP_409_CONFLICT,
             detail="只有草稿状态的 Prompt 版本可以审批",
         )
+    require_eval_gate_or_409(session, release, settings)
     release.status = "approved"
     release.review_note = payload.note.strip() or None
     release.reviewed_by_user_id = principal.user_id
@@ -480,6 +559,7 @@ def activate_prompt_release(
     release_id: str,
     principal: Admin,
     session: Db,
+    settings: AppSettings,
 ):
     lock_workspace(session, principal.workspace_id)
     release = get_prompt_release_or_404(
@@ -501,6 +581,7 @@ def activate_prompt_release(
             detail="该 Prompt 版本的完整性校验失败，禁止激活",
         ) from error
 
+    require_eval_gate_or_409(session, release, settings)
     rollback = release.status == "retired"
     current = session.scalar(
         select(PromptRelease).where(
@@ -534,6 +615,266 @@ def activate_prompt_release(
     session.commit()
     session.refresh(release)
     return prompt_release_response(release)
+
+
+@router.get("/prompt-eval", response_model=PromptEvalGovernanceResponse)
+def list_prompt_eval(principal: Admin, session: Db):
+    suites = list(
+        session.scalars(
+            select(PromptEvalSuite)
+            .where(PromptEvalSuite.workspace_id == principal.workspace_id)
+            .order_by(PromptEvalSuite.version_number.desc())
+        )
+    )
+    runs = list(
+        session.scalars(
+            select(PromptEvalRun)
+            .where(PromptEvalRun.workspace_id == principal.workspace_id)
+            .order_by(PromptEvalRun.created_at.desc())
+            .limit(100)
+        )
+    )
+    active = next((suite for suite in suites if suite.status == "active"), None)
+    return PromptEvalGovernanceResponse(
+        active_suite=(prompt_eval_suite_response(active) if active else None),
+        suites=[prompt_eval_suite_response(suite) for suite in suites],
+        runs=[prompt_eval_run_response(run) for run in runs],
+    )
+
+
+@router.post(
+    "/prompt-eval/suites",
+    response_model=PromptEvalSuiteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_prompt_eval_suite(
+    payload: PromptEvalSuiteCreate,
+    principal: Admin,
+    session: Db,
+):
+    try:
+        cases = normalize_eval_cases(
+            [case.model_dump(mode="json") for case in payload.cases]
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+    name = payload.name.strip()
+    if len(name) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Eval 套件名称去除首尾空白后至少需要 3 个字符",
+        )
+
+    lock_workspace(session, principal.workspace_id)
+    latest = session.scalar(
+        select(func.max(PromptEvalSuite.version_number)).where(
+            PromptEvalSuite.workspace_id == principal.workspace_id
+        )
+    )
+    suite = PromptEvalSuite(
+        workspace_id=principal.workspace_id,
+        version_number=int(latest or 0) + 1,
+        status="draft",
+        name=name,
+        description=payload.description.strip(),
+        cases_json=cases,
+        suite_hash=calculate_suite_hash(cases),
+        created_by_user_id=principal.user_id,
+    )
+    session.add(suite)
+    session.flush()
+    record_audit(
+        session,
+        action="prompt_eval_suite.create",
+        entity_type="prompt_eval_suite",
+        entity_id=suite.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "version": eval_suite_version(suite.version_number),
+            "suite_hash": suite.suite_hash,
+            "case_count": len(cases),
+        },
+    )
+    session.commit()
+    session.refresh(suite)
+    return prompt_eval_suite_response(suite)
+
+
+def get_prompt_eval_suite_or_404(
+    session: Session,
+    *,
+    workspace_id: str,
+    suite_id: str,
+    lock: bool = False,
+) -> PromptEvalSuite:
+    query = select(PromptEvalSuite).where(
+        PromptEvalSuite.id == suite_id,
+        PromptEvalSuite.workspace_id == workspace_id,
+    )
+    if lock and session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    suite = session.scalar(query)
+    if suite is None:
+        raise HTTPException(status_code=404, detail="Prompt Eval 套件不存在")
+    return suite
+
+
+@router.post(
+    "/prompt-eval/suites/{suite_id}/activate",
+    response_model=PromptEvalSuiteResponse,
+)
+def activate_prompt_eval_suite(
+    suite_id: str,
+    principal: Admin,
+    session: Db,
+):
+    lock_workspace(session, principal.workspace_id)
+    suite = get_prompt_eval_suite_or_404(
+        session,
+        workspace_id=principal.workspace_id,
+        suite_id=suite_id,
+        lock=True,
+    )
+    if suite.created_by_user_id == principal.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="创建者不能激活自己的 Prompt Eval 套件",
+        )
+    if suite.status not in {"draft", "retired"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="只有草稿或已退役的 Prompt Eval 套件可以激活",
+        )
+    try:
+        verify_eval_suite(suite)
+    except (EvalIntegrityError, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Prompt Eval 套件完整性校验失败，禁止激活",
+        ) from error
+
+    current = session.scalar(
+        select(PromptEvalSuite).where(
+            PromptEvalSuite.workspace_id == principal.workspace_id,
+            PromptEvalSuite.status == "active",
+            PromptEvalSuite.id != suite.id,
+        )
+    )
+    previous_suite_id = current.id if current else None
+    if current:
+        current.status = "retired"
+        session.flush()
+    suite.status = "active"
+    suite.activated_by_user_id = principal.user_id
+    suite.activated_at = datetime.now(timezone.utc)
+    session.flush()
+    record_audit(
+        session,
+        action="prompt_eval_suite.activate",
+        entity_type="prompt_eval_suite",
+        entity_id=suite.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "version": eval_suite_version(suite.version_number),
+            "suite_hash": suite.suite_hash,
+            "previous_suite_id": previous_suite_id,
+        },
+    )
+    session.commit()
+    session.refresh(suite)
+    return prompt_eval_suite_response(suite)
+
+
+@router.post(
+    "/prompt-releases/{release_id}/evaluate",
+    response_model=PromptEvalRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def evaluate_prompt_release(
+    release_id: str,
+    payload: PromptEvalRequest,
+    principal: Admin,
+    session: Db,
+    settings: AppSettings,
+):
+    lock_workspace(session, principal.workspace_id)
+    release = get_prompt_release_or_404(
+        session,
+        workspace_id=principal.workspace_id,
+        release_id=release_id,
+        lock=True,
+    )
+    if release.status == "rejected":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="已拒绝的 Prompt 版本不能运行评测",
+        )
+    try:
+        prompt_set = prompt_set_from_release(release)
+        suite = get_active_eval_suite(session, principal.workspace_id)
+        if suite is None:
+            raise ValueError("当前工作区没有生效的 Prompt Eval 套件")
+        verify_eval_suite(suite)
+    except (EvalIntegrityError, PromptIntegrityError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Prompt 或当前 Eval 套件完整性校验失败，禁止运行评测",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+
+    provider = (payload.provider or settings.text_provider).strip().lower()
+    if provider not in {"mock", "dashscope", "openai-compatible"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"不支持的文本模型 Provider: {provider}",
+        )
+    run = PromptEvalRun(
+        workspace_id=principal.workspace_id,
+        prompt_release_id=release.id,
+        suite_id=suite.id,
+        status="queued",
+        requested_provider=provider,
+        prompt_hashes_json=dict(prompt_set.hashes),
+        suite_hash=suite.suite_hash,
+        result_json={},
+        created_by_user_id=principal.user_id,
+    )
+    session.add(run)
+    session.flush()
+    enqueue_job(
+        session,
+        job_type="prompt_eval.execute",
+        payload={"run_id": run.id},
+        workspace_id=principal.workspace_id,
+        idempotency_key=f"prompt_eval.execute:{run.id}",
+    )
+    record_audit(
+        session,
+        action="prompt_eval.queue",
+        entity_type="prompt_eval_run",
+        entity_id=run.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "prompt_release_id": release.id,
+            "suite_id": suite.id,
+            "suite_hash": suite.suite_hash,
+            "prompt_hashes": dict(prompt_set.hashes),
+            "requested_provider": provider,
+        },
+    )
+    session.commit()
+    session.refresh(run)
+    return prompt_eval_run_response(run)
 
 
 @router.get("/audit-logs", response_model=list[AuditLogResponse])

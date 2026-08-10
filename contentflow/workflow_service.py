@@ -5,10 +5,18 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from .ai_provenance import AIProvenanceRecorder
-from .entities import Asset, Campaign, ContentItem, ContentRevision, WorkflowRun
+from .entities import (
+    Asset,
+    Campaign,
+    ContentItem,
+    ContentRevision,
+    PromptRelease,
+    WorkflowRun,
+)
 from .embeddings import build_embedding_provider
 from .knowledge_service import search_workspace_knowledge
 from .models import CampaignBrief
+from .prompt_eval import require_current_passed_eval
 from .prompt_governance import resolve_active_prompt_set
 from .review import RuleReviewer
 from .settings import Settings
@@ -72,11 +80,22 @@ def execute_workflow_run(
 
     provider_override = run.request_json.get("provider")
     provider = build_text_provider(settings, provider_override)
+    prompt_set = resolve_active_prompt_set(session, run.workspace_id)
+    if prompt_set.release_id:
+        release = session.get(PromptRelease, prompt_set.release_id)
+        if release is None or release.workspace_id != run.workspace_id:
+            raise ValueError("工作流关联的 Prompt 版本不存在")
+        require_current_passed_eval(
+            session,
+            release,
+            settings,
+            provider_override,
+        )
     provenance = AIProvenanceRecorder(
         provider,
         embedding_provider=settings.embedding_provider,
         embedding_model=embedder.model_name,
-        prompt_set=resolve_active_prompt_set(session, run.workspace_id),
+        prompt_set=prompt_set,
     )
     run.provider = provenance.provider_name
     run.current_stage = "planning"

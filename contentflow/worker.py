@@ -25,6 +25,7 @@ from .entities import (
     Job,
     KnowledgeDocument,
     MetricSnapshot,
+    PromptEvalRun,
     PublishJob,
     WorkflowRun,
     WorkerNode,
@@ -45,12 +46,15 @@ from .media_providers import (
     download_generated_media,
 )
 from .object_storage import build_object_storage
+from .prompt_eval import execute_prompt_eval_run
 from .settings import Settings, get_settings
 from .workflow_service import execute_workflow_run
 
 
 logger = logging.getLogger("contentflow.worker")
 Handler = Callable[[Session, dict[str, Any], Settings], dict[str, Any]]
+
+
 def configure_worker_logging() -> None:
     logging.basicConfig(level=logging.INFO, force=True)
     logger.disabled = False
@@ -408,6 +412,7 @@ def handle_asset_poll(
     )
     return {"asset_id": asset.id, "status": asset.status}
 
+
 def publish_reconciliation_job_key(publish_job_id: str) -> str:
     return f"publish.reconcile:{publish_job_id}"
 
@@ -429,10 +434,10 @@ def ensure_publish_reconciliation_job(
     }
     existing = session.scalar(select(Job).where(Job.idempotency_key == key))
     if existing is not None:
-        if (
-            publish_job.status == "submitted"
-            and existing.status in {"succeeded", "failed"}
-        ):
+        if publish_job.status == "submitted" and existing.status in {
+            "succeeded",
+            "failed",
+        }:
             previous_status = existing.status
             previous_attempts = existing.attempts
             existing.status = "queued"
@@ -520,9 +525,7 @@ def schedule_pending_publish_reconciliations(
 def handle_publish_dispatch(
     session: Session, payload: dict[str, Any], settings: Settings
 ) -> dict[str, Any]:
-    publish_query = select(PublishJob).where(
-        PublishJob.id == payload["publish_job_id"]
-    )
+    publish_query = select(PublishJob).where(PublishJob.id == payload["publish_job_id"])
     if session.bind and session.bind.dialect.name == "postgresql":
         publish_query = publish_query.with_for_update()
     publish_job = session.scalar(publish_query)
@@ -558,9 +561,7 @@ def handle_publish_dispatch(
     if content.version != int(publish_job.request_json.get("content_version", 0)):
         raise ValueError("内容版本已变化，请重新审核并创建发布任务")
     all_assets = list(
-        session.scalars(
-            select(Asset).where(Asset.content_item_id == content.id)
-        )
+        session.scalars(select(Asset).where(Asset.content_item_id == content.id))
     )
     assets = [
         asset
@@ -580,9 +581,13 @@ def handle_publish_dispatch(
     )
 
     request_json = dict(publish_job.request_json or {})
-    request_json["dispatch_token"] = request_json.get("dispatch_token") or uuid.uuid4().hex
+    request_json["dispatch_token"] = (
+        request_json.get("dispatch_token") or uuid.uuid4().hex
+    )
     request_json["dispatch_started_at"] = datetime.now(timezone.utc).isoformat()
-    request_json["dispatch_attempt"] = int(request_json.get("dispatch_attempt") or 0) + 1
+    request_json["dispatch_attempt"] = (
+        int(request_json.get("dispatch_attempt") or 0) + 1
+    )
     publish_job.request_json = request_json
     publish_job.status = "publishing"
     publish_job.attempts += 1
@@ -642,8 +647,7 @@ def handle_publish_dispatch(
         if not result.external_id or not connector.reconciliation_supported:
             publish_job.status = "reconciliation_required"
             publish_job.error = (
-                "平台已接受发布请求，但没有可用的确定性状态查询键；"
-                "请完成人工对账。"
+                "平台已接受发布请求，但没有可用的确定性状态查询键；请完成人工对账。"
             )
             record_audit(
                 session,
@@ -665,9 +669,7 @@ def handle_publish_dispatch(
         )
 
     publish_job.published_at = (
-        datetime.now(timezone.utc)
-        if publish_job.status == "published"
-        else None
+        datetime.now(timezone.utc) if publish_job.status == "published" else None
     )
     record_audit(
         session,
@@ -698,12 +700,11 @@ def handle_publish_dispatch(
         ),
     }
 
+
 def handle_publish_reconcile(
     session: Session, payload: dict[str, Any], settings: Settings
 ) -> dict[str, Any]:
-    publish_query = select(PublishJob).where(
-        PublishJob.id == payload["publish_job_id"]
-    )
+    publish_query = select(PublishJob).where(PublishJob.id == payload["publish_job_id"])
     if session.bind and session.bind.dialect.name == "postgresql":
         publish_query = publish_query.with_for_update()
     publish_job = session.scalar(publish_query)
@@ -724,9 +725,7 @@ def handle_publish_reconcile(
     if publish_job.status not in {"submitted", "reconciliation_required"}:
         raise ValueError(f"当前发布状态不能自动对账: {publish_job.status}")
     if not publish_job.external_id:
-        raise PublishReconciliationRequired(
-            "缺少平台状态查询键，必须人工核对发布结果"
-        )
+        raise PublishReconciliationRequired("缺少平台状态查询键，必须人工核对发布结果")
 
     channel = session.get(ChannelConnection, publish_job.channel_id)
     if channel is None:
@@ -769,8 +768,7 @@ def handle_publish_reconcile(
         "failed",
     }
     state_changed = (
-        current_publish_job.status
-        not in {"submitted", "reconciliation_required"}
+        current_publish_job.status not in {"submitted", "reconciliation_required"}
         or current_publish_job.external_id != lookup_external_id
     )
     if current_publish_job.status in terminal_states or state_changed:
@@ -912,8 +910,22 @@ def handle_metrics_pull(
     }
 
 
+def handle_prompt_eval_execute(
+    session: Session,
+    payload: dict[str, Any],
+    settings: Settings,
+) -> dict[str, Any]:
+    run = session.get(PromptEvalRun, payload["run_id"])
+    if run is None:
+        raise ValueError("Prompt Eval 运行不存在")
+    if run.status in {"passed", "failed"}:
+        return dict(run.result_json or {})
+    return execute_prompt_eval_run(session, run, settings)
+
+
 HANDLERS: dict[str, Handler] = {
     "knowledge.index": handle_knowledge_index,
+    "prompt_eval.execute": handle_prompt_eval_execute,
     "workflow.execute": handle_workflow_execute,
     "connector.test": handle_connector_test,
     "asset.generate": handle_asset_generate,
@@ -933,7 +945,30 @@ def mark_domain_failure(
     ai_provenance: dict[str, Any] | None = None,
 ) -> None:
     payload = dict(job.payload_json or {})
-    if job.job_type == "workflow.execute" and payload.get("run_id"):
+    if job.job_type == "prompt_eval.execute" and payload.get("run_id"):
+        run = session.get(PromptEvalRun, payload["run_id"])
+        if run:
+            run.status = "error"
+            run.error = message[:2000]
+            run.completed_at = datetime.now(timezone.utc)
+            run.result_json = {
+                "schema_version": 1,
+                **({"ai_provenance": ai_provenance} if ai_provenance else {}),
+            }
+            record_audit(
+                session,
+                action="prompt_eval.error",
+                entity_type="prompt_eval_run",
+                entity_id=run.id,
+                workspace_id=run.workspace_id,
+                actor_user_id=None,
+                metadata={
+                    "prompt_release_id": run.prompt_release_id,
+                    "suite_id": run.suite_id,
+                    "error": message[:200],
+                },
+            )
+    elif job.job_type == "workflow.execute" and payload.get("run_id"):
         run = session.get(WorkflowRun, payload["run_id"])
         if run:
             run.status = "failed"
@@ -972,8 +1007,7 @@ def mark_domain_failure(
         ):
             publish_job.status = "reconciliation_required"
             publish_job.error = (
-                "Worker 在发布结果落库前失联，禁止自动重试；"
-                f"请先人工对账。{message}"
+                f"Worker 在发布结果落库前失联，禁止自动重试；请先人工对账。{message}"
             )[:8000]
             record_audit(
                 session,
@@ -1004,8 +1038,7 @@ def mark_domain_failure(
         }:
             publish_job.status = "reconciliation_required"
             publish_job.error = (
-                "自动发布对账未能获得确定结果，已转人工处理："
-                f"{message}"
+                f"自动发布对账未能获得确定结果，已转人工处理：{message}"
             )[:8000]
             record_audit(
                 session,
@@ -1153,14 +1186,16 @@ class Worker:
                 job = session.get(Job, job_id)
                 ai_provenance = getattr(error, "ai_provenance", None)
                 persisted_error: Exception | str = error
-                if (
+                if job is not None and job.job_type == "prompt_eval.execute":
+                    persisted_error = (
+                        f"AI prompt evaluation failed ({type(error).__name__})"
+                    )
+                elif (
                     job is not None
                     and job.job_type == "workflow.execute"
                     and ai_provenance
                 ):
-                    persisted_error = (
-                        f"AI workflow failed ({type(error).__name__})"
-                    )
+                    persisted_error = f"AI workflow failed ({type(error).__name__})"
                 if job is not None:
                     mark_publish_first = (
                         job.job_type == "publish.dispatch"
@@ -1188,12 +1223,8 @@ class Worker:
                             lease_error,
                         )
                         return True
-                    if (
-                        not mark_publish_first
-                        and (
-                            not isinstance(error, JobNotReady)
-                            or job.status == "failed"
-                        )
+                    if not mark_publish_first and (
+                        not isinstance(error, JobNotReady) or job.status == "failed"
                     ):
                         mark_domain_failure(
                             session,
@@ -1226,9 +1257,7 @@ class Worker:
                 while not self.stop_requested:
                     worked = self.run_once()
                     if not worked:
-                        self._stop_event.wait(
-                            self.settings.worker_poll_seconds
-                        )
+                        self._stop_event.wait(self.settings.worker_poll_seconds)
         finally:
             logger.info(
                 "worker stopped id=%s signal=%s",

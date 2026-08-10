@@ -211,6 +211,101 @@ class PromptRelease(TimestampMixin, Base):
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class PromptEvalSuite(TimestampMixin, Base):
+    __tablename__ = "prompt_eval_suites"
+    __table_args__ = (
+        CheckConstraint("version_number > 0", name="version_number_positive"),
+        CheckConstraint(
+            "status IN ('draft', 'active', 'retired')",
+            name="status",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "version_number",
+            name="uq_prompt_eval_suite_workspace_version",
+        ),
+        Index(
+            "uq_prompt_eval_suite_workspace_active",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+        Index(
+            "ix_prompt_eval_suites_workspace_status",
+            "workspace_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(24), default="draft", nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    cases_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    suite_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    activated_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PromptEvalRun(TimestampMixin, Base):
+    __tablename__ = "prompt_eval_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'passed', 'failed', 'error')",
+            name="status",
+        ),
+        Index(
+            "ix_prompt_eval_runs_workspace_created",
+            "workspace_id",
+            "created_at",
+        ),
+        Index(
+            "ix_prompt_eval_runs_release_suite",
+            "prompt_release_id",
+            "suite_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    prompt_release_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_releases.id", ondelete="RESTRICT"), index=True
+    )
+    suite_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_eval_suites.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(24), default="queued", nullable=False, index=True
+    )
+    requested_provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(80))
+    model: Mapped[str | None] = mapped_column(String(160))
+    prompt_hashes_json: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    suite_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Campaign(TimestampMixin, Base):
     __tablename__ = "campaigns"
 

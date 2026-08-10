@@ -1139,3 +1139,45 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 ### 成熟度判断
 
 Prompt 治理从“只能追溯内置常量”提升到“工作区不可变版本、双人审批、可回滚、运行时校验和完整审计”，AI 变更控制局部达到 L2-L3。综合项目仍约为 L2：已有可部署主链路、可靠任务队列、真实公众号草稿证据和较强仓库门禁，但成熟企业完整项目要求质量、渠道、IAM、SRE、合规、制品和跨故障域灾备同时形成长期生产证据。
+
+## 21.18 版本化 Prompt Eval 晋级门禁与第十四轮复审
+
+### 已实现并接入主链路
+
+1. Alembic head 更新为 `c95f1e4a8d73`，新增 `prompt_eval_suites` 与 `prompt_eval_runs`，PostgreSQL public schema 备份门槛增至 24 张表（含 Alembic 版本表与迁移专用向量表）；未版本化接管可从 `b84e0d3f7c92` 安全向前升级，并拒绝只存在半组 Eval 表的结构。
+2. 每个工作区可创建递增版本的不可变 Eval 套件。套件以完整 cases JSON 和 canonical SHA-256 固化，必须包含 3 至 60 个用例并覆盖 `plan/generate/review`；每个用例至少有 required path、expected value、required/forbidden substring 之一。
+3. Eval 套件创建者不能激活自己的版本；另一名管理员激活新套件时旧套件自动退役。数据库部分唯一索引与 Workspace 行锁保证每个工作区最多一个活动套件并避免版本/激活竞态。
+4. 候选 Prompt 通过 `prompt_eval.execute` 进入现有数据库队列，由 Worker 使用候选 Prompt、活动套件和选定 Provider 执行；输出只保存 SHA-256、字节数和确定性断言失败项，不保存模型正文、用例输入或敏感 substring 原文。
+5. Provider 异常沿用租约、重试和终态失败处理；最终错误只持久化 `AI prompt evaluation failed (<ErrorType>)` 与脱敏 AI provenance，测试确认 Provider 错误消息中的秘密不会进入运行或审计。
+6. Prompt 审批、激活、历史回滚和每次工作流首次模型调用现在都 fail closed：必须存在与当前 Prompt 哈希、活动 Suite ID/哈希、该次运行实际 Provider 和模型完全匹配的 `passed` 运行。切换套件、修改目标模型、使用运行级 Provider override 或探索性/Mock Provider 的旧证据都会立即失效。
+7. 管理工作台新增活动套件摘要、完整用例快照、JSON 用例编辑器、双人激活、评测运行/重跑、运行历史和哈希化证据；没有当前通过证据时审批、激活和回滚按钮禁用，服务端仍再次强制校验。
+8. 审计新增套件创建/激活、评测排队/完成/错误事件，只记录版本、哈希、计数、Provider/模型标识和状态，不复制 Prompt、case input 或模型输出。
+9. 备份/恢复默认门槛同步为 head `c95f1e4a8d73` 与至少 24 张 public 表。
+
+### 本阶段验证证据
+
+- 全仓 Ruff 通过；Alembic 空库升级/降级、b84 未版本化接管、Eval 约束/唯一索引和半组表拒绝均有回归测试。
+- 后端全量 81 passed、6 skipped；分支覆盖率 79.43%（CI 门槛 75%）。本机跳过项仍是需要运行服务的 PostgreSQL/MinIO 集成测试。
+- Eval 专项覆盖：双人套件激活、无证据阻断、通过/失败断言、套件轮换使旧证据失效、Prompt/Suite 篡改、错误 Provider/模型证据拒绝、多租户隔离、审计/运行不含输入输出正文和 Provider 错误脱敏。
+- 前端 ESLint、Next.js 生产构建、Sites/vinext 构建和 2 项渲染测试通过。
+- 真实 PostgreSQL/pgvector、MinIO、安全审计和前端安全门禁仍以 GitHub CI 为最终远程签收；本节先记录本地事实，运行链接在阶段推送成功后补录。
+
+### 持续复审：当前仍最关键的 5 个不足
+
+1. **Eval 已有确定性晋级门禁，但还不是完整语义金标体系**：当前擅长结构、精确值和字符串契约；尚无 RAG recall/precision、引用真实性、事实性评分、LLM-as-judge 校准、人工金标一致性、提示注入、PII/版权检测、统计置信度和真实费用阈值。
+2. **真实渠道签收矩阵仍不完整**：公众号只签收真实永久素材与不公开草稿，公开发布/最终对账和异常矩阵未签；抖音企业账号未就绪，小红书仍是人工导出；平台回调 Inbox、验签、去重和原生幂等仍缺。
+3. **SRE 与规模化运行证据不足**：没有 OpenTelemetry/Prometheus、端到端 Trace、SLI/SLO/告警、Provider 熔断/配额、Eval/生成成本看板、多副本耐久、滚动升级和持续故障注入。
+4. **企业身份、数据和合规治理未签收**：缺 OIDC/SAML、MFA、SCIM/企业目录生命周期、设备与异常登录响应、PostgreSQL RLS、租户导出/删除/留存、数据分类和不可篡改审计归档。
+5. **生产制品和灾备仍有证据上限**：新 c95 head 尚未完成持久 PostgreSQL+MinIO 联合恢复；仍缺 PITR/WAL、异地不可变副本、RPO/RTO、SBOM、镜像扫描/签名、独立迁移、环境晋级和灰度回滚。
+
+### 接下来最值得继续做的 5 项改进
+
+1. 在现有 Eval Registry 上加入版本化知识快照与人工金标，建设 RAG 召回/引用/事实性、注入/PII/版权、格式、安全和真实 Token/费用预算指标；对真实目标模型做候选/基线对比、重复采样与阈值校准。
+2. 在公众号现有授权边界内补最终状态与错误矩阵；抖音账号可用后完成 OAuth/上传/发布/回调/指标，并建设通用事件 Inbox、验签、去重和渠道原生幂等策略。
+3. 接入 OpenTelemetry + Prometheus，覆盖 API、数据库、队列、Worker、对象存储、AI/Eval 和发布对账，定义 SLO、告警、值班处置、容量与成本预算并持续演练。
+4. 推进 OIDC/MFA/SCIM 和设备会话治理，同时落地 PostgreSQL RLS、租户生命周期、数据分类与审计归档，并用真实企业 IdP/PostgreSQL 证据签收。
+5. 在 c95 head 上完成 PostgreSQL+MinIO 联合恢复与远程 CI 后，继续补 PITR/异地/Object Lock、锁定 Linux 制品、SBOM/签名、独立迁移 Job、受保护环境晋级和回滚演练。
+
+### 成熟度判断
+
+Prompt/模型变更控制已从“人工审批后直接发布”推进到“不可变版本、双人职责分离、确定性自动 Eval、目标 Provider/模型绑定、切换失效和失败关闭”，AI 治理局部达到 L2-L3。它实质关闭了无评测证据仍可审批的缺口，但不能把结构断言等同于语义质量、合规或成本最优。综合项目仍约为 L2；成熟企业完整项目仍要求真实多平台、语义/安全/成本 Eval、企业 IAM/SRE/合规、签名制品和跨故障域灾备共同形成长期生产证据。

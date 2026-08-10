@@ -13,7 +13,7 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "b84e0d3f7c92"
+HEAD_REVISION = "c95f1e4a8d73"
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
 LAYOUT_REVISION = "8b6c1f3a9d21"
@@ -25,6 +25,9 @@ AUTH_SESSION_REVISION = "f4c2d8e7a190"
 AUTH_RATE_LIMIT_TABLE = "auth_rate_limits"
 PROMPT_RELEASE_TABLE = "prompt_releases"
 PROMPT_RELEASE_REVISION = "b84e0d3f7c92"
+PROMPT_EVAL_SUITE_TABLE = "prompt_eval_suites"
+PROMPT_EVAL_RUN_TABLE = "prompt_eval_runs"
+PROMPT_EVAL_REVISION = "c95f1e4a8d73"
 
 
 def _alembic_config(connection: Connection) -> Config:
@@ -59,6 +62,8 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         AUTH_REFRESH_HISTORY_TABLE,
         AUTH_RATE_LIMIT_TABLE,
         PROMPT_RELEASE_TABLE,
+        PROMPT_EVAL_SUITE_TABLE,
+        PROMPT_EVAL_RUN_TABLE,
     }
     expected_tables = set(db.Base.metadata.tables)
     missing_tables = (expected_tables - incrementally_added) - tables
@@ -92,6 +97,8 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
     auth_refresh_history_exists = AUTH_REFRESH_HISTORY_TABLE in tables
     auth_rate_limit_exists = AUTH_RATE_LIMIT_TABLE in tables
     prompt_release_exists = PROMPT_RELEASE_TABLE in tables
+    prompt_eval_suite_exists = PROMPT_EVAL_SUITE_TABLE in tables
+    prompt_eval_run_exists = PROMPT_EVAL_RUN_TABLE in tables
     if worker_node_exists and not all(layout_state.values()):
         raise RuntimeError(
             "The worker_nodes table exists without the preceding layout migration. "
@@ -119,8 +126,21 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             "rate-limit migration. Back up the database and repair the schema "
             "before continuing."
         )
+    if prompt_eval_suite_exists != prompt_eval_run_exists:
+        raise RuntimeError(
+            "The prompt evaluation tables are incomplete. Back up the database "
+            "and repair the schema before continuing."
+        )
+    if prompt_eval_suite_exists and not prompt_release_exists:
+        raise RuntimeError(
+            "The prompt evaluation tables exist without the prompt release "
+            "migration. Back up the database and repair the schema before "
+            "continuing."
+        )
 
-    if prompt_release_exists:
+    if prompt_eval_suite_exists:
+        revision = PROMPT_EVAL_REVISION
+    elif prompt_release_exists:
         revision = PROMPT_RELEASE_REVISION
     elif auth_rate_limit_exists:
         revision = AUTH_RATE_LIMIT_REVISION

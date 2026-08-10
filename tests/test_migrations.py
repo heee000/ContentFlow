@@ -34,6 +34,8 @@ class MigrationTest(unittest.TestCase):
                 self.assertIn("auth_refresh_token_history", tables)
                 self.assertIn("auth_rate_limits", tables)
                 self.assertIn("prompt_releases", tables)
+                self.assertIn("prompt_eval_suites", tables)
+                self.assertIn("prompt_eval_runs", tables)
                 prompt_checks = {
                     item["name"]
                     for item in inspect(engine).get_check_constraints("prompt_releases")
@@ -50,6 +52,33 @@ class MigrationTest(unittest.TestCase):
                 self.assertTrue(
                     prompt_indexes["uq_prompt_release_workspace_active"]["unique"]
                 )
+                eval_suite_checks = {
+                    item["name"]
+                    for item in inspect(engine).get_check_constraints(
+                        "prompt_eval_suites"
+                    )
+                }
+                self.assertIn(
+                    "ck_prompt_eval_suites_version_number_positive",
+                    eval_suite_checks,
+                )
+                self.assertIn("ck_prompt_eval_suites_status", eval_suite_checks)
+                eval_suite_indexes = {
+                    item["name"]: item
+                    for item in inspect(engine).get_indexes("prompt_eval_suites")
+                }
+                self.assertTrue(
+                    eval_suite_indexes["uq_prompt_eval_suite_workspace_active"][
+                        "unique"
+                    ]
+                )
+                eval_run_checks = {
+                    item["name"]
+                    for item in inspect(engine).get_check_constraints(
+                        "prompt_eval_runs"
+                    )
+                }
+                self.assertIn("ck_prompt_eval_runs_status", eval_run_checks)
                 columns = {
                     column["name"]
                     for column in inspect(engine).get_columns("content_items")
@@ -256,6 +285,76 @@ class MigrationTest(unittest.TestCase):
                     )
                 self.assertEqual(revision, HEAD_REVISION)
                 engine.dispose()
+            finally:
+                if previous is None:
+                    os.environ.pop("CONTENTFLOW_DATABASE_URL", None)
+                else:
+                    os.environ["CONTENTFLOW_DATABASE_URL"] = previous
+
+    def test_unversioned_prompt_release_head_adds_prompt_eval_tables(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "prompt-release-head.db"
+            url = f"sqlite:///{database.as_posix()}"
+            previous = os.environ.get("CONTENTFLOW_DATABASE_URL")
+            os.environ["CONTENTFLOW_DATABASE_URL"] = url
+            try:
+                config = Config("alembic.ini")
+                command.upgrade(config, "b84e0d3f7c92")
+                engine = create_engine(url)
+                with engine.begin() as connection:
+                    connection.execute(text("DELETE FROM alembic_version"))
+                engine.dispose()
+
+                upgrade_database(
+                    Settings(
+                        database_url=url,
+                        secret_key="migration-test-secret",
+                        local_storage_dir=Path(temp_dir) / "storage",
+                    )
+                )
+
+                engine = create_engine(url)
+                tables = set(inspect(engine).get_table_names())
+                self.assertIn("prompt_eval_suites", tables)
+                self.assertIn("prompt_eval_runs", tables)
+                with engine.connect() as connection:
+                    revision = connection.scalar(
+                        text("SELECT version_num FROM alembic_version")
+                    )
+                self.assertEqual(revision, HEAD_REVISION)
+                engine.dispose()
+            finally:
+                if previous is None:
+                    os.environ.pop("CONTENTFLOW_DATABASE_URL", None)
+                else:
+                    os.environ["CONTENTFLOW_DATABASE_URL"] = previous
+
+    def test_unversioned_partial_prompt_eval_tables_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "partial-prompt-eval.db"
+            url = f"sqlite:///{database.as_posix()}"
+            previous = os.environ.get("CONTENTFLOW_DATABASE_URL")
+            os.environ["CONTENTFLOW_DATABASE_URL"] = url
+            try:
+                config = Config("alembic.ini")
+                command.upgrade(config, "head")
+                engine = create_engine(url)
+                with engine.begin() as connection:
+                    connection.execute(text("DELETE FROM alembic_version"))
+                    connection.execute(text("DROP TABLE prompt_eval_runs"))
+                engine.dispose()
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "prompt evaluation tables are incomplete",
+                ):
+                    upgrade_database(
+                        Settings(
+                            database_url=url,
+                            secret_key="migration-test-secret",
+                            local_storage_dir=Path(temp_dir) / "storage",
+                        )
+                    )
             finally:
                 if previous is None:
                     os.environ.pop("CONTENTFLOW_DATABASE_URL", None)

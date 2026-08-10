@@ -428,6 +428,23 @@ label small { color: var(--ink-muted); font-size: 12px; }
   min-height: 260px;
   font: 12px/1.6 "IBM Plex Mono", Consolas, monospace;
 }
+.eval-case-editor {
+  min-height: 420px;
+  font: 12px/1.6 "IBM Plex Mono", Consolas, monospace;
+}
+.eval-suite-details { padding: 18px 24px 0; }
+.eval-suite-details summary,
+.eval-run-details summary { cursor: pointer; color: var(--blue); font-size: 12px; }
+.eval-suite-details pre,
+.eval-run-details pre {
+  max-width: 720px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px;
+  background: var(--surface);
+  font: 11px/1.6 "IBM Plex Mono", Consolas, monospace;
+  white-space: pre-wrap;
+}
 .admin-form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
 .panel-form { padding: 24px; }
 .admin-section { margin-top: 24px; }
