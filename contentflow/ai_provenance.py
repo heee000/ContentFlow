@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from .prompts import PROMPT_HASHES, PROMPT_SET_VERSION
+from .prompts import BUILTIN_PROMPT_SET, PromptSet
 from .providers import Provider
 
 
@@ -48,12 +48,14 @@ class AIProvenanceRecorder:
         *,
         embedding_provider: str,
         embedding_model: str,
+        prompt_set: PromptSet | None = None,
     ) -> None:
         self.provider = provider
         self.provider_name = str(getattr(provider, "provider_name", "unknown"))[:80]
         self.model_name = str(getattr(provider, "model_name", "unknown"))[:160]
         self.embedding_provider = embedding_provider[:80]
         self.embedding_model = embedding_model[:160]
+        self.prompt_set = prompt_set or BUILTIN_PROMPT_SET
         self.invocations: list[dict[str, Any]] = []
 
     def complete_json(
@@ -71,12 +73,16 @@ class AIProvenanceRecorder:
             "stage": stage,
             "platform": platform,
             "started_at": started_at.isoformat(),
-            "prompt_sha256": PROMPT_HASHES[stage],
+            "prompt_sha256": self.prompt_set.hashes[stage],
             "input_sha256": input_sha256,
             "input_bytes": input_bytes,
         }
         try:
-            result = self.provider.complete_json(stage, payload)
+            result = self.provider.complete_json(
+                stage,
+                payload,
+                system_prompt=self.prompt_set.prompts[stage],
+            )
         except Exception as error:
             call_metadata = getattr(self.provider, "last_call_metadata", {})
             invocation = {
@@ -134,7 +140,9 @@ class AIProvenanceRecorder:
 
             def aggregate(field: str) -> int | None:
                 values = [item[field] for item in reported]
-                return sum(values) if all(value is not None for value in values) else None
+                return (
+                    sum(values) if all(value is not None for value in values) else None
+                )
 
             usage = {
                 "source": "provider_reported" if complete else "partial",
@@ -151,9 +159,11 @@ class AIProvenanceRecorder:
                 "provider": self.embedding_provider,
                 "model": self.embedding_model,
             },
-            "prompt_set_version": PROMPT_SET_VERSION,
+            "prompt_source": self.prompt_set.source,
+            "prompt_release_id": self.prompt_set.release_id,
+            "prompt_set_version": self.prompt_set.version,
             "prompt_hashes": {
-                stage: PROMPT_HASHES[stage] for stage in sorted(stages)
+                stage: self.prompt_set.hashes[stage] for stage in sorted(stages)
             },
             "invocation_count": len(self.invocations),
             "successful_invocations": sum(

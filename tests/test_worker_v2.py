@@ -63,9 +63,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(registered.status_code, 201, registered.text)
-        self.headers = {
-            "Authorization": f"Bearer {registered.json()['access_token']}"
-        }
+        self.headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
         self.workspace_id = registered.json()["workspace_id"]
         self.worker = Worker(
             settings=self.settings,
@@ -272,14 +270,12 @@ class WorkerIntegrationTest(unittest.TestCase):
                 self.assertEqual(publish_job.status, "submitted")
                 self.assertEqual(reconciliation_job.status, "retry")
                 self.assertEqual(
-                    publish_job.response_json["automatic_reconciliation"][
-                        "state"
-                    ],
+                    publish_job.response_json["automatic_reconciliation"]["state"],
                     "pending",
                 )
-                reconciliation_job.run_at = datetime.now(
-                    timezone.utc
-                ) - timedelta(seconds=1)
+                reconciliation_job.run_at = datetime.now(timezone.utc) - timedelta(
+                    seconds=1
+                )
                 session.commit()
 
             self.assertTrue(self.worker.run_once())
@@ -350,9 +346,9 @@ class WorkerIntegrationTest(unittest.TestCase):
             with db.SessionLocal() as session:
                 reconciliation_job = session.get(Job, reconciliation_job_id)
                 self.assertEqual(reconciliation_job.status, "retry")
-                reconciliation_job.run_at = datetime.now(
-                    timezone.utc
-                ) - timedelta(seconds=1)
+                reconciliation_job.run_at = datetime.now(timezone.utc) - timedelta(
+                    seconds=1
+                )
                 session.commit()
             self.assertTrue(self.worker.run_once())
 
@@ -424,9 +420,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             publish_job = session.get(PublishJob, publish_job_id)
             actions = set(
                 session.scalars(
-                    select(AuditLog.action).where(
-                        AuditLog.entity_id == publish_job_id
-                    )
+                    select(AuditLog.action).where(AuditLog.entity_id == publish_job_id)
                 )
             )
             self.assertEqual(publish_job.status, "failed")
@@ -459,10 +453,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             session.commit()
 
         response = self.client.post(
-            (
-                "/api/v1/publishing/jobs/"
-                f"{fixture['publish_job_id']}/reconcile"
-            ),
+            (f"/api/v1/publishing/jobs/{fixture['publish_job_id']}/reconcile"),
             headers=self.headers,
             json={
                 "decision": "confirmed_not_published",
@@ -532,7 +523,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             model_name = "failing-model"
             last_call_metadata = {"usage_source": "not_reported"}
 
-            def complete_json(self, _stage, _payload):
+            def complete_json(self, _stage, _payload, *, system_prompt=None):
                 raise RuntimeError("private-model-error-body")
 
         campaign = self.client.post(
@@ -644,7 +635,10 @@ class WorkerIntegrationTest(unittest.TestCase):
                 ["plan", "generate", "review"],
             )
             self.assertTrue(
-                all(len(item["input_sha256"]) == 64 for item in provenance["invocations"])
+                all(
+                    len(item["input_sha256"]) == 64
+                    for item in provenance["invocations"]
+                )
             )
 
         contents = self.client.get("/api/v1/contents", headers=self.headers)
@@ -868,7 +862,6 @@ class WorkerIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(premature_retry.status_code, 409, premature_retry.text)
         self.assertIn("人工对账", premature_retry.json()["error"]["message"])
-
 
         reconciled = self.client.post(
             f"/api/v1/publishing/jobs/{uncertain.json()['id']}/reconcile",

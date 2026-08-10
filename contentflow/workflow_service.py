@@ -9,6 +9,7 @@ from .entities import Asset, Campaign, ContentItem, ContentRevision, WorkflowRun
 from .embeddings import build_embedding_provider
 from .knowledge_service import search_workspace_knowledge
 from .models import CampaignBrief
+from .prompt_governance import resolve_active_prompt_set
 from .review import RuleReviewer
 from .settings import Settings
 from .text_generation import build_text_provider
@@ -75,6 +76,7 @@ def execute_workflow_run(
         provider,
         embedding_provider=settings.embedding_provider,
         embedding_model=embedder.model_name,
+        prompt_set=resolve_active_prompt_set(session, run.workspace_id),
     )
     run.provider = provenance.provider_name
     run.current_stage = "planning"
@@ -130,9 +132,7 @@ def execute_workflow_run(
             hashtags=[str(value) for value in draft.get("hashtags", [])],
             call_to_action=brief.call_to_action,
             layout_json=(
-                draft.get("layout")
-                if isinstance(draft.get("layout"), dict)
-                else {}
+                draft.get("layout") if isinstance(draft.get("layout"), dict) else {}
             ),
             status=(
                 "needs_review"

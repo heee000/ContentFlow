@@ -57,6 +57,8 @@ type Campaign = {
 type AIProvenance = {
   provider: string;
   model: string;
+  prompt_source: "builtin" | "workspace_release";
+  prompt_release_id: string | null;
   prompt_set_version: string;
   invocation_count: number;
   successful_invocations: number;
@@ -207,6 +209,45 @@ type AuditLog = {
   created_at: string;
 };
 
+
+type PromptStage = "plan" | "generate" | "review";
+type PromptReleaseStatus =
+  | "draft"
+  | "approved"
+  | "active"
+  | "retired"
+  | "rejected";
+
+type PromptRelease = {
+  id: string;
+  workspace_id: string;
+  release_number: number;
+  version: string;
+  status: PromptReleaseStatus;
+  prompts: Record<PromptStage, string>;
+  prompt_hashes: Record<PromptStage, string>;
+  change_summary: string;
+  review_note: string | null;
+  created_by_user_id: string;
+  reviewed_by_user_id: string | null;
+  activated_by_user_id: string | null;
+  reviewed_at: string | null;
+  activated_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type PromptGovernance = {
+  active: {
+    source: "builtin" | "workspace_release";
+    version: string;
+    release_id: string | null;
+    prompts: Record<PromptStage, string>;
+    prompt_hashes: Record<PromptStage, string>;
+  };
+  releases: PromptRelease[];
+};
+
 type DataState = {
   dashboard: DashboardSummary;
   campaigns: Campaign[];
@@ -220,6 +261,7 @@ type DataState = {
   workspaces: WorkspaceAccess[];
   members: Member[];
   auditLogs: AuditLog[];
+  promptGovernance: PromptGovernance | null;
 };
 
 const EMPTY_DATA: DataState = {
@@ -241,6 +283,7 @@ const EMPTY_DATA: DataState = {
   workspaces: [],
   members: [],
   auditLogs: [],
+  promptGovernance: null,
   metrics: {
     sample_count: 0,
     impressions: 0,
@@ -301,6 +344,7 @@ const STATUS: Record<string, string> = {
   queued: "排队中",
   ready: "已就绪",
   rejected: "已驳回",
+  retired: "已退役",
   retry: "重试中",
   running: "运行中",
   scheduled: "已排期",
@@ -590,6 +634,7 @@ export function ContentFlowApp() {
         workspaces,
         members,
         auditLogs,
+        promptGovernance,
       ] = await Promise.all([
         api<DashboardSummary>("/dashboard/summary"),
         api<Campaign[]>("/campaigns"),
@@ -607,6 +652,9 @@ export function ContentFlowApp() {
         session?.role === "admin"
           ? api<AuditLog[]>("/admin/audit-logs")
           : Promise.resolve([]),
+        session?.role === "admin"
+          ? api<PromptGovernance>("/admin/prompt-releases")
+          : Promise.resolve(null),
       ]);
       setData({
         dashboard,
@@ -621,6 +669,7 @@ export function ContentFlowApp() {
         workspaces,
         members,
         auditLogs,
+        promptGovernance,
       });
       setError("");
     } catch (caught) {
@@ -892,6 +941,7 @@ export function ContentFlowApp() {
               workspaces={data.workspaces}
               members={data.members}
               auditLogs={data.auditLogs}
+              promptGovernance={data.promptGovernance}
               onWorkspaceCreated={createAndActivateWorkspace}
               onChanged={() => loadData()}
               flash={flash}
@@ -939,6 +989,7 @@ function DashboardView({
     ["素材处理中", data.dashboard.assets_processing, "assets" as View],
     ["已安排发布", data.dashboard.publishes_scheduled, "publishing" as View],
   ] as const;
+
   return (
     <>
       <PageHeading
@@ -1208,6 +1259,7 @@ function CampaignsView({
       setBusyId("");
     }
   }
+
 
   return (
     <>
@@ -1482,6 +1534,7 @@ function ReviewView({
     }
   }
 
+
   return (
     <>
       <PageHeading
@@ -1654,6 +1707,7 @@ function AssetsView({
       setUploading(false);
     }
   }
+
   return (
     <>
       <PageHeading
@@ -1841,6 +1895,7 @@ function PublishingView({
     }
   }
 
+
   return (
     <>
       <PageHeading
@@ -1970,6 +2025,7 @@ function KnowledgeView({
       setBusy(false);
     }
   }
+
   return (
     <>
       <PageHeading
@@ -2070,6 +2126,7 @@ function ChannelsView({
       setBusy("");
     }
   }
+
   return (
     <>
       <PageHeading
@@ -2191,6 +2248,7 @@ function MetricsView({
     }
   }
 
+
   return (
     <>
       <PageHeading
@@ -2287,6 +2345,7 @@ function AdministrationView({
   workspaces,
   members,
   auditLogs,
+  promptGovernance,
   onWorkspaceCreated,
   onChanged,
   flash,
@@ -2295,6 +2354,7 @@ function AdministrationView({
   workspaces: WorkspaceAccess[];
   members: Member[];
   auditLogs: AuditLog[];
+  promptGovernance: PromptGovernance | null;
   onWorkspaceCreated: (name: string) => Promise<void>;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
@@ -2374,12 +2434,89 @@ function AdministrationView({
     }
   }
 
+
+
+  async function createPromptRelease(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    setBusy("prompt-create");
+    setError("");
+    try {
+      await api<PromptRelease>("/admin/prompt-releases", {
+        method: "POST",
+        body: {
+          change_summary: String(form.get("change_summary") || ""),
+          prompts: {
+            plan: String(form.get("plan") || ""),
+            generate: String(form.get("generate") || ""),
+            review: String(form.get("review") || ""),
+          },
+        },
+      });
+      formElement.reset();
+      flash("Prompt 草稿已创建，需由另一名管理员审批后才能发布");
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function reviewPromptRelease(
+    release: PromptRelease,
+    action: "approve" | "reject" | "activate",
+  ) {
+    let body: { note: string } | undefined;
+    if (action === "reject") {
+      const reason = window.prompt("请输入拒绝原因");
+      if (!reason?.trim()) return;
+      body = { note: reason.trim() };
+    } else if (action === "approve") {
+      body = { note: "" };
+    } else {
+      const verb = release.status === "retired" ? "回滚到" : "激活";
+      if (!window.confirm(
+        `确认${verb} ${release.version}？新的工作流将使用这一版本。`,
+      )) return;
+    }
+
+    setBusy(`prompt-${release.id}`);
+    setError("");
+    try {
+      await api<PromptRelease>(
+        `/admin/prompt-releases/${release.id}/${action}`,
+        { method: "POST", ...(body ? { body } : {}) },
+      );
+      flash(
+        action === "approve"
+          ? "Prompt 版本已审批"
+          : action === "reject"
+            ? "Prompt 版本已拒绝"
+            : release.status === "retired"
+              ? "Prompt 版本已回滚并生效"
+              : "Prompt 版本已激活",
+      );
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function memberName(userId: string | null) {
+    if (!userId) return "—";
+    return members.find((member) => member.user_id === userId)?.display_name
+      || userId.slice(0, 8);
+  }
   return (
     <>
       <PageHeading
         eyebrow="Administration"
-        title="团队、工作区与审计"
-        description="管理协作边界、角色权限与关键操作记录。只有管理员可以访问本页。"
+        title="团队、Prompt 治理与审计"
+        description="管理协作边界、Prompt 双人审批与回滚，以及关键操作记录。只有管理员可以访问本页。"
       />
       {error ? <p className="inline-error" role="alert">{error}</p> : null}
       <section className="admin-form-grid">
@@ -2421,6 +2558,173 @@ function AdministrationView({
         </article>
       </section>
 
+
+      <section className="panel admin-section">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">AI governance</p>
+            <h2>Prompt 审批、发布与回滚</h2>
+          </div>
+          {promptGovernance ? <StatusBadge value="active" /> : null}
+        </div>
+        {promptGovernance ? (
+          <>
+            <div className="prompt-active-summary">
+              <div>
+                <small>当前来源</small>
+                <strong>
+                  {promptGovernance.active.source === "builtin"
+                    ? "内置安全基线"
+                    : "工作区已审批版本"}
+                </strong>
+              </div>
+              <div>
+                <small>生效版本</small>
+                <strong>{promptGovernance.active.version}</strong>
+              </div>
+              <div>
+                <small>发布标识</small>
+                <strong>
+                  {promptGovernance.active.release_id?.slice(0, 8) || "builtin"}
+                </strong>
+              </div>
+              <div>
+                <small>Plan 哈希</small>
+                <code>
+                  {promptGovernance.active.prompt_hashes.plan.slice(0, 12)}
+                </code>
+              </div>
+            </div>
+            <form
+              key={promptGovernance.active.version}
+              className="stack-form prompt-release-form"
+              onSubmit={createPromptRelease}
+            >
+              <div>
+                <p className="eyebrow">Immutable draft</p>
+                <h3>基于当前生效版本创建新草稿</h3>
+                <p className="form-note">
+                  草稿创建后不可修改；创建者不能自行审批，必须由另一名管理员复核。
+                  审计日志只保存版本与哈希，不保存 Prompt 正文。
+                </p>
+              </div>
+              <label>
+                变更摘要
+                <input
+                  name="change_summary"
+                  required
+                  minLength={3}
+                  maxLength={500}
+                  placeholder="说明目标、评测结论和风险边界"
+                />
+              </label>
+              <div className="prompt-editor-grid">
+                {(["plan", "generate", "review"] as PromptStage[]).map((stage) => (
+                  <label key={stage}>
+                    {stage} Prompt
+                    <textarea
+                      name={stage}
+                      required
+                      minLength={20}
+                      maxLength={20000}
+                      defaultValue={promptGovernance.active.prompts[stage]}
+                    />
+                    <small>
+                      SHA-256 {promptGovernance.active.prompt_hashes[stage].slice(0, 12)}…
+                    </small>
+                  </label>
+                ))}
+              </div>
+              <Button busy={busy === "prompt-create"} type="submit">
+                创建不可变草稿
+              </Button>
+            </form>
+          </>
+        ) : (
+          <EmptyState
+            title="正在读取 Prompt 治理状态"
+            description="数据加载完成后可查看生效版本并创建新草稿。"
+          />
+        )}
+      </section>
+
+      <section className="panel admin-section">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Release history</p>
+            <h2>{promptGovernance?.releases.length || 0} 个工作区 Prompt 版本</h2>
+          </div>
+        </div>
+        <DataTable
+          headers={["版本", "变更摘要", "创建 / 复核", "时间", "状态", "操作"]}
+          rows={(promptGovernance?.releases || []).map((release) => [
+            <code key="version">{release.version}</code>,
+            <div className="prompt-release-details" key="summary">
+              <strong>{release.change_summary}</strong>
+              <details>
+                <summary>查看正文与哈希</summary>
+                {(["plan", "generate", "review"] as PromptStage[]).map((stage) => (
+                  <section key={stage}>
+                    <small>
+                      {stage} · SHA-256 {release.prompt_hashes[stage]}
+                    </small>
+                    <pre>{release.prompts[stage]}</pre>
+                  </section>
+                ))}
+              </details>
+            </div>,
+            `${memberName(release.created_by_user_id)} / ${memberName(release.reviewed_by_user_id)}`,
+            formatDateTime(release.created_at),
+            <StatusBadge key="status" value={release.status} />,
+            <div className="table-actions" key="actions">
+              {release.status === "draft"
+                && release.created_by_user_id !== currentSession.user.id ? (
+                  <>
+                    <button
+                      className="table-link"
+                      disabled={busy === `prompt-${release.id}`}
+                      onClick={() => void reviewPromptRelease(release, "approve")}
+                    >
+                      审批
+                    </button>
+                    <button
+                      className="table-link danger-text"
+                      disabled={busy === `prompt-${release.id}`}
+                      onClick={() => void reviewPromptRelease(release, "reject")}
+                    >
+                      拒绝
+                    </button>
+                  </>
+                ) : null}
+              {release.status === "draft"
+                && release.created_by_user_id === currentSession.user.id ? (
+                  <span>等待其他管理员</span>
+                ) : null}
+              {release.status === "approved" ? (
+                <button
+                  className="table-link"
+                  disabled={busy === `prompt-${release.id}`}
+                  onClick={() => void reviewPromptRelease(release, "activate")}
+                >
+                  激活
+                </button>
+              ) : null}
+              {release.status === "retired" ? (
+                <button
+                  className="table-link"
+                  disabled={busy === `prompt-${release.id}`}
+                  onClick={() => void reviewPromptRelease(release, "activate")}
+                >
+                  回滚
+                </button>
+              ) : null}
+              {release.status === "active" ? <span>当前生效</span> : null}
+              {release.status === "rejected" ? <span>已拒绝</span> : null}
+            </div>,
+          ])}
+          empty="当前工作区还没有自定义 Prompt 版本，继续使用内置安全基线"
+        />
+      </section>
       <section className="panel admin-section">
         <div className="panel-heading">
           <div>
@@ -2532,6 +2836,7 @@ function JobsView({
       setError(messageOf(caught));
     }
   }
+
   return (
     <>
       <PageHeading

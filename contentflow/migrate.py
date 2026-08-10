@@ -13,7 +13,8 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "a73f9c2e4b61"
+HEAD_REVISION = "b84e0d3f7c92"
+AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
 LAYOUT_REVISION = "8b6c1f3a9d21"
 WORKER_NODE_TABLE = "worker_nodes"
@@ -22,6 +23,8 @@ AUTH_SESSION_TABLE = "auth_sessions"
 AUTH_REFRESH_HISTORY_TABLE = "auth_refresh_token_history"
 AUTH_SESSION_REVISION = "f4c2d8e7a190"
 AUTH_RATE_LIMIT_TABLE = "auth_rate_limits"
+PROMPT_RELEASE_TABLE = "prompt_releases"
+PROMPT_RELEASE_REVISION = "b84e0d3f7c92"
 
 
 def _alembic_config(connection: Connection) -> Config:
@@ -55,6 +58,7 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         AUTH_SESSION_TABLE,
         AUTH_REFRESH_HISTORY_TABLE,
         AUTH_RATE_LIMIT_TABLE,
+        PROMPT_RELEASE_TABLE,
     }
     expected_tables = set(db.Base.metadata.tables)
     missing_tables = (expected_tables - incrementally_added) - tables
@@ -87,6 +91,7 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
     auth_session_exists = AUTH_SESSION_TABLE in tables
     auth_refresh_history_exists = AUTH_REFRESH_HISTORY_TABLE in tables
     auth_rate_limit_exists = AUTH_RATE_LIMIT_TABLE in tables
+    prompt_release_exists = PROMPT_RELEASE_TABLE in tables
     if worker_node_exists and not all(layout_state.values()):
         raise RuntimeError(
             "The worker_nodes table exists without the preceding layout migration. "
@@ -108,9 +113,17 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             "migration. Back up the database and repair the schema before "
             "continuing."
         )
+    if prompt_release_exists and not auth_rate_limit_exists:
+        raise RuntimeError(
+            "The prompt_releases table exists without the authentication "
+            "rate-limit migration. Back up the database and repair the schema "
+            "before continuing."
+        )
 
-    if auth_rate_limit_exists:
-        revision = HEAD_REVISION
+    if prompt_release_exists:
+        revision = PROMPT_RELEASE_REVISION
+    elif auth_rate_limit_exists:
+        revision = AUTH_RATE_LIMIT_REVISION
     elif auth_session_exists:
         revision = AUTH_SESSION_REVISION
     elif worker_node_exists:

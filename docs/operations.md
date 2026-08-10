@@ -104,13 +104,13 @@ python -m alembic history
 .\scripts\verify_backup.ps1 -BackupPath <path> -ExpectedAlembicRevision <revision> -MinimumPublicTableCount <count>
 ```
 
-正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `a73f9c2e4b61`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
+正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `b84e0d3f7c92`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
 
-`verify_backup.ps1` 默认校验 dump 哈希、至少 21 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
+`verify_backup.ps1` 默认校验 dump 哈希、至少 22 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
 
 真正灾难恢复时仍必须恢复到新的 PostgreSQL 数据库和空 bucket，完成应用验收后再切换流量。不要未经演练直接对当前 `contentflow` 库执行 `pg_restore --clean`。
 
-- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。新 head `a73f9c2e4b61`（经 `f4c2d8e7a190`）的持久 PostgreSQL 迁移与 21 表联合恢复需在 Docker 引擎可用后重新签收；旧证据不等于 PITR 或异地灾备。
+- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。新 head `b84e0d3f7c92`（经 `f4c2d8e7a190 -> a73f9c2e4b61`）的持久 PostgreSQL 迁移与 22 表联合恢复需在 Docker 引擎可用后重新签收；旧证据不等于 PITR 或异地灾备。
 - MinIO/S3 生产 bucket 应启用版本控制、生命周期、服务端加密和不可变保留策略。
 - `CONTENTFLOW_SECRET_KEY`、当前/历史凭据加密密钥必须单独备份到集中密钥管理系统；丢失后访问令牌和已加密平台凭据无法恢复。
 - 审计日志按合规周期归档，不要和普通应用日志一起随意清理。

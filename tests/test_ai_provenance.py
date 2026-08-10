@@ -21,7 +21,8 @@ class StaticProvider:
             "total_tokens": 18,
         }
 
-    def complete_json(self, _stage, _payload):
+    def complete_json(self, _stage, _payload, *, system_prompt=None):
+        self.system_prompt = system_prompt
         return {"value": "generated"}
 
 
@@ -36,7 +37,7 @@ class FailingProvider:
         "response_model": "failing-model-revision",
     }
 
-    def complete_json(self, _stage, _payload):
+    def complete_json(self, _stage, _payload, *, system_prompt=None):
         raise RuntimeError("sensitive-provider-error-body")
 
 
@@ -57,8 +58,11 @@ class AIProvenanceTest(unittest.TestCase):
         self.assertEqual(snapshot["schema_version"], 1)
         self.assertEqual(snapshot["provider"], "test-provider")
         self.assertEqual(snapshot["model"], "test-model")
+        self.assertEqual(snapshot["prompt_source"], "builtin")
+        self.assertIsNone(snapshot["prompt_release_id"])
         self.assertEqual(snapshot["prompt_set_version"], PROMPT_SET_VERSION)
         self.assertEqual(snapshot["prompt_hashes"]["plan"], PROMPT_HASHES["plan"])
+        self.assertEqual(recorder.provider.system_prompt, PROMPTS["plan"])
         self.assertEqual(snapshot["invocation_count"], 1)
         self.assertEqual(snapshot["successful_invocations"], 1)
         self.assertEqual(snapshot["token_usage"]["source"], "provider_reported")
@@ -107,9 +111,7 @@ class AIProvenanceTest(unittest.TestCase):
         response.read.return_value = json.dumps(
             {
                 "model": "provider-model-revision",
-                "choices": [
-                    {"message": {"content": json.dumps({"passed": True})}}
-                ],
+                "choices": [{"message": {"content": json.dumps({"passed": True})}}],
                 "usage": {
                     "prompt_tokens": 23,
                     "completion_tokens": 5,
@@ -125,9 +127,19 @@ class AIProvenanceTest(unittest.TestCase):
             provider_name="dashscope",
         )
 
-        result = provider.complete_json("review", {"content": "example"})
+        result = provider.complete_json(
+            "review",
+            {"content": "example"},
+            system_prompt="approved custom review prompt",
+        )
+        request = urlopen.call_args.args[0]
+        request_payload = json.loads(request.data.decode("utf-8"))
 
         self.assertEqual(result, {"passed": True})
+        self.assertEqual(
+            request_payload["messages"][0]["content"],
+            "approved custom review prompt",
+        )
         self.assertEqual(provider.provider_name, "dashscope")
         self.assertEqual(provider.model_name, "configured-model")
         self.assertEqual(

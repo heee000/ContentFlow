@@ -377,6 +377,57 @@ label small { color: var(--ink-muted); font-size: 12px; }
 .health-list strong { font-size: 20px; font-weight: 400; }
 .danger-text { color: var(--danger); }
 .health-list + .button { width: calc(100% - 48px); margin: 0 24px 24px; }
+.prompt-active-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.prompt-active-summary > div {
+  min-height: 96px;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  padding: 16px 24px;
+  border-right: 1px solid var(--border);
+}
+.prompt-active-summary > div:last-child { border-right: 0; }
+.prompt-active-summary small { color: var(--ink-muted); }
+.prompt-active-summary strong { font-size: 16px; font-weight: 500; }
+.prompt-active-summary code { color: var(--blue-dark); font-size: 12px; }
+.prompt-release-form { padding: 24px; }
+.prompt-release-form h3 { margin: 0 0 12px; }
+.prompt-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+.prompt-release-details > strong { display: block; margin-bottom: 8px; }
+.prompt-release-details summary {
+  cursor: pointer;
+  color: var(--blue);
+  font-size: 12px;
+}
+.prompt-release-details section { margin-top: 12px; }
+.prompt-release-details small {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--ink-muted);
+}
+.prompt-release-details pre {
+  max-width: 560px;
+  max-height: 240px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 12px;
+  background: var(--surface);
+  font: 11px/1.6 "IBM Plex Mono", Consolas, monospace;
+  white-space: pre-wrap;
+}
+.prompt-editor-grid textarea {
+  min-height: 260px;
+  font: 12px/1.6 "IBM Plex Mono", Consolas, monospace;
+}
 .admin-form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
 .panel-form { padding: 24px; }
 .admin-section { margin-top: 24px; }
@@ -595,6 +646,9 @@ tbody tr:last-child td { border-bottom: 0; }
   .metric-grid-five { grid-template-columns: repeat(3, 1fr); }
   .dashboard-grid { grid-template-columns: repeat(2, 1fr); }
   .admin-form-grid { grid-template-columns: 1fr; }
+  .prompt-active-summary { grid-template-columns: repeat(2, 1fr); }
+  .prompt-active-summary > div:nth-child(2) { border-right: 0; }
+  .prompt-editor-grid { grid-template-columns: 1fr; }
   .metric-input-grid { grid-template-columns: repeat(3, 1fr); }
   .span-3 { grid-column: 1 / -1; }
   .connector-grid { grid-template-columns: repeat(2, 1fr); }
@@ -645,6 +699,8 @@ tbody tr:last-child td { border-bottom: 0; }
   .dashboard-grid, .connector-grid, .knowledge-grid { grid-template-columns: 1fr; }
   .span-2, .span-3 { grid-column: auto; }
   .form-grid { grid-template-columns: 1fr; }
+  .prompt-active-summary { grid-template-columns: 1fr; }
+  .prompt-active-summary > div { border-right: 0; }
   .metric-input-grid { grid-template-columns: repeat(2, 1fr); }
   .campaign-row { grid-template-columns: 40px 1fr; align-items: start; }
   .campaign-actions { grid-column: 2; justify-self: start; }

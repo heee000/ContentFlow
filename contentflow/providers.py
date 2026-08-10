@@ -14,8 +14,13 @@ class Provider(Protocol):
     model_name: str
     last_call_metadata: dict[str, Any]
 
-    def complete_json(self, stage: str, payload: dict[str, Any]) -> dict[str, Any]:
-        ...
+    def complete_json(
+        self,
+        stage: str,
+        payload: dict[str, Any],
+        *,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]: ...
 
 
 PLATFORM_LABELS = {
@@ -32,19 +37,21 @@ class MockProvider:
     model_name = "mock-deterministic-v1"
 
     def __init__(self) -> None:
-        self.last_call_metadata: dict[str, Any] = {
-            "usage_source": "not_reported"
-        }
+        self.last_call_metadata: dict[str, Any] = {"usage_source": "not_reported"}
 
-    def complete_json(self, stage: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def complete_json(
+        self,
+        stage: str,
+        payload: dict[str, Any],
+        *,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         self.last_call_metadata = {"usage_source": "not_reported"}
         if stage == "plan":
             brief = payload["brief"]
             return {
                 "content_angle": f"{brief['city']}真实场景中的路线规划",
-                "key_message": (
-                    f"用{brief['product_name']}把临时搜索整理成可执行路线"
-                ),
+                "key_message": (f"用{brief['product_name']}把临时搜索整理成可执行路线"),
                 "evidence_points": [
                     chunk["text"][:80] for chunk in payload["knowledge"][:3]
                 ],
@@ -78,7 +85,10 @@ class MockProvider:
                         "cards": [
                             {"heading": "先列地点", "copy": "把候选地点集中整理"},
                             {"heading": "再排顺序", "copy": "结合时间和交通方式调整"},
-                            {"heading": "最后确认", "copy": product_facts or "出发前人工确认路线"},
+                            {
+                                "heading": "最后确认",
+                                "copy": product_facts or "出发前人工确认路线",
+                            },
                         ],
                         "visual_notes": "3:4 竖版；封面一句结论，正文卡片保持同一层级",
                     },
@@ -137,8 +147,14 @@ class MockProvider:
                     "lead": "地点不难找，难的是把零散信息变成可执行路线。",
                     "sections": [
                         {"heading": "先收集候选地点", "summary": "统一整理信息来源"},
-                        {"heading": "再确定路线顺序", "summary": "结合时间、交通和停留时长"},
-                        {"heading": "出发前完成确认", "summary": product_facts or must_include},
+                        {
+                            "heading": "再确定路线顺序",
+                            "summary": "结合时间、交通和停留时长",
+                        },
+                        {
+                            "heading": "出发前完成确认",
+                            "summary": product_facts or must_include,
+                        },
                     ],
                     "closing": cta,
                 },
@@ -174,9 +190,7 @@ class OpenAICompatibleProvider:
         self.model_name = model
         self.provider_name = provider_name
         self.timeout_seconds = timeout_seconds
-        self.last_call_metadata: dict[str, Any] = {
-            "usage_source": "not_reported"
-        }
+        self.last_call_metadata: dict[str, Any] = {"usage_source": "not_reported"}
 
     @classmethod
     def from_environment(cls) -> "OpenAICompatibleProvider":
@@ -194,14 +208,20 @@ class OpenAICompatibleProvider:
             model=required["CONTENTFLOW_MODEL"] or "",
         )
 
-    def complete_json(self, stage: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def complete_json(
+        self,
+        stage: str,
+        payload: dict[str, Any],
+        *,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         self.last_call_metadata = {"usage_source": "not_reported"}
         if stage not in PROMPTS:
             raise ValueError(f"没有对应提示词模板: {stage}")
         request_body = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": PROMPTS[stage]},
+                {"role": "system", "content": system_prompt or PROMPTS[stage]},
                 {
                     "role": "user",
                     "content": json.dumps(payload, ensure_ascii=False),

@@ -89,6 +89,50 @@ class AuditLogResponse(BaseModel):
     created_at: datetime
 
 
+PromptReleaseStatus = Literal["draft", "approved", "active", "retired", "rejected"]
+
+
+class PromptReleaseCreate(BaseModel):
+    prompts: dict[str, str]
+    change_summary: str = Field(min_length=3, max_length=500)
+
+
+class PromptReviewRequest(BaseModel):
+    note: str = Field(default="", max_length=1000)
+
+
+class PromptReleaseResponse(ORMModel):
+    id: str
+    workspace_id: str
+    release_number: int
+    version: str
+    status: PromptReleaseStatus
+    prompts: dict[str, str]
+    prompt_hashes: dict[str, str]
+    change_summary: str
+    review_note: str | None
+    created_by_user_id: str
+    reviewed_by_user_id: str | None
+    activated_by_user_id: str | None
+    reviewed_at: datetime | None
+    activated_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ActivePromptSetResponse(BaseModel):
+    source: Literal["builtin", "workspace_release"]
+    version: str
+    release_id: str | None
+    prompts: dict[str, str]
+    prompt_hashes: dict[str, str]
+
+
+class PromptGovernanceResponse(BaseModel):
+    active: ActivePromptSetResponse
+    releases: list[PromptReleaseResponse]
+
+
 class SessionResponse(BaseModel):
     user: UserResponse
     workspace: WorkspaceResponse
@@ -307,7 +351,6 @@ class JobResponse(ORMModel):
     result_json: dict[str, Any]
     created_at: datetime
     updated_at: datetime
-
 
 
 class WorkerQueueHealthResponse(BaseModel):

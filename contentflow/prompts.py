@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
+from typing import Mapping
 
 
 PROMPT_SET_VERSION = "2026-08-09.1"
+PROMPT_STAGES = ("plan", "generate", "review")
 
 PROMPTS = {
     "plan": """
@@ -30,7 +33,30 @@ fact_checks（字符串数组）、suggestion（字符串）。
 """.strip(),
 }
 
-PROMPT_HASHES = {
-    stage: hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    for stage, prompt in PROMPTS.items()
-}
+
+def calculate_prompt_hashes(prompts: Mapping[str, str]) -> dict[str, str]:
+    return {
+        stage: hashlib.sha256(prompts[stage].encode("utf-8")).hexdigest()
+        for stage in PROMPT_STAGES
+    }
+
+
+PROMPT_HASHES = calculate_prompt_hashes(PROMPTS)
+
+
+@dataclass(frozen=True)
+class PromptSet:
+    source: str
+    version: str
+    release_id: str | None
+    prompts: Mapping[str, str]
+    hashes: Mapping[str, str]
+
+
+BUILTIN_PROMPT_SET = PromptSet(
+    source="builtin",
+    version=PROMPT_SET_VERSION,
+    release_id=None,
+    prompts=PROMPTS,
+    hashes=PROMPT_HASHES,
+)

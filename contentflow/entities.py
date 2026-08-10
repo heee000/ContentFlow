@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -63,7 +64,9 @@ class Workspace(TimestampMixin, Base):
 class Membership(TimestampMixin, Base):
     __tablename__ = "memberships"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "user_id", name="uq_membership_workspace_user"),
+        UniqueConstraint(
+            "workspace_id", "user_id", name="uq_membership_workspace_user"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -94,9 +97,7 @@ class AuthSession(TimestampMixin, Base):
     workspace_id: Mapped[str] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
     )
-    refresh_token_hash: Mapped[str] = mapped_column(
-        String(64), unique=True, index=True
-    )
+    refresh_token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )
@@ -155,6 +156,61 @@ class AuthRateLimit(TimestampMixin, Base):
     )
 
 
+class PromptRelease(TimestampMixin, Base):
+    __tablename__ = "prompt_releases"
+    __table_args__ = (
+        CheckConstraint(
+            "release_number > 0",
+            name="release_number_positive",
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'approved', 'active', 'retired', 'rejected')",
+            name="status",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "release_number",
+            name="uq_prompt_release_workspace_number",
+        ),
+        Index(
+            "uq_prompt_release_workspace_active",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+        Index(
+            "ix_prompt_releases_workspace_status",
+            "workspace_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    release_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(24), default="draft", nullable=False, index=True
+    )
+    prompts_json: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    prompt_hashes_json: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    change_summary: Mapped[str] = mapped_column(String(500), nullable=False)
+    review_note: Mapped[str | None] = mapped_column(Text)
+    created_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    reviewed_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    activated_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Campaign(TimestampMixin, Base):
     __tablename__ = "campaigns"
 
@@ -162,9 +218,7 @@ class Campaign(TimestampMixin, Base):
     workspace_id: Mapped[str] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
     )
-    created_by: Mapped[str] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT")
-    )
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     name: Mapped[str] = mapped_column(String(160))
     product_name: Mapped[str] = mapped_column(String(160))
     objective: Mapped[str] = mapped_column(Text)
@@ -259,9 +313,7 @@ class ContentItem(TimestampMixin, Base):
         default=dict,
         server_default=text("'{}'"),
     )
-    status: Mapped[str] = mapped_column(
-        String(32), default="needs_review", index=True
-    )
+    status: Mapped[str] = mapped_column(String(32), default="needs_review", index=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     source_chunk_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     review_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -422,9 +474,7 @@ class AuditLog(Base):
 
 class Job(TimestampMixin, Base):
     __tablename__ = "jobs"
-    __table_args__ = (
-        Index("ix_jobs_claim", "status", "run_at", "locked_at"),
-    )
+    __table_args__ = (Index("ix_jobs_claim", "status", "run_at", "locked_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str | None] = mapped_column(

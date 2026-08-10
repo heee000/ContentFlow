@@ -30,14 +30,15 @@ flowchart LR
 - 离线 Hash Embedding；生产环境支持 OpenAI 兼容/百炼 Embedding
 - PostgreSQL + pgvector 1024 维向量列和 HNSW 余弦索引
 - Mock/OpenAI 兼容/百炼文本生成
-- 每次文本生成记录 Provider、模型、Prompt 集版本、Prompt/输入/输出摘要、分阶段时延和 Provider 返回的 Token 用量；不保存原始 Prompt，也不虚构 Token 或成本
+- 每次文本生成记录 Provider、模型、Prompt 来源/发布版本、Prompt/输入/输出摘要、分阶段时延和 Provider 返回的 Token 用量；不在运行追溯中复制原始 Prompt，也不虚构 Token 或成本
+- 工作区 Prompt Registry：不可变草稿、另一名管理员审批/拒绝、激活与历史回滚；激活和运行前校验正文 SHA-256，审计只保存版本与哈希
 - Mock/Wan 图片与异步视频生成，生成结果写入本地存储或 S3/MinIO
 - 人工审核门禁、内容版本校验、旧素材失效
 - 小红书卡片结构、抖音逐镜头脚本和公众号章节结构随版本保存并进入投放链路
 - 抖音视频上传/创建/数据回收适配器
 - 公众号封面素材、草稿创建、可选发布提交和基于 `publish_id` 的最终状态对账适配器
 - 小红书审核后 ZIP 投放包，不虚构公开发布能力
-- 10 个业务区的响应式运营工作台，包含全量内容/版本回看、人工指标录入、团队权限与审计查询
+- 10 个业务区的响应式运营工作台，包含全量内容/版本回看、人工指标录入、团队权限、Prompt 治理与审计查询
 - Alembic、Docker Compose、健康检查与结构化请求日志
 
 ## 目录
@@ -181,6 +182,7 @@ npm audit --audit-level=moderate
 - 鉴权签名篡改、凭据加密和密码校验
 - API 多租户活动/任务流程
 - 工作区切换、成员增删改角色、最后管理员保护和审计查询
+- Prompt 不可变版本、双人审批、拒绝、激活、回滚、租户隔离、运行时溯源与篡改阻断
 - Alembic upgrade/downgrade
 - 抖音、公众号连接器 HTTP 契约，以及公众号 pending/最终 article_id 状态查询
 - 自动发布对账、人工接管、迟到结果隔离和 PostgreSQL `SKIP LOCKED` 幂等补偿

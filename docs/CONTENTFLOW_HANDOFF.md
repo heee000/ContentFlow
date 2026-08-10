@@ -1,10 +1,10 @@
 # ContentFlow 项目交接文档
 
-> 更新日期：2026-08-08
+> 更新日期：2026-08-10
 > 适用仓库：`F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow`
 > GitHub：<https://github.com/heee000/ContentFlow>
 > 当前分支：`main`
-> 当前基准提交：`edc523a Harden local runtime and database upgrades`
+> 当前基准提交：`29563c4 Fix tracked Sites build plugin`；其后存在本阶段待提交修改
 
 ## 0. 给接手者的最短说明
 
@@ -65,8 +65,8 @@ ContentFlow 面向营销内容生产，把一份活动 Brief 和品牌/产品知
 |---|---|---|
 | Web | Next.js 16.2.12、React 19.2.6、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
 | API | FastAPI 0.115+、Pydantic | REST API 前缀默认 `/api/v1` |
-| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前迁移 head：`a73f9c2e4b61` |
-| 本地数据库 | SQLite | 默认 `.contentflow/contentflow-v2.db` |
+| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前迁移 head：`b84e0d3f7c92` |
+| 隔离测试数据库 | SQLite | 仅在测试显式指定 URL 时使用，不是默认生产运行库 |
 | 生产数据库 | PostgreSQL 16 + pgvector | 迁移创建 1024 维向量表与 HNSW 索引 |
 | 异步任务 | 数据库 Job 队列 + 独立 Python Worker | 不依赖 Redis/Celery |
 | 本地存储 | `.contentflow/storage` | 按工作区隔离文件路径 |
@@ -1093,3 +1093,49 @@ F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow
 - 全量后端：73 passed、6 skipped，分支覆盖率 78.42%（门槛 75%）；跳过项仍是需要运行中 PostgreSQL/MinIO 的集成测试。
 - Ruff 全量、Alembic 唯一 head `a73f9c2e4b61`、`uv.lock` 一致性、Compose 示例环境解析、所有 PowerShell 脚本解析、严格 UTF-8 和 `git diff --check` 通过。
 - 前端 `npm audit` 为 0 个已知漏洞；阶段提交只包含项目代码、测试、迁移、运维与文档，继续排除本地平台账密和未确认知识资料；实际提交与推送结果以 Git 历史为准。
+
+## 21.17 Prompt 双人治理、运行时完整性与第十三轮复审
+
+### 已实现并接入主链路
+
+1. 新增 `prompt_releases` 与 Alembic head `b84e0d3f7c92`，当前仓库基线为 22 张业务表；每个工作区按递增版本保存完整的 plan/generate/review Prompt、逐阶段 SHA-256、变更摘要和创建/复核/激活身份与时间。
+2. Prompt 版本由 API 保持不可变：只能创建新草稿，没有覆盖或删除接口。创建者不能审批或拒绝自己的草稿；另一名管理员审批后才可激活，激活新版本会退役旧版本，退役版本可以回滚。
+3. 数据库用工作区级部分唯一索引保证最多一个 `active` 版本；创建和激活在 PostgreSQL 中锁定 Workspace 行，避免版本号和激活竞态。
+4. 激活前与每次工作流运行前都重新计算正文哈希；记录哈希不一致时返回明确冲突或让工作流失败关闭，不会静默使用、回退或调用模型。
+5. `AIProvenanceRecorder` 现在记录 `prompt_source`、`prompt_release_id`、版本和实际阶段哈希，并把已审批的 system prompt 传给 OpenAI 兼容 Provider。运行证据仍不复制 Prompt 正文。
+6. 管理工作台可查看当前生效来源/版本/哈希，基于当前版本创建草稿，展开待审批正文与完整哈希，并执行审批、拒绝、激活和回滚。审计只保存版本、哈希与决策元数据，不保存正文。
+7. 备份/恢复脚本默认门槛同步为 `b84e0d3f7c92` 与至少 22 张 public 表；未版本化旧结构可识别 a73 并向前升级。
+
+### 发布 Outbox 复审纠正
+
+此前记录把“缺发布 Outbox”概括得过宽。当前 `schedule_publish` 在同一个 SQLAlchemy 事务中创建 `PublishJob`、调用 `enqueue_job` 写入带幂等键的 `Job`，请求事务统一提交；`publish.dispatch:{publish_job_id}` 因而已经承担了**事务型命令 Outbox**的职责。Worker 还会在远程调用前持久化 `publishing + dispatch_token`，不确定结果进入对账/人工接管。
+
+仍未完成的是外部平台事件方向的通用能力：回调 Inbox、签名验证、事件去重、渠道原生幂等键、跨平台状态归一和抖音无确定查询键时的自动收敛。因此可以表述为“内部发布命令已具备事务 Outbox 语义”，不能表述为“跨平台端到端 exactly-once 已完成”。本节结论覆盖早期文档中笼统的“完全没有 Outbox”表述。
+
+### 本阶段本地验证
+
+- 全仓 Ruff 通过；Alembic 唯一 head 为 `b84e0d3f7c92`。
+- 后端全量 76 passed、6 skipped，分支覆盖率 79.07%（门槛 75%）；本地跳过项仍为需要运行服务的 PostgreSQL/MinIO 集成测试。
+- 前端 ESLint、Sites/vinext 构建与 2 项测试、Next.js 生产构建、TypeScript 检查通过；`npm audit --audit-level=high` 为 0 个漏洞。
+- Prompt 专项覆盖双人审批、拒绝、激活、回滚、租户隔离、空白/阶段校验、审计不含正文、运行时选择和激活/运行前篡改阻断。
+- 当前分支远程 CI 结果需在阶段提交推送后签收，不能用上一提交的绿色结果代替新迁移证据。
+
+### 持续复审：当前仍最关键的 5 个不足
+
+1. **Prompt 有发布治理但没有质量门禁**：仍缺版本绑定的金标评测集、RAG 召回/事实性/安全指标、模型与 Prompt 对比基准、PII/版权/提示注入检查、Provider 价格目录和租户预算；双人审批证明责任分离，不证明质量。
+2. **真实渠道签收矩阵不完整**：公众号目前只签收真实素材和不公开草稿；公开发布/最终对账与异常矩阵未签，抖音企业账号未就绪，小红书仍为人工导出；回调 Inbox/验签/去重与渠道原生幂等仍缺。
+3. **SRE 与规模化运行证据不足**：尚无 OpenTelemetry/Prometheus、端到端 Trace、SLI/SLO/告警、Provider 熔断/降级、容量与成本看板、多副本耐久、滚动升级和持续故障注入。
+4. **企业身份、数据与合规治理未签收**：缺 OIDC/SAML、MFA、企业目录生命周期、异常登录与 SIEM、PostgreSQL RLS、租户导出/删除/留存、数据分类、合法依据和不可篡改审计归档。
+5. **制品与灾备证据仍有上限**：新 head 尚未完成持久 PostgreSQL+MinIO 联合恢复；仍缺 PITR/WAL、异地不可变副本、RPO/RTO、SBOM、镜像扫描/签名、独立迁移、环境晋级和灰度回滚。
+
+### 接下来最值得继续做的 5 项改进
+
+1. 建立版本化 AI Eval：固定输入、期望事实/引用与安全规则，记录模型/Prompt/知识快照，对候选 Release 自动比较并设置事实性、召回、安全、PII/版权与成本预算门禁。
+2. 在现有公众号授权边界内继续签收公开发布前置条件、最终对账和错误矩阵；抖音账号可用后补 OAuth/上传/发布/回调/指标，并建设通用回调 Inbox、验签、去重和渠道幂等策略。
+3. 优先接入 OpenTelemetry + Prometheus，定义 API、队列、Worker、数据库、对象存储、模型调用和发布对账的 SLI/SLO、告警与值班处置，再补负载和故障演练。
+4. 推进 OIDC/MFA 和设备会话治理，同时设计 RLS、租户生命周期与审计归档；所有身份/数据策略需用企业 IdP 与 PostgreSQL 的真实集成证据签收。
+5. 在新 head 上完成 PostgreSQL+MinIO 联合恢复与 GitHub CI 后，继续补 PITR/异地/Object Lock、锁定 Linux 制品、SBOM/签名、独立迁移 Job、受保护环境晋级和回滚演练。
+
+### 成熟度判断
+
+Prompt 治理从“只能追溯内置常量”提升到“工作区不可变版本、双人审批、可回滚、运行时校验和完整审计”，AI 变更控制局部达到 L2-L3。综合项目仍约为 L2：已有可部署主链路、可靠任务队列、真实公众号草稿证据和较强仓库门禁，但成熟企业完整项目要求质量、渠道、IAM、SRE、合规、制品和跨故障域灾备同时形成长期生产证据。

@@ -10,12 +10,32 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..db import get_db
 from ..dependencies import AppSettings, Principal, require_role
-from ..entities import AuditLog, Job, Membership, User, WorkerNode, Workspace
+from ..entities import (
+    AuditLog,
+    Job,
+    Membership,
+    PromptRelease,
+    User,
+    WorkerNode,
+    Workspace,
+)
+from ..prompt_governance import (
+    PromptIntegrityError,
+    normalize_prompts,
+    prompt_release_version,
+    prompt_set_from_release,
+    resolve_active_prompt_set,
+)
+from ..prompts import calculate_prompt_hashes
 from ..schemas import (
     AuditLogResponse,
     MemberCreate,
     MemberResponse,
     MemberUpdate,
+    PromptGovernanceResponse,
+    PromptReleaseCreate,
+    PromptReleaseResponse,
+    PromptReviewRequest,
     WorkerHealthResponse,
     WorkerQueueHealthResponse,
 )
@@ -93,9 +113,7 @@ def list_members(principal: Admin, session: Db):
         .where(Membership.workspace_id == principal.workspace_id)
         .order_by(Membership.created_at)
     ).all()
-    return [
-        member_response(membership, user) for membership, user in rows
-    ]
+    return [member_response(membership, user) for membership, user in rows]
 
 
 @router.post(
@@ -104,9 +122,7 @@ def list_members(principal: Admin, session: Db):
     status_code=status.HTTP_201_CREATED,
 )
 def add_member(payload: MemberCreate, principal: Admin, session: Db):
-    user = session.scalar(
-        select(User).where(User.email == payload.email.lower())
-    )
+    user = session.scalar(select(User).where(User.email == payload.email.lower()))
     if user is None:
         raise HTTPException(
             status_code=404,
@@ -214,6 +230,312 @@ def remove_member(
     session.commit()
 
 
+def prompt_release_response(release: PromptRelease) -> PromptReleaseResponse:
+    return PromptReleaseResponse(
+        id=release.id,
+        workspace_id=release.workspace_id,
+        release_number=release.release_number,
+        version=prompt_release_version(release.release_number),
+        status=release.status,
+        prompts=dict(release.prompts_json),
+        prompt_hashes=dict(release.prompt_hashes_json),
+        change_summary=release.change_summary,
+        review_note=release.review_note,
+        created_by_user_id=release.created_by_user_id,
+        reviewed_by_user_id=release.reviewed_by_user_id,
+        activated_by_user_id=release.activated_by_user_id,
+        reviewed_at=release.reviewed_at,
+        activated_at=release.activated_at,
+        created_at=release.created_at,
+        updated_at=release.updated_at,
+    )
+
+
+def lock_workspace(session: Session, workspace_id: str) -> Workspace:
+    query = select(Workspace).where(Workspace.id == workspace_id)
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    workspace = session.scalar(query)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="工作区不存在")
+    return workspace
+
+
+def get_prompt_release_or_404(
+    session: Session,
+    *,
+    workspace_id: str,
+    release_id: str,
+    lock: bool = False,
+) -> PromptRelease:
+    query = select(PromptRelease).where(
+        PromptRelease.id == release_id,
+        PromptRelease.workspace_id == workspace_id,
+    )
+    if lock and session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    release = session.scalar(query)
+    if release is None:
+        raise HTTPException(status_code=404, detail="Prompt 版本不存在")
+    return release
+
+
+@router.get(
+    "/prompt-releases",
+    response_model=PromptGovernanceResponse,
+)
+def list_prompt_releases(principal: Admin, session: Db):
+    releases = list(
+        session.scalars(
+            select(PromptRelease)
+            .where(PromptRelease.workspace_id == principal.workspace_id)
+            .order_by(PromptRelease.release_number.desc())
+        )
+    )
+    try:
+        active = resolve_active_prompt_set(session, principal.workspace_id)
+    except PromptIntegrityError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="当前生效 Prompt 的完整性校验失败，请暂停生成并联系管理员",
+        ) from error
+    return PromptGovernanceResponse(
+        active={
+            "source": active.source,
+            "version": active.version,
+            "release_id": active.release_id,
+            "prompts": dict(active.prompts),
+            "prompt_hashes": dict(active.hashes),
+        },
+        releases=[prompt_release_response(release) for release in releases],
+    )
+
+
+@router.post(
+    "/prompt-releases",
+    response_model=PromptReleaseResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_prompt_release(
+    payload: PromptReleaseCreate,
+    principal: Admin,
+    session: Db,
+):
+    try:
+        prompts = normalize_prompts(payload.prompts)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    summary = payload.change_summary.strip()
+    if len(summary) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="变更摘要去除首尾空白后至少需要 3 个字符",
+        )
+
+    lock_workspace(session, principal.workspace_id)
+    latest = session.scalar(
+        select(func.max(PromptRelease.release_number)).where(
+            PromptRelease.workspace_id == principal.workspace_id
+        )
+    )
+    release = PromptRelease(
+        workspace_id=principal.workspace_id,
+        release_number=int(latest or 0) + 1,
+        status="draft",
+        prompts_json=prompts,
+        prompt_hashes_json=calculate_prompt_hashes(prompts),
+        change_summary=summary,
+        created_by_user_id=principal.user_id,
+    )
+    session.add(release)
+    session.flush()
+    record_audit(
+        session,
+        action="prompt_release.create",
+        entity_type="prompt_release",
+        entity_id=release.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "release_number": release.release_number,
+            "version": prompt_release_version(release.release_number),
+            "prompt_hashes": dict(release.prompt_hashes_json),
+        },
+    )
+    session.commit()
+    session.refresh(release)
+    return prompt_release_response(release)
+
+
+@router.post(
+    "/prompt-releases/{release_id}/approve",
+    response_model=PromptReleaseResponse,
+)
+def approve_prompt_release(
+    release_id: str,
+    payload: PromptReviewRequest,
+    principal: Admin,
+    session: Db,
+):
+    release = get_prompt_release_or_404(
+        session,
+        workspace_id=principal.workspace_id,
+        release_id=release_id,
+        lock=True,
+    )
+    if release.created_by_user_id == principal.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="创建者不能审批自己的 Prompt 版本",
+        )
+    if release.status != "draft":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="只有草稿状态的 Prompt 版本可以审批",
+        )
+    release.status = "approved"
+    release.review_note = payload.note.strip() or None
+    release.reviewed_by_user_id = principal.user_id
+    release.reviewed_at = datetime.now(timezone.utc)
+    record_audit(
+        session,
+        action="prompt_release.approve",
+        entity_type="prompt_release",
+        entity_id=release.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "release_number": release.release_number,
+            "prompt_hashes": dict(release.prompt_hashes_json),
+        },
+    )
+    session.commit()
+    session.refresh(release)
+    return prompt_release_response(release)
+
+
+@router.post(
+    "/prompt-releases/{release_id}/reject",
+    response_model=PromptReleaseResponse,
+)
+def reject_prompt_release(
+    release_id: str,
+    payload: PromptReviewRequest,
+    principal: Admin,
+    session: Db,
+):
+    note = payload.note.strip()
+    if not note:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="拒绝 Prompt 版本时必须填写原因",
+        )
+    release = get_prompt_release_or_404(
+        session,
+        workspace_id=principal.workspace_id,
+        release_id=release_id,
+        lock=True,
+    )
+    if release.created_by_user_id == principal.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="创建者不能复核自己的 Prompt 版本",
+        )
+    if release.status != "draft":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="只有草稿状态的 Prompt 版本可以拒绝",
+        )
+    release.status = "rejected"
+    release.review_note = note
+    release.reviewed_by_user_id = principal.user_id
+    release.reviewed_at = datetime.now(timezone.utc)
+    record_audit(
+        session,
+        action="prompt_release.reject",
+        entity_type="prompt_release",
+        entity_id=release.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "release_number": release.release_number,
+            "reason": note,
+            "prompt_hashes": dict(release.prompt_hashes_json),
+        },
+    )
+    session.commit()
+    session.refresh(release)
+    return prompt_release_response(release)
+
+
+@router.post(
+    "/prompt-releases/{release_id}/activate",
+    response_model=PromptReleaseResponse,
+)
+def activate_prompt_release(
+    release_id: str,
+    principal: Admin,
+    session: Db,
+):
+    lock_workspace(session, principal.workspace_id)
+    release = get_prompt_release_or_404(
+        session,
+        workspace_id=principal.workspace_id,
+        release_id=release_id,
+        lock=True,
+    )
+    if release.status not in {"approved", "retired"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="只有已审批或已退役的 Prompt 版本可以激活",
+        )
+    try:
+        prompt_set_from_release(release)
+    except (PromptIntegrityError, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="该 Prompt 版本的完整性校验失败，禁止激活",
+        ) from error
+
+    rollback = release.status == "retired"
+    current = session.scalar(
+        select(PromptRelease).where(
+            PromptRelease.workspace_id == principal.workspace_id,
+            PromptRelease.status == "active",
+            PromptRelease.id != release.id,
+        )
+    )
+    previous_release_id = current.id if current is not None else None
+    if current is not None:
+        current.status = "retired"
+        session.flush()
+
+    release.status = "active"
+    release.activated_by_user_id = principal.user_id
+    release.activated_at = datetime.now(timezone.utc)
+    session.flush()
+    record_audit(
+        session,
+        action=("prompt_release.rollback" if rollback else "prompt_release.activate"),
+        entity_type="prompt_release",
+        entity_id=release.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "release_number": release.release_number,
+            "previous_release_id": previous_release_id,
+            "prompt_hashes": dict(release.prompt_hashes_json),
+        },
+    )
+    session.commit()
+    session.refresh(release)
+    return prompt_release_response(release)
+
+
 @router.get("/audit-logs", response_model=list[AuditLogResponse])
 def list_audit_logs(
     principal: Admin,
@@ -265,9 +587,7 @@ def worker_health(
     now = datetime.now(timezone.utc)
     nodes = list(
         session.scalars(
-            select(WorkerNode)
-            .order_by(WorkerNode.heartbeat_at.desc())
-            .limit(500)
+            select(WorkerNode).order_by(WorkerNode.heartbeat_at.desc()).limit(500)
         )
     )
     active_workers = 0
@@ -299,12 +619,9 @@ def worker_health(
         Job.run_at <= now,
     )
     ready_jobs = int(
-        session.scalar(select(func.count(Job.id)).where(*ready_filter))
-        or 0
+        session.scalar(select(func.count(Job.id)).where(*ready_filter)) or 0
     )
-    oldest_ready_at = session.scalar(
-        select(func.min(Job.run_at)).where(*ready_filter)
-    )
+    oldest_ready_at = session.scalar(select(func.min(Job.run_at)).where(*ready_filter))
     oldest_ready_age = (
         heartbeat_age_seconds(oldest_ready_at, now)
         if oldest_ready_at is not None
@@ -347,9 +664,7 @@ def worker_health(
             **queue_counts,
             ready=ready_jobs,
             oldest_ready_age_seconds=(
-                round(oldest_ready_age, 3)
-                if oldest_ready_age is not None
-                else None
+                round(oldest_ready_age, 3) if oldest_ready_age is not None else None
             ),
         ),
     )

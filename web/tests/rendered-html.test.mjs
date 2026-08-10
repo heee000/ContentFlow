@@ -89,6 +89,10 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /录入人工指标/);
   assert.match(app, /取消排期/);
   assert.match(app, /最近 .* 条审计记录/);
+  assert.match(app, /Prompt 审批、发布与回滚/);
+  assert.match(app, /创建者不能自行审批/);
+  assert.match(app, /查看正文与哈希/);
+  assert.match(app, /prompt-releases/);
   assert.match(app, /人工发布/);
   assert.match(app, /生成记录/);
   assert.match(app, /提示词版本/);
