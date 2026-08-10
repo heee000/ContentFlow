@@ -1094,6 +1094,8 @@ contentflow/cli.py、workflow.py、providers.py 中保留早期本地流程，�
 | 证据最小化 | 不保存原始输出/输入；错误脱敏；审计只存哈希与计数 | 加密短期调试样本、分级留存、合规访问审批 |
 | 自动化 | Worker 重试/租约、81 passed、6 skipped、79.43% 分支覆盖率；前端双构建 | 真实模型长期回归、浏览器 E2E、负载/混沌与成本账单对账 |
 
+提交 `4a9f8da4a56330c09e0b1c173f4480471ce29509` 的 [ContentFlow CI #31362922394](https://github.com/heee000/ContentFlow/actions/runs/31362922394) 已完成远程签收：Backend/PostgreSQL/pgvector/MinIO/覆盖率/Python 安全审计与 Frontend/Sites/Next/npm 安全审计两个 Job 均为 success。该证据证明新 c95 迁移和代码门禁可在一次性 CI 服务中重复执行，不等于持久生产库升级或 PostgreSQL+MinIO 联合灾备恢复已完成。
+
 ### 24.3 当前仍存在的 5 个不足
 
 1. 确定性 Eval 尚未覆盖语义事实性、RAG 召回/引用、安全红队、PII/版权、统计置信度和真实费用，真实目标模型回归仍未签收。

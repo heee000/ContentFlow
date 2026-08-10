@@ -4,7 +4,7 @@
 > 适用仓库：`F:\实习\定向简历\阿里AI内容营销自动化系统开发\ContentFlow`
 > GitHub：<https://github.com/heee000/ContentFlow>
 > 当前分支：`main`
-> 当前基准提交：`beaeaf1 Add governed prompt releases`
+> 当前基准提交：`4a9f8da Add versioned prompt evaluation gates`
 
 ## 0. 给接手者的最短说明
 
@@ -1160,7 +1160,7 @@ Prompt 治理从“只能追溯内置常量”提升到“工作区不可变版�
 - 后端全量 81 passed、6 skipped；分支覆盖率 79.43%（CI 门槛 75%）。本机跳过项仍是需要运行服务的 PostgreSQL/MinIO 集成测试。
 - Eval 专项覆盖：双人套件激活、无证据阻断、通过/失败断言、套件轮换使旧证据失效、Prompt/Suite 篡改、错误 Provider/模型证据拒绝、多租户隔离、审计/运行不含输入输出正文和 Provider 错误脱敏。
 - 前端 ESLint、Next.js 生产构建、Sites/vinext 构建和 2 项渲染测试通过。
-- 真实 PostgreSQL/pgvector、MinIO、安全审计和前端安全门禁仍以 GitHub CI 为最终远程签收；本节先记录本地事实，运行链接在阶段推送成功后补录。
+- 提交 `4a9f8da4a56330c09e0b1c173f4480471ce29509` 的 [ContentFlow CI #31362922394](https://github.com/heee000/ContentFlow/actions/runs/31362922394) 已成功；Backend 作业在真实 PostgreSQL/pgvector 与 MinIO 服务上完成迁移、集成测试、分支覆盖率和 Python 安全审计，Frontend 作业完成 lint、Sites 测试、Next.js 生产构建和 npm 安全审计。
 
 ### 持续复审：当前仍最关键的 5 个不足
 

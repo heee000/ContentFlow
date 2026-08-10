@@ -84,6 +84,7 @@
 - [x] S3 新对象保存完整 SHA-256 元数据并在读取时验证长度与内容；真实 MinIO 已覆盖上传/读取、bucket 隔离、大小限制、篡改检测、旧对象兼容和随机 bucket 清理。
 - [x] 已加入 `uv.lock`、GitHub Actions 后端/前端门禁和 Dependabot；Action 使用完整提交 SHA，CI pgvector 使用镜像 digest，Python 与 npm 严格审计均为 0 个已知漏洞。
 - [x] 当前 Prompt 治理 head 已由 [ContentFlow CI #31359992207](https://github.com/heee000/ContentFlow/actions/runs/31359992207) 完成后端 PostgreSQL/MinIO/安全与前端构建/安全签收。
+- [x] Prompt Eval head c95f1e4a8d73 已由 [ContentFlow CI #31362922394](https://github.com/heee000/ContentFlow/actions/runs/31362922394) 完成真实 PostgreSQL/pgvector、MinIO、覆盖率、双端构建与依赖安全签收。
 - [ ] 受保护分支必需检查、浏览器 E2E、双 Worker/SIGKILL/数据库闪断、PITR/异地恢复、SBOM、镜像签名、独立迁移与灰度回滚仍待补齐。
 - [ ] 2026-08-08 未重新跑完整 Compose 栈：Docker Hub 拉取 python:3.12-slim 时网络失败；PostgreSQL 16/pgvector 单服务的 SKIP LOCKED、内容冲突和取消/分发竞态验证已通过，但不能替代完整栈验收。
 
