@@ -160,6 +160,8 @@ CONTENTFLOW_VIDEO_MODEL=configured-video-model
 ```
 
 HTTP 媒体契约使用 `POST /images/generations`、`POST /videos/generations` 和 `GET /videos/generations/{task_id}`；图片可返回受限 base64 或下载 URL，视频可同步完成或返回任务 ID 后由 Worker 轮询。生产启动会拒绝缺少端点、密钥、模型名或精确下载域名允许列表的真实 Provider 配置；下载器还会校验重定向后的最终域名。
+
+v1 的机器可读定义见 [OpenAPI](docs/contracts/contentflow-media-v1.openapi.yml)，强制语义和对接边界见 [媒体 Provider 契约](docs/media_provider_contract.md)。生成请求携带协议版本和稳定、不透明的 `Idempotency-Key`；Worker 会区分永久协议错误与可重试的超时、限流和服务端错误，并在 `429` 等场景遵守有界 `Retry-After`。数据库内部元数据只按白名单转换为媒体参数，不会原样透传。
 ## 平台连接边界
 
 - 抖音：需要开放平台应用、用户 OAuth、`access_token` 和 `open_id`，能力还受应用 scope 与平台审核状态限制。适配器按“上传视频 → 创建作品 → 拉取视频数据”拆分。

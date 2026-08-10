@@ -21,6 +21,19 @@
 
 仓库不会在生产环境自动 `create_all`。API 容器启动前执行 `alembic upgrade head`；迁移失败时服务不会启动。
 
+## 媒体 Provider v1 上线检查
+
+真实媒体服务必须先按 [`contentflow-media-v1.openapi.yml`](contracts/contentflow-media-v1.openapi.yml) 完成一致性验收：
+
+1. 所有请求识别 `ContentFlow-Media-Version: 1`，所有成功响应回显该版本。
+2. 相同 `Idempotency-Key` 与相同请求至少 24 小时内返回原任务/结果且不重复计费；同键不同请求返回 409。
+3. 覆盖同步图片、同步/异步视频、轮询、400、401/403、408、425、429、5xx、无效 JSON、超大响应和下载 URL 过期；确认错误体不含密钥或堆栈。
+4. `Retry-After` 使用整数秒；ContentFlow 最多采纳 300 秒。永久 4xx/协议错误应一次失败，可重试错误进入有界退避。
+5. 只允许 OpenAPI 声明的 `parameters`；确认 ContentFlow 的 workspace、asset、内容版本和审计字段不会出现在外部请求。
+6. 下载域名和所有重定向域名逐一加入精确 allowlist；执行越权域名、URL 凭据和超大文件的拒绝测试。
+
+v1 尚未交付取消、能力发现和签名 Webhook；部署验收必须使用轮询并为超时结果保留人工收敛流程。
+
 ## 受治理 Prompt 的生产初始化
 
 生产环境不存在“先用内置 Prompt 顶着运行”的旁路。`CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true` 时，管理页会显示生成就绪状态；没有活动的受治理 Prompt，或活动 Prompt 缺少与当前 Eval 套件、Provider 和模型完全匹配的通过证据时，创建生成任务直接返回 409，Worker 在真正调用模型前还会再次复核。

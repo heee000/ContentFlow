@@ -12,6 +12,26 @@ import httpx
 
 from .settings import Settings
 
+MEDIA_CONTRACT_VERSION = "1"
+MEDIA_CONTRACT_VERSION_HEADER = "ContentFlow-Media-Version"
+
+
+class MediaProviderError(RuntimeError):
+    """Stable, redacted failure raised by the external media contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        status_code: int | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+
 
 @dataclass(slots=True)
 class MediaGeneration:
@@ -31,6 +51,7 @@ class MediaProvider(Protocol):
         kind: str,
         prompt: str,
         metadata: dict[str, Any],
+        idempotency_key: str,
     ) -> MediaGeneration: ...
 
     def poll(self, external_task_id: str) -> MediaGeneration: ...
@@ -55,6 +76,7 @@ class MockMediaProvider:
         kind: str,
         prompt: str,
         metadata: dict[str, Any],
+        idempotency_key: str,
     ) -> MediaGeneration:
         if kind == "image":
             from PIL import Image, ImageDraw, ImageFont
@@ -116,7 +138,7 @@ class MockMediaProvider:
 
 
 class HTTPMediaProvider:
-    """Vendor-neutral HTTP adapter using the ContentFlow media contract."""
+    """Vendor-neutral adapter for ContentFlow Media Contract v1."""
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None):
         if not settings.media_api_base or not settings.media_api_key:
@@ -130,6 +152,7 @@ class HTTPMediaProvider:
         self.headers = {
             "Authorization": f"Bearer {settings.media_api_key}",
             "Content-Type": "application/json",
+            MEDIA_CONTRACT_VERSION_HEADER: MEDIA_CONTRACT_VERSION,
         }
 
     def generate(
@@ -138,59 +161,168 @@ class HTTPMediaProvider:
         kind: str,
         prompt: str,
         metadata: dict[str, Any],
+        idempotency_key: str,
     ) -> MediaGeneration:
+        self._validate_prompt(prompt)
+        request_headers = self._generation_headers(idempotency_key)
+        parameters = self._generation_parameters(metadata)
         if kind == "image":
             if not self.settings.image_model:
-                raise ValueError("HTTP 图片 Provider 缺少 CONTENTFLOW_IMAGE_MODEL")
+                raise MediaProviderError(
+                    "HTTP 图片 Provider 缺少 CONTENTFLOW_IMAGE_MODEL",
+                    retryable=False,
+                )
             width, height = _image_size(str(metadata.get("ratio") or "1:1"))
             response = self.client.post(
                 f"{self.base_url}/images/generations",
-                headers=self.headers,
+                headers=request_headers,
                 json={
                     "model": self.settings.image_model,
                     "prompt": prompt,
                     "size": f"{width}x{height}",
-                    "metadata": metadata,
+                    "parameters": parameters,
                 },
             )
-            response.raise_for_status()
+            self._raise_for_status(response)
             return self._image_result(self._response_body(response))
-        if kind != "video":
-            raise ValueError(f"HTTP 素材 Provider 不支持 kind={kind}")
+        if kind not in {"video", "video_storyboard"}:
+            raise MediaProviderError(
+                "HTTP 素材 Provider 收到不支持的素材类型",
+                retryable=False,
+            )
         if not self.settings.video_model:
-            raise ValueError("HTTP 视频 Provider 缺少 CONTENTFLOW_VIDEO_MODEL")
+            raise MediaProviderError(
+                "HTTP 视频 Provider 缺少 CONTENTFLOW_VIDEO_MODEL",
+                retryable=False,
+            )
         response = self.client.post(
             f"{self.base_url}/videos/generations",
-            headers=self.headers,
+            headers=request_headers,
             json={
                 "model": self.settings.video_model,
                 "prompt": prompt,
-                "metadata": metadata,
+                "parameters": parameters,
             },
         )
-        response.raise_for_status()
+        self._raise_for_status(response)
         return self._video_result(self._response_body(response))
 
     def poll(self, external_task_id: str) -> MediaGeneration:
-        if not external_task_id.strip():
-            raise ValueError("HTTP 视频任务 ID 不能为空")
+        if not external_task_id.strip() or len(external_task_id) > 255:
+            raise MediaProviderError(
+                "HTTP 视频任务 ID 格式无效",
+                retryable=False,
+            )
         response = self.client.get(
             f"{self.base_url}/videos/generations/{quote(external_task_id, safe='')}",
             headers=self.headers,
         )
-        response.raise_for_status()
+        self._raise_for_status(response)
         return self._video_result(
             self._response_body(response), fallback_id=external_task_id
         )
 
     @staticmethod
+    def _validate_prompt(prompt: str) -> None:
+        if not prompt.strip() or len(prompt) > 50_000:
+            raise MediaProviderError(
+                "HTTP 素材 Prompt 格式无效",
+                retryable=False,
+            )
+
+    @staticmethod
+    def _generation_parameters(metadata: dict[str, Any]) -> dict[str, Any]:
+        allowed = ("ratio", "aspect_ratio", "duration_seconds", "shots")
+        parameters = {key: metadata[key] for key in allowed if key in metadata}
+        ratios = {"3:4", "4:3", "1:1", "9:16", "16:9"}
+        for key in ("ratio", "aspect_ratio"):
+            if key in parameters and parameters[key] not in ratios:
+                raise MediaProviderError(
+                    "HTTP 素材画面比例无效",
+                    retryable=False,
+                )
+        duration = parameters.get("duration_seconds")
+        if duration is not None and (
+            isinstance(duration, bool)
+            or not isinstance(duration, int)
+            or not 1 <= duration <= 600
+        ):
+            raise MediaProviderError(
+                "HTTP 视频时长参数无效",
+                retryable=False,
+            )
+        shots = parameters.get("shots")
+        if shots is not None and (not isinstance(shots, list) or len(shots) > 100):
+            raise MediaProviderError(
+                "HTTP 视频分镜参数无效",
+                retryable=False,
+            )
+        return parameters
+
+    def _generation_headers(self, idempotency_key: str) -> dict[str, str]:
+        normalized = idempotency_key.strip()
+        if (
+            not 8 <= len(normalized) <= 128
+            or not normalized.isascii()
+            or any(not 0x20 <= ord(char) <= 0x7E for char in normalized)
+        ):
+            raise MediaProviderError(
+                "HTTP 素材幂等键格式无效",
+                retryable=False,
+            )
+        return {**self.headers, "Idempotency-Key": normalized}
+
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> int | None:
+        value = response.headers.get("Retry-After", "").strip()
+        if not value.isdigit():
+            return None
+        return min(300, max(1, int(value)))
+
+    @classmethod
+    def _raise_for_status(cls, response: httpx.Response) -> None:
+        if 200 <= response.status_code < 300:
+            return
+        retryable = response.status_code in {408, 425, 429} or (
+            response.status_code >= 500
+        )
+        disposition = "暂时" if retryable else "永久"
+        raise MediaProviderError(
+            f"HTTP 素材服务返回{disposition}错误（状态码 {response.status_code}）",
+            retryable=retryable,
+            status_code=response.status_code,
+            retry_after_seconds=(
+                cls._retry_after_seconds(response) if retryable else None
+            ),
+        )
+
+    @staticmethod
     def _response_body(response: httpx.Response) -> dict[str, Any]:
+        response_version = response.headers.get(MEDIA_CONTRACT_VERSION_HEADER)
+        if response_version != MEDIA_CONTRACT_VERSION:
+            raise MediaProviderError(
+                "HTTP 素材响应缺少兼容的 ContentFlow Media Contract 版本",
+                retryable=False,
+            )
+        content_type = response.headers.get("Content-Type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            raise MediaProviderError(
+                "HTTP 素材响应 Content-Type 必须是 application/json",
+                retryable=False,
+            )
         try:
             body = response.json()
         except ValueError as error:
-            raise RuntimeError("HTTP 素材响应不是有效 JSON") from error
+            raise MediaProviderError(
+                "HTTP 素材响应不是有效 JSON",
+                retryable=False,
+            ) from error
         if not isinstance(body, dict):
-            raise RuntimeError("HTTP 素材响应顶层必须是对象")
+            raise MediaProviderError(
+                "HTTP 素材响应顶层必须是对象",
+                retryable=False,
+            )
         return body
 
     @staticmethod
@@ -205,16 +337,42 @@ class HTTPMediaProvider:
     @staticmethod
     def _request_metadata(body: dict[str, Any]) -> dict[str, Any]:
         request_id = body.get("request_id") or body.get("requestId")
-        return {"request_id": str(request_id)} if request_id else {}
+        return {"request_id": str(request_id)[:255]} if request_id else {}
+
+    @staticmethod
+    def _download_url(item: dict[str, Any]) -> str | None:
+        value = item.get("url") or item.get("download_url")
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value or len(value) > 2048:
+            raise MediaProviderError(
+                "HTTP 素材响应包含无效下载地址",
+                retryable=False,
+            )
+        return value
 
     def _image_result(self, body: dict[str, Any]) -> MediaGeneration:
         item = self._result_item(body)
         encoded = item.get("b64_json")
         if isinstance(encoded, str) and encoded:
+            encoded_limit = ((self.settings.max_upload_bytes + 2) // 3) * 4
+            if len(encoded) > encoded_limit:
+                raise MediaProviderError(
+                    "HTTP 图片响应超过大小限制",
+                    retryable=False,
+                )
             try:
                 content = base64.b64decode(encoded, validate=True)
             except (ValueError, binascii.Error) as error:
-                raise RuntimeError("HTTP 图片响应包含无效 base64 数据") from error
+                raise MediaProviderError(
+                    "HTTP 图片响应包含无效 base64 数据",
+                    retryable=False,
+                ) from error
+            if len(content) > self.settings.max_upload_bytes:
+                raise MediaProviderError(
+                    "HTTP 图片响应超过大小限制",
+                    retryable=False,
+                )
             return MediaGeneration(
                 status="ready",
                 content=content,
@@ -222,9 +380,12 @@ class HTTPMediaProvider:
                 filename=str(item.get("filename") or "generated-image.png"),
                 metadata=self._request_metadata(body),
             )
-        url = item.get("url") or item.get("download_url")
-        if not isinstance(url, str) or not url:
-            raise RuntimeError("HTTP 图片响应缺少 url、download_url 或 b64_json")
+        url = self._download_url(item)
+        if not url:
+            raise MediaProviderError(
+                "HTTP 图片响应缺少 url、download_url 或 b64_json",
+                retryable=False,
+            )
         return MediaGeneration(
             status="ready",
             download_url=url,
@@ -241,33 +402,46 @@ class HTTPMediaProvider:
     ) -> MediaGeneration:
         item = self._result_item(body)
         status = str(item.get("status") or body.get("status") or "").lower()
-        task_id = item.get("id") or item.get("task_id") or fallback_id
-        url = item.get("url") or item.get("download_url")
+        raw_task_id = item.get("id") or item.get("task_id") or fallback_id
+        task_id = str(raw_task_id).strip() if isinstance(raw_task_id, str) else None
+        if task_id and len(task_id) > 255:
+            raise MediaProviderError(
+                "HTTP 视频响应包含无效任务 ID",
+                retryable=False,
+            )
+        url = self._download_url(item)
         metadata = self._request_metadata(body)
         if status in {"queued", "pending", "processing", "running"} or (
             not status and task_id and not url
         ):
             if not task_id:
-                raise RuntimeError("HTTP 视频响应缺少异步任务 ID")
+                raise MediaProviderError(
+                    "HTTP 视频响应缺少异步任务 ID",
+                    retryable=False,
+                )
             return MediaGeneration(
                 status="processing",
-                external_task_id=str(task_id),
+                external_task_id=task_id,
                 metadata=metadata,
             )
-        if status in {"ready", "completed", "succeeded"} or (
-            not status and isinstance(url, str) and url
-        ):
-            if not isinstance(url, str) or not url:
-                raise RuntimeError("HTTP 视频完成响应缺少下载地址")
+        if status in {"ready", "completed", "succeeded"} or (not status and url):
+            if not url:
+                raise MediaProviderError(
+                    "HTTP 视频完成响应缺少下载地址",
+                    retryable=False,
+                )
             return MediaGeneration(
                 status="ready",
-                external_task_id=str(task_id) if task_id else fallback_id,
+                external_task_id=task_id or fallback_id,
                 download_url=url,
                 mime_type=str(item.get("mime_type") or "video/mp4"),
                 filename=str(item.get("filename") or "generated-video.mp4"),
                 metadata=metadata,
             )
-        raise RuntimeError(f"HTTP 视频任务返回未知状态: {status or 'missing'}")
+        raise MediaProviderError(
+            "HTTP 视频任务返回未知或缺失状态",
+            retryable=False,
+        )
 
 
 def build_media_provider(settings: Settings, kind: str) -> MediaProvider:

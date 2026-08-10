@@ -204,6 +204,7 @@ def fail_job(
     worker_id: str,
     attempt: int,
     force_terminal: bool = False,
+    retry_after_seconds: int | None = None,
 ) -> Job:
     job = _get_claimed_job(
         session,
@@ -219,7 +220,11 @@ def fail_job(
         job.status = "failed"
     else:
         job.status = "retry"
-        delay_seconds = min(300, 2 ** max(0, job.attempts - 1) * 5)
+        delay_seconds = (
+            min(300, max(1, retry_after_seconds))
+            if retry_after_seconds is not None
+            else min(300, 2 ** max(0, job.attempts - 1) * 5)
+        )
         job.run_at = utcnow() + timedelta(seconds=delay_seconds)
     session.flush()
     return job

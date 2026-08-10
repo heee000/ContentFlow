@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import signal
@@ -42,6 +43,7 @@ from .job_queue import (
 )
 from .knowledge_service import index_document
 from .media_providers import (
+    MediaProviderError,
     build_media_provider,
     download_generated_media,
 )
@@ -341,6 +343,30 @@ def _store_generation(
     }
 
 
+def media_generation_idempotency_key(asset: Asset) -> str:
+    """Return a stable opaque key for one asset content version."""
+
+    try:
+        content_version = int((asset.metadata_json or {}).get("content_version", 1))
+    except (TypeError, ValueError) as error:
+        raise MediaProviderError(
+            "素材内容版本格式无效",
+            retryable=False,
+        ) from error
+    if content_version < 1:
+        raise MediaProviderError(
+            "素材内容版本格式无效",
+            retryable=False,
+        )
+    digest = hashlib.sha256(
+        (
+            f"contentflow-media-v1:{asset.workspace_id}:{asset.id}:"
+            f"{asset.kind}:{content_version}"
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"cfm-{digest}"
+
+
 def handle_asset_generate(
     session: Session, payload: dict[str, Any], settings: Settings
 ) -> dict[str, Any]:
@@ -355,6 +381,7 @@ def handle_asset_generate(
         kind=asset.kind,
         prompt=asset.prompt or "",
         metadata=dict(asset.metadata_json or {}),
+        idempotency_key=media_generation_idempotency_key(asset),
     )
     if generation.status == "processing":
         if not generation.external_task_id:
@@ -1217,6 +1244,15 @@ class Worker:
                             force_terminal=isinstance(
                                 error,
                                 PublishReconciliationRequired,
+                            )
+                            or (
+                                isinstance(error, MediaProviderError)
+                                and not error.retryable
+                            ),
+                            retry_after_seconds=getattr(
+                                error,
+                                "retry_after_seconds",
+                                None,
                             ),
                         )
                     except JobLeaseLost as lease_error:

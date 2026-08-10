@@ -1334,3 +1334,42 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 ### 成熟度判断
 
 本轮关闭了“产品默认绑定单一厂商/模型”的定位和实现风险，并保留了可替换的真实 Provider 路径；架构中立性由 L1-L2 提升到 L2 基线。综合成熟度仍约 L2：真正的企业交付还需要真实 Provider 合同签收、协议治理、成本与密钥平台、受保护交付流程，以及既有多渠道、SRE、IAM、数据治理和灾备能力共同形成长期证据。
+
+## 21.23 HTTP Media Contract v1、幂等重试边界与第十九轮复审
+
+### 本轮已完成
+
+1. 发布机器可读的 `docs/contracts/contentflow-media-v1.openapi.yml` 和人类可读的 `docs/media_provider_contract.md`，固定三个端点、Bearer 鉴权、封闭请求 Schema、响应状态与稳定错误信封。
+2. 每个媒体请求携带 `ContentFlow-Media-Version: 1`，成功响应必须回显；生成请求强制 8–128 位可打印 ASCII `Idempotency-Key`。Worker 用 workspace、asset、素材类型和 content version 计算 SHA-256 不透明键，同一内容版本重试稳定、版本变化换键，内部 ID 不直接出站。
+3. HTTP 适配器只发送 `model`、`prompt`、`size` 和白名单 `ratio/aspect_ratio/duration_seconds/shots`，不再透传整个 `metadata_json`；Prompt、比例、时长、分镜、任务 ID、下载 URL 和内联 base64 均增加边界校验。
+4. 修复真实视频路径：工作流内部的 `video_storyboard` 现在进入 v1 视频端点，不会再被 HTTP Provider 当作未知 kind 拒绝。
+5. 新增稳定 `MediaProviderError`：408/425/429/5xx 可重试，其余 4xx、版本不兼容、无效 JSON/响应和本地契约错误立即终止；429 等响应的整数 `Retry-After` 进入队列，最多 300 秒。Provider 原始错误体和未知远端状态不进入任务错误。
+6. `fail_job` 保留原指数退避，同时支持有界服务端退避提示；Worker 只对永久媒体错误设置 terminal，网络/限流/服务端错误仍按任务上限重试。
+
+### 当前验证证据
+
+- Media Provider、OpenAPI 与 Worker 错误语义专项 `20 passed`，另有 8 个输入边界子用例通过；Ruff 与 `git diff --check` 通过。
+- 测试覆盖版本回显、幂等头、同资产同版本键稳定、内容版本换键、参数最小化、`video_storyboard` 路由、400/429 分类、`Retry-After`、无效响应脱敏、内联大小、下载 allowlist 与重定向拒绝。
+- 全量后端 `116 passed、7 skipped`，另有 8 个参数子用例通过，分支覆盖率 `81.35%`；全仓 Ruff 通过。本机跳过项仍仅为需要真实 PostgreSQL/pgvector 和 MinIO 的集成测试。
+- 前端 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js 生产构建通过；`npm audit` 与 `pip-audit --strict` 均为 0 个已知漏洞，`uv lock --check` 通过。
+- 默认与 observability Compose 使用仅当前命令有效的占位 secret 解析通过；Alembic 保持单 head `c95f1e4a8d73`，关键监控资产/迁移/安全专项 `40 passed`。远程 CI 仍必须补真实 PostgreSQL/pgvector、MinIO 和 Linux 运行证据。
+
+### 持续复审：当前仍存在的 5 个不足
+
+1. **目标媒体服务仍未签收**：仓库端契约和 MockTransport 已成立，但没有真实服务证明相同幂等键不重复生成/计费，也没有鉴权过期、限流、审核、超时成功、下载过期、时延、成本和质量矩阵。
+2. **v1 外部任务生命周期不完整**：尚无 capability discovery、取消、任务过期/续期、签名 Webhook、Inbox 去重和明确的兼容/弃用窗口；当前只能依赖轮询与人工收敛。
+3. **AI/媒体网关治理仍缺**：没有工作区预算、模型/媒体配额、并发舱壁、熔断、降级、成本账本、账单核对与可审计的服务切换演练。
+4. **密钥与配置仍非企业级**：长期 API Key 仍通过环境变量配置，缺 KMS/Vault/工作负载身份、动态短凭据、轮换审计、配置签名和环境策略证明。
+5. **整体企业闭环仍不共同成立**：真实多渠道异常矩阵、端到端 Trace/集中日志、SLO/告警到人、OIDC/MFA/SCIM、RLS/数据生命周期、PITR/异地、SBOM/签名、受保护分支和灰度发布仍未同时签收。
+
+### 接下来最值得继续做的 5 项改进
+
+1. 建设独立 conformance test service 与可复现测试向量，再用目标媒体服务覆盖同键重放/冲突、错误/超时/限流/审核、轮询、过期下载、质量和成本矩阵。
+2. 设计兼容的媒体契约扩展：能力发现、取消、任务过期、签名 Webhook、事件 Inbox/去重、重放防护与版本弃用政策，并先补端到端状态机测试。
+3. 落地 AI gateway policy 和成本账本：工作区预算、并发/速率、熔断/退避/降级、用量归属、月账核对和异常成本告警。
+4. 接入企业 Secret Manager/KMS 与工作负载身份，完成双密钥轮换、最小权限、访问审计和不泄密故障演练。
+5. 继续真实公众号异常矩阵和抖音就绪后的企业链路，同时推进 OpenTelemetry、企业 IAM/RLS、恢复、签名供应链与 PR 必需检查。
+
+### 成熟度判断
+
+媒体对接从“中立适配器草案”推进到“有机器契约、稳定幂等键、数据最小化、明确重试语义和 Worker 回归证据”的 L2-L3 仓库基线。它显著降低了重试重复计费、永久错误反复消耗和内部元数据外泄风险，但服务端是否遵守契约仍需真实证据；综合项目继续约为 L2，不能据此宣称完成企业生产签收。

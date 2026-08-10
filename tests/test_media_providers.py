@@ -42,6 +42,7 @@ class HTTPMediaProviderTest(unittest.TestCase):
             self.assertEqual(payload["size"], "720x1280")
             return httpx.Response(
                 200,
+                headers={"ContentFlow-Media-Version": "1"},
                 json={
                     "request_id": "request-1",
                     "data": [
@@ -61,6 +62,7 @@ class HTTPMediaProviderTest(unittest.TestCase):
             kind="image",
             prompt="create a cover",
             metadata={"ratio": "9:16"},
+            idempotency_key="image-key-0001",
         )
 
         self.assertEqual(result.status, "ready")
@@ -77,10 +79,12 @@ class HTTPMediaProviderTest(unittest.TestCase):
                 self.assertEqual(payload["model"], "configured-video-model")
                 return httpx.Response(
                     202,
+                    headers={"ContentFlow-Media-Version": "1"},
                     json={"data": {"id": "job-1", "status": "processing"}},
                 )
             return httpx.Response(
                 200,
+                headers={"ContentFlow-Media-Version": "1"},
                 json={
                     "requestId": "request-2",
                     "data": {
@@ -99,6 +103,7 @@ class HTTPMediaProviderTest(unittest.TestCase):
             kind="video",
             prompt="create a short video",
             metadata={"ratio": "16:9"},
+            idempotency_key="video-key-0001",
         )
         completed = provider.poll(submitted.external_task_id or "")
 
@@ -120,13 +125,22 @@ class HTTPMediaProviderTest(unittest.TestCase):
             http_settings(),
             client=httpx.Client(
                 transport=httpx.MockTransport(
-                    lambda _request: httpx.Response(200, json=["unexpected"])
+                    lambda _request: httpx.Response(
+                        200,
+                        headers={"ContentFlow-Media-Version": "1"},
+                        json=["unexpected"],
+                    )
                 )
             ),
         )
 
         with self.assertRaisesRegex(RuntimeError, "顶层必须是对象"):
-            provider.generate(kind="image", prompt="cover", metadata={})
+            provider.generate(
+                kind="image",
+                prompt="cover",
+                metadata={},
+                idempotency_key="image-key-0002",
+            )
 
     def test_malformed_image_response_fails_without_copying_response_body(self):
         provider = HTTPMediaProvider(
@@ -135,6 +149,7 @@ class HTTPMediaProviderTest(unittest.TestCase):
                 transport=httpx.MockTransport(
                     lambda _request: httpx.Response(
                         200,
+                        headers={"ContentFlow-Media-Version": "1"},
                         json={"internal_detail": "do-not-copy"},
                     )
                 )
@@ -142,7 +157,12 @@ class HTTPMediaProviderTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "缺少") as captured:
-            provider.generate(kind="image", prompt="cover", metadata={})
+            provider.generate(
+                kind="image",
+                prompt="cover",
+                metadata={},
+                idempotency_key="image-key-0003",
+            )
         self.assertNotIn("do-not-copy", str(captured.exception))
 
     def test_inline_media_obeys_download_size_limit(self):
