@@ -484,7 +484,7 @@ viewer < editor < reviewer < admin
 | `/jobs` | 任务查询和失败任务重试 |
 | `/dashboard` | 工作台摘要 |
 
-准确请求体和响应体以运行中的 Swagger 为准，不要只根据前端 TypeScript 类型猜测。
+表中的 `/metrics` 是带 `/api/v1` 前缀的业务复盘接口（实际为 `/api/v1/metrics`）；根级 `/metrics` 是不进入 Swagger、需要独立 Bearer Token 的 Prometheus 抓取端点，两者用途和鉴权边界不同。`r`n`r`n准确请求体和响应体以运行中的 Swagger 为准，不要只根据前端 TypeScript 类型猜测。
 
 ## 14. 当前 Git 工作区现场
 
@@ -1218,3 +1218,40 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 ### 成熟度判断
 
 本轮把 AI 治理从“有 Release/Eval，但生产仍可停留在 builtin”推进到“生产必须显式启用治理、入队前可见阻断、Worker 二次复核、安全 bootstrap 有操作手册”。AI 变更控制继续位于 L2-L3，综合成熟度仍约 L2：它已是一套可部署、可治理、可持续验证的产品基线，但距离成熟企业完整交付还缺语义质量、组织治理、真实多渠道、SRE/成本、企业 IAM/合规和跨故障域灾备的长期共同证据。
+
+## 21.20 受保护 Prometheus 指标基线与第十六轮复审
+
+### 已实现并接入运行时
+
+1. 使用锁文件固定的 `prometheus-client 0.26.0`，每个 FastAPI 应用使用独立 Registry，避免测试/多应用共享默认全局注册表。
+2. `/metrics` 默认关闭且不进入 OpenAPI。生产必须显式开启并提供独立的 32 位以上 Bearer Token；关闭、弱 Token 或复用应用签名/凭据密钥时启动失败。禁用返回 404，未授权返回 401，Collector 异常返回不含内部错误的 503，所有响应均 `no-store`。
+3. HTTP Counter/Histogram/In-flight Gauge 只使用固定方法、完整 FastAPI 模板 route 与状态类别。未知方法归入 `OTHER`，原始路径 ID、workspace、用户、对象与异常消息不会成为标签或响应内容。
+4. PostgreSQL Collector 在抓取时汇总 Job 状态、可领取任务和最长等待、Worker active/stale/stopped、Workflow/Eval 状态与 `reconciliation_required`。已知状态使用固定集合，异常数据库值归入 `unknown`。
+5. Collector 延迟取得当前 Session factory，兼容开发 lifespan 完成迁移后重新配置数据库连接，避免捕获旧 Engine 和 SQLite 文件锁；注册 Collector 时不访问数据库，抓取失败安全关闭。
+6. 本阶段不增加数据库迁移。Compose 已把相同配置传入 API 与 Worker，确保生产启动策略一致。
+
+### 本阶段本地验证
+
+- 可观测性/安全/PostgreSQL 专项 26 passed、5 skipped；全量后端 88 passed、7 skipped，分支覆盖率 79.85%，高于 75% 门槛。
+- 新测试覆盖：禁用/鉴权/OpenAPI 隐藏、完整模板路由、资源 ID 不泄露、未知 method/status 聚合、数据库 Gauge、Worker active/stale、Collector 异常脱敏和生产密钥约束。
+- 本机 PostgreSQL/pgvector 与 MinIO 服务不可用，因此 5 项 PostgreSQL 和 2 项 MinIO 集成测试由 GitHub CI 签收；其中新增真实 PostgreSQL Collector 测试会渲染全部运行指标。
+
+### 持续复审：当前仍存在的 5 个不足
+
+1. **指标端点不是完整监控系统**：尚未部署 Prometheus/Alertmanager/Grafana、recording/alert rules、SLO/错误预算、通知路由、值班与告警演练。
+2. **端到端关联不足**：没有 OpenTelemetry Trace/exemplar、集中日志和请求—队列—Worker—Provider—平台发布链路关联；Provider 成本/限流、数据库池/慢查询和对象存储错误指标仍缺。
+3. **AI Eval 仍偏确定性契约**：语义事实性、RAG 召回/引用、安全红队、PII/版权、统计置信度和真实费用门禁未完成。
+4. **真实渠道矩阵未闭合**：公众号公开发布/最终对账和异常矩阵、抖音企业链路、通用回调 Inbox/验签/去重与平台原生幂等仍缺。
+5. **企业 IAM、数据、供应链与灾备未共同签收**：OIDC/SAML/MFA/SCIM、RLS、租户生命周期、PITR/异地、SBOM/签名和灰度回滚尚无长期生产证据。
+
+### 接下来最值得继续做的 5 项改进
+
+1. 部署指标平台，提交版本化 Dashboard 与告警规则，定义 API/队列/Worker/发布 SLO、错误预算、通知升级和演练流程。
+2. 接入 OpenTelemetry，贯通请求、Job、AI/Eval 与发布 Trace，并补 Provider 成本/限流、数据库、对象存储和平台连接器专用指标。
+3. 扩展 Eval Registry，绑定知识/参数快照与人工金标，加入 RAG、事实性、安全、PII/版权、统计与真实账单阈值。
+4. 继续公众号异常矩阵；抖音就绪后完成 OAuth/发布/回调/指标，统一事件 Inbox、签名验证、去重与状态收敛。
+5. 用企业 IdP、真实 PostgreSQL 和恢复环境签收 IAM/RLS/数据生命周期/PITR，并建设 SBOM、镜像签名、独立迁移与受保护灰度发布。
+
+### 成熟度判断
+
+可观测性从仅有健康检查和结构化日志推进到可安全抓取、低基数、覆盖 API 与核心数据库运行状态的 L2 基线。综合项目仍约为 L2：已经能部署、治理和获得关键运行信号，但成熟企业交付还要求真实监控平台、长期 SLO/告警证据、端到端追踪、语义质量、多渠道、IAM/合规、供应链和跨故障域恢复共同成立。

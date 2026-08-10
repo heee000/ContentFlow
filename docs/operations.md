@@ -12,6 +12,7 @@
 - Web 映射端口与跨域来源一致；例如 `CONTENTFLOW_WEB_PORT=3300` 时，CORS 列表需包含 `http://localhost:3300`
 - 真实生产设置 `CONTENTFLOW_ALLOW_MOCK_PROVIDERS=false`，并配置文本、Embedding、图片、视频 Provider 所需的 Base URL、API Key 和 Workspace ID
 - 显式设置 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true`；生产启动会拒绝关闭，Compose 的 API/Worker 默认启用
+- 显式设置 `CONTENTFLOW_METRICS_ENABLED=true`，并从密钥管理系统注入独立的 32 位以上 `CONTENTFLOW_METRICS_BEARER_TOKEN`；不得与应用签名或凭据加密密钥复用
 - 初始管理员创建完成后设置 `CONTENTFLOW_ALLOW_REGISTRATION=false`
 - 根据入口网关限制设置 `CONTENTFLOW_MAX_UPLOAD_BYTES`；应用默认上限为 100 MiB
 
@@ -49,6 +50,8 @@ docker compose ps
 ```powershell
 Invoke-RestMethod http://localhost:8000/health/live
 Invoke-RestMethod http://localhost:8000/health/ready
+$contentFlowMetricsHeaders = @{ Authorization = "Bearer $env:CONTENTFLOW_METRICS_BEARER_TOKEN" }
+Invoke-WebRequest http://localhost:8000/metrics -Headers $contentFlowMetricsHeaders
 $contentFlowWebPort = if ($env:CONTENTFLOW_WEB_PORT) { $env:CONTENTFLOW_WEB_PORT } else { "3000" }
 Invoke-WebRequest "http://localhost:$contentFlowWebPort"
 docker compose logs api worker --tail 200
@@ -62,6 +65,7 @@ Compose 是单机参考拓扑，不是直接暴露公网的边缘层。上线前
 - `/api/v1/auth/login`、注册与刷新已使用 PostgreSQL 共享限流；边缘层仍需 WAF/DDoS 与全业务 API 配额
 - 请求体上限不高于 `CONTENTFLOW_MAX_UPLOAD_BYTES`，并设置连接、读取和上游超时
 - WAF/机器人防护、访问日志脱敏和告警；不得记录 Authorization、Cookie、API Key 或平台凭据
+- `/metrics` 只允许 Prometheus 所在内部网络、VPN 或专用监控入口访问；不得经公网路由暴露，抓取凭据应由密钥系统注入并按流程轮换
 
 应用内安全响应头、统一错误和上传上限属于纵深防御，不能替代网关限流、企业 SSO 或集中密钥管理。
 
@@ -130,17 +134,31 @@ python -m alembic history
 - `CONTENTFLOW_SECRET_KEY`、当前/历史凭据加密密钥必须单独备份到集中密钥管理系统；丢失后访问令牌和已加密平台凭据无法恢复。
 - 审计日志按合规周期归档，不要和普通应用日志一起随意清理。
 
-## 监控建议
+## 监控基线与告警建议
 
-当前 `/health/ready` 同时检查 PostgreSQL 与对象存储；`/api/v1/admin/worker-health` 汇总 Worker 心跳并按当前工作空间统计队列，出现 `no_active_workers`、`stale_worker_nodes`、`ready_jobs_without_active_workers` 或 `queue_ready_age_exceeded` 时应告警。生产环境仍应采集：
+当前 `/health/ready` 同时检查 PostgreSQL 与对象存储；`/api/v1/admin/worker-health` 提供当前工作区的可操作诊断。启用受保护的 `/metrics` 后，Prometheus 可抓取 HTTP 请求数/延迟/并发和全局数据库运行 Gauge。推荐从以下规则开始，并在目标环境压测后校准阈值：
 
-- HTTP 状态、P95/P99 延迟、请求 ID
-- Job queued/running/retry/failed 数量与最长排队时间
-- 外部模型耗时、错误率和费用
-- 各平台限流、授权过期与发布失败率
-- 对象存储容量和下载错误
-- PostgreSQL 连接池、慢查询和向量查询耗时
-- Worker 心跳失败、租约过期、reconciliation_required 数量与最长停留时间
+```promql
+# 5 分钟 5xx 比例
+sum(rate(contentflow_http_requests_total{status_class="5xx"}[5m]))
+  / clamp_min(sum(rate(contentflow_http_requests_total[5m])), 0.001)
+
+# 按模板路由统计 P95；标签不会包含实际资源 ID
+histogram_quantile(
+  0.95,
+  sum by (le, route) (rate(contentflow_http_request_duration_seconds_bucket[5m]))
+)
+
+# Worker/积压/人工对账基线
+max(contentflow_worker_nodes{state="active"}) < 1
+max(contentflow_queue_oldest_ready_age_seconds) > 300
+max(contentflow_publish_reconciliation_required) > 0
+up{job="contentflow-api"} == 0
+```
+
+HTTP Counter/Histogram 来自各 API 进程，应按实例聚合。队列、Worker、Workflow/Eval 与发布对账 Gauge 都读取同一 PostgreSQL 全局视图，多 API 副本会重复暴露相同值，因此告警和看板使用 `max`，不能跨副本求和。
+
+现有指标只是一层安全、低基数的仓库基线。生产仍需部署 Prometheus/Alertmanager/Grafana 或等价平台，建立 recording/alert rules、SLO/错误预算、通知路由和值班手册；还需用 OpenTelemetry 和专用 Exporter 补齐 Provider/平台调用耗时与费用、数据库连接池/慢查询、对象存储错误、Trace 与结构化日志关联。
 
 ## 故障处理
 

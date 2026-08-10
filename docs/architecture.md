@@ -7,6 +7,7 @@
 ```mermaid
 flowchart TB
     Web["Next.js 运营工作台"] --> API["FastAPI + RBAC"]
+    Prometheus["Prometheus / 监控平台"] -->|"内部 Bearer 抓取"| API
     API --> DB["PostgreSQL / SQLite"]
     API --> Object["MinIO/S3 / 本地存储"]
     API --> Queue["数据库任务队列"]
@@ -105,9 +106,17 @@ flowchart TB
 - 生产环境禁止默认应用密钥
 - 平台发布必须经过 reviewer 角色和人工审核状态
 
-大规模生产环境仍应接入 OIDC/SAML、MFA、集中 KMS、网关级全业务限流/WAF、nonce/hash + strict-dynamic CSP、设备会话管理和可观测平台。
+大规模生产环境仍应接入 OIDC/SAML、MFA、集中 KMS、网关级全业务限流/WAF、nonce/hash + strict-dynamic CSP 和设备会话管理。当前已有受保护 Prometheus 指标基线，但仍需集中指标平台、告警、日志归集和分布式追踪。
 
-## 8. 前端
+## 8. 可观测性
+
+- `/metrics` 默认关闭且不进入 OpenAPI；启用后要求独立 Bearer Token，生产环境会拒绝关闭指标或复用应用密钥。
+- 每个 API 进程维护独立 Registry，记录按固定 method、完整 FastAPI 模板 route 和状态类别聚合的请求数、延迟直方图与并发数；未知方法统一为 `OTHER`，不会把原始资源 ID 写入标签。
+- 抓取时从 PostgreSQL 汇总 Job、最长就绪等待、Worker active/stale/stopped、Workflow/Eval 状态和发布人工对账数量。业务状态只使用固定集合，未知值聚合为 `unknown`，不暴露 workspace、用户或对象标识。
+- 数据库 Gauge 在每个 API 副本上表示同一个全局数据库视图；多副本查询应使用 `max` 去重。HTTP Counter/Histogram 则按实例用 `sum(rate(...))` 聚合。
+- 该基线还不包含 OpenTelemetry Trace、日志/Trace 关联、Provider 成本与外部平台耗时、数据库连接池/慢查询或对象存储错误，需要由后续统一可观测平台补齐。
+
+## 9. 前端
 
 运营工作台覆盖总览、活动、审核/全量内容库、素材、发布、知识库、平台连接、数据复盘、任务队列以及团队与审计。活动页可维护结构化 Brief、启动生成、归档与恢复，并按需展开最近 5 次生成记录查看模型与 Prompt 追溯证据；审核页同时展示规则结果、已通过内容和每次模型生成/人工修改的版本历史；发布页支持排期取消；复盘页支持平台自动回收或人工录入已核对指标。顶部可切换已授权工作区，管理页可创建隔离工作区、调整成员角色、查看待审批 Prompt 全文与哈希、执行双人审批/激活/回滚并查询脱敏审计记录。各业务页依据 `viewer/editor/reviewer/admin` 隐藏或禁用越权操作，而不是等接口返回 403 后才提示。界面采用高密度、方形、单一蓝色交互色的企业应用设计；移动端把侧边栏重组为横向 section switcher，数据表转为带字段标签的记录卡。
 

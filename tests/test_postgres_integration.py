@@ -33,6 +33,7 @@ from contentflow.entities import (
     Workspace,
 )
 from contentflow.migrate import HEAD_REVISION, PROJECT_ROOT
+from contentflow.observability import ObservabilityMetrics
 from contentflow.security import hash_rate_limit_key
 from contentflow.settings import Settings
 from contentflow.worker import (
@@ -500,3 +501,17 @@ def test_postgres_auth_rate_limit_serializes_same_key(
         assert row is not None
         assert row.attempts == 2
         assert row.blocked_until is not None
+
+
+def test_postgres_operational_metrics_collector(postgres_harness: PostgresHarness):
+    metrics = ObservabilityMetrics(
+        postgres_harness.settings,
+        postgres_harness.sessions,
+    )
+    payload = metrics.render().decode("utf-8")
+    assert "contentflow_queue_jobs" in payload
+    assert "contentflow_queue_oldest_ready_age_seconds" in payload
+    assert "contentflow_worker_nodes" in payload
+    assert "contentflow_workflow_runs" in payload
+    assert "contentflow_prompt_eval_runs" in payload
+    assert "contentflow_publish_reconciliation_required" in payload

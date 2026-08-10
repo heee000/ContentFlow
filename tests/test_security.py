@@ -30,6 +30,8 @@ def production_settings(**overrides) -> Settings:
         "s3_secret_key": "secret",
         "allow_mock_providers": True,
         "require_governed_prompts": True,
+        "metrics_enabled": True,
+        "metrics_bearer_token": "m" * 32,
     }
     values.update(overrides)
     return Settings(**values)
@@ -185,6 +187,19 @@ class RuntimeSettingsTest(unittest.TestCase):
         settings = production_settings(require_governed_prompts=False)
         with self.assertRaisesRegex(ValueError, "REQUIRE_GOVERNED_PROMPTS"):
             settings.validate_runtime()
+
+    def test_production_requires_metrics(self):
+        settings = production_settings(metrics_enabled=False)
+        with self.assertRaisesRegex(ValueError, "METRICS_ENABLED"):
+            settings.validate_runtime()
+
+    def test_enabled_metrics_require_a_separate_long_token(self):
+        missing = production_settings(metrics_bearer_token=None)
+        with self.assertRaisesRegex(ValueError, "METRICS_BEARER_TOKEN"):
+            missing.validate_runtime()
+        reused = production_settings(metrics_bearer_token="s" * 32)
+        with self.assertRaisesRegex(ValueError, "must be separate"):
+            reused.validate_runtime()
 
     def test_production_requires_separate_credential_key(self):
         settings = production_settings(credential_encryption_key=None)

@@ -1,21 +1,24 @@
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
 from .migrate import upgrade_database
 from .object_storage import build_object_storage
+from .observability import ObservabilityMetrics
 from .routers import (
     admin,
     assets,
@@ -49,6 +52,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     db.configure_database(settings.database_url)
     configure_logging()
+    observability = (
+        ObservabilityMetrics(settings, lambda: db.SessionLocal())
+        if settings.metrics_enabled
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -88,8 +96,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
         request.state.request_id = request_id
         started = time.perf_counter()
-        response = await call_next(request)
-        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        if observability is not None:
+            observability.request_started(request.method)
+        try:
+            response = await call_next(request)
+        except Exception:
+            if observability is not None:
+                observability.request_finished(
+                    method=request.method,
+                    route=request.scope.get("route"),
+                    request_path=request.url.path,
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    duration_seconds=time.perf_counter() - started,
+                )
+            raise
+        duration_seconds = time.perf_counter() - started
+        duration_ms = round(duration_seconds * 1000, 2)
+        if observability is not None:
+            observability.request_finished(
+                method=request.method,
+                route=request.scope.get("route"),
+                request_path=request.url.path,
+                status_code=response.status_code,
+                duration_seconds=duration_seconds,
+            )
         response.headers["x-request-id"] = request_id
         response.headers.setdefault("x-content-type-options", "nosniff")
         response.headers.setdefault("x-frame-options", "DENY")
@@ -204,6 +234,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         storage = build_object_storage(settings)
         storage.check()
         return {"status": "ready", "database": "ok", "storage": "ok"}
+
+    @application.get("/metrics", include_in_schema=False)
+    def prometheus_metrics(request: Request):
+        if observability is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Not found",
+                headers={"Cache-Control": "no-store"},
+            )
+        authorization = request.headers.get("authorization", "")
+        scheme, separator, provided_token = authorization.partition(" ")
+        expected_token = settings.metrics_bearer_token or ""
+        authorized = (
+            separator == " "
+            and scheme.lower() == "bearer"
+            and bool(provided_token)
+            and hmac.compare_digest(provided_token, expected_token)
+        )
+        if not authorized:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Metrics authentication required",
+                headers={
+                    "WWW-Authenticate": "Bearer",
+                    "Cache-Control": "no-store",
+                },
+            )
+        try:
+            payload = observability.render()
+        except Exception as error:
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "metrics.collection_failed",
+                        "error_type": type(error).__name__,
+                    }
+                )
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Metrics collection failed",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        return Response(
+            content=payload,
+            headers={
+                "Content-Type": CONTENT_TYPE_LATEST,
+                "Cache-Control": "no-store",
+            },
+        )
 
     return application
 

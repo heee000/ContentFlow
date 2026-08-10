@@ -40,7 +40,7 @@ flowchart LR
 - 公众号封面素材、草稿创建、可选发布提交和基于 `publish_id` 的最终状态对账适配器
 - 小红书审核后 ZIP 投放包，不虚构公开发布能力
 - 10 个业务区的响应式运营工作台，包含全量内容/版本回看、人工指标录入、团队权限、Prompt/Eval 治理与审计查询
-- Alembic、Docker Compose、健康检查与结构化请求日志
+- Alembic、Docker Compose、健康检查、结构化请求日志与受保护的低基数 Prometheus 指标
 
 ## 目录
 
@@ -94,12 +94,13 @@ npm run dev:local
 - 工作台：`http://localhost:3001`（专用本地开发端口，避免与其他常见的 `3000` 端口项目冲突）
 - API 文档：`http://localhost:8000/docs`
 - 健康检查：`http://localhost:8000/health/ready`
+- Prometheus 指标：`http://localhost:8000/metrics`（仅在显式启用并携带独立 Bearer Token 时可用）
 
 首次使用在登录页切换到“注册”，创建账户与工作区。默认 API 地址为 `http://localhost:8000/api/v1`。
 
 ## 一键容器部署
 
-复制 `.env.example` 为 `.env`，至少设置两个不同的 32 位以上随机密钥 `CONTENTFLOW_SECRET_KEY`、`CONTENTFLOW_CREDENTIAL_ENCRYPTION_KEY`，并替换 PostgreSQL 与 MinIO 密码。离线验收可保留 `CONTENTFLOW_ALLOW_MOCK_PROVIDERS=true`；真实生产必须设为 `false` 并配置真实 Provider。生产还必须显式设置 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true`；Compose 的 API/Worker 默认已启用，应用启动会拒绝关闭该门禁。
+复制 `.env.example` 为 `.env`，至少设置两个不同的 32 位以上随机密钥 `CONTENTFLOW_SECRET_KEY`、`CONTENTFLOW_CREDENTIAL_ENCRYPTION_KEY`，并替换 PostgreSQL 与 MinIO 密码。离线验收可保留 `CONTENTFLOW_ALLOW_MOCK_PROVIDERS=true`；真实生产必须设为 `false` 并配置真实 Provider。生产还必须显式设置 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true` 和 `CONTENTFLOW_METRICS_ENABLED=true`；Compose 的 API/Worker 默认启用 Prompt 门禁。指标端点必须使用与应用签名/凭据密钥不同的 32 位以上 Bearer Token，并只允许内部监控网络访问。
 
 首次生产初始化时保持门禁开启，只临时允许受限来源注册两个管理员：一人创建并激活工作区，另一人加入该工作区成为管理员；随后依次完成 Eval 套件双人激活、Prompt 评测、双人审批与激活。管理页显示“可生成”后立刻设置 `CONTENTFLOW_ALLOW_REGISTRATION=false` 并重新部署。初始化期间未完成治理的生成请求会在入队前返回 409，不应通过临时关闭治理门禁绕过。
 

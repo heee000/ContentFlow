@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     allow_registration: bool = True
     allow_mock_providers: bool = False
     require_governed_prompts: bool = False
+    metrics_enabled: bool = False
+    metrics_bearer_token: str | None = Field(default=None, max_length=4096)
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:3000",
@@ -164,6 +166,23 @@ class Settings(BaseSettings):
         if self.production and not self.require_governed_prompts:
             raise ValueError(
                 "Production requires CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true"
+            )
+        if self.production and not self.metrics_enabled:
+            raise ValueError("Production requires CONTENTFLOW_METRICS_ENABLED=true")
+        if self.metrics_enabled and (
+            not self.metrics_bearer_token or len(self.metrics_bearer_token) < 32
+        ):
+            raise ValueError(
+                "Metrics require CONTENTFLOW_METRICS_BEARER_TOKEN with at least "
+                "32 characters"
+            )
+        if self.production and self.metrics_bearer_token in {
+            self.secret_key,
+            self.credential_encryption_key,
+        }:
+            raise ValueError(
+                "Production metrics bearer token must be separate from application "
+                "and credential encryption keys"
             )
         if self.production and (
             not self.credential_encryption_key
