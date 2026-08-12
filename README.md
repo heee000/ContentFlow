@@ -246,6 +246,10 @@ npm audit --audit-level=moderate
 
 真实外部账号的最终发布仍必须在具备相应授权和 scope 的测试账号中验收；仓库不会把 Mock 响应写成“外部平台已成功发布”。
 
+## 维护者与贡献者
+
+- [John Wang (@heee000)](https://github.com/heee000) — 项目维护者与贡献者
+
 ## 文档
 
 - [系统架构](docs/architecture.md)

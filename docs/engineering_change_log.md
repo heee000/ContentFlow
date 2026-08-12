@@ -244,6 +244,16 @@
 - 验证：前导空格、尾随空格和换行键均在网络前产生不可重试失败；机器契约测试精确断言新 pattern，内部空格键按原始字节发送，合法既有键继续通过。
 - 剩余边界：v1 仍允许键内部出现普通空格；这是机器契约明确允许的可打印 ASCII，而不是归一化授权。目标服务仍需用真实 conformance 与账单证明按原始字节执行幂等。
 
+### CF-20260812-23：GitHub 仓库简介与贡献者身份缺失
+
+- 状态：已处理；本条所在提交使用 GitHub 账号 `heee000` 的 noreply 身份创建，仓库 About 与 README 同步补充。
+- 问题与影响：GitHub About 的 Description 与 Topics 为空，访客无法从仓库首页快速判断项目定位；历史 21 个提交统一使用未关联 GitHub 账号的 `ContentFlow Builder <contentflow-builder@users.noreply.local>`，因此 GitHub 原生 Contributors 统计只显示匿名身份，仓库所有者 `@heee000` 没有被识别为贡献者。
+- 根因：仓库初始化和后续自动化提交未配置 GitHub 可验证的作者邮箱，也没有维护首页元数据与 README 维护者入口。
+- 解决方案：About Description 使用厂商中立的一句话说明，并补充 AI 内容自动化、FastAPI、PostgreSQL、pgvector、Next.js、RAG 与工作流等 Topics；README 明确链接维护者与贡献者 `John Wang (@heee000)`；当前仓库后续提交改用 `182348029+heee000@users.noreply.github.com`，由 GitHub 自动完成账号归属。
+- 涉及文件：README.md、docs/engineering_change_log.md；GitHub 仓库 About 元数据。
+- 验证：提交推送后检查 GitHub Commit API 的 author.login、Contributors API、Description 与 Topics；不使用强制推送，不修改或重写历史提交。
+- 剩余边界：既有提交仍保留原始作者元数据和 SHA，这是保护公开历史的刻意选择；GitHub Contributors 统计可能存在短暂缓存，但新提交的账号归属不依赖历史改写。
+
 ## 4. 阶段签收清单
 
 | 门禁 | 当前结果 |
