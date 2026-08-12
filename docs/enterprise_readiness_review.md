@@ -1350,7 +1350,7 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 | 异步安全 | 非敏感配置指纹、轮询前漂移拒绝、稳定永久/临时错误 | 创建/轮询/Worker 回归 | Provider 版本迁移与任务排空审批 |
 | 验收证据隐私 | Schema v2、每轮随机 HMAC 指纹、原值与 JSON 转义秘密扫描；报告不可覆盖 | 精确 HMAC、完整秘密集合与转义泄漏回归 | 签名/WORM、访问审计、跨报告关联被刻意禁用 |
 | 配置与输入 | 启动 fail-fast；API Key/模型/Prompt/Shot/ID/MIME/文件名/Unicode/类型有界 | 联合专项 109 passed + 130 subtests | 真实凭据权限与模型存在性 |
-| 本地总门禁 | Ruff、覆盖率、双构建、双端审计、Compose、数据文件、定向词扫描 | 177 passed、7 skipped、130 subtests、82.13%；漏洞 0 | 当前提交远程 CI 尚未执行 |
+| 本地总门禁 | Ruff、覆盖率、双构建、双端审计、Compose、数据文件、定向词扫描 | 177 passed、7 skipped、130 subtests、82.13%；漏洞 0；`8a79658` 已推送功能分支 | 功能分支 push 未触发 workflow，当前提交 Actions 运行数为 0 |
 
 ### 31.3 当前仍存在的 5 个不足
 
