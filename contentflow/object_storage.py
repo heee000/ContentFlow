@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
+from .filenames import safe_filename
 from .settings import Settings
 
 
@@ -33,13 +34,6 @@ class ObjectStorage(Protocol):
     def read(self, uri: str, *, max_bytes: int = 100 * 1024 * 1024) -> bytes: ...
 
     def check(self) -> None: ...
-
-
-def safe_filename(filename: str) -> str:
-    name = Path(filename).name.replace("\x00", "")
-    if not name or name in {".", ".."}:
-        raise ValueError("文件名无效")
-    return name
 
 
 class LocalObjectStorage:

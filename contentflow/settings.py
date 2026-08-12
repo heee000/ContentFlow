@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .network_validation import normalize_exact_host
 
 
 class Settings(BaseSettings):
@@ -81,6 +84,11 @@ class Settings(BaseSettings):
 
     media_api_base: str | None = None
     media_api_key: str | None = None
+    media_provider_max_response_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        ge=64 * 1024,
+        le=256 * 1024 * 1024,
+    )
     media_download_allowed_hosts: list[str] = Field(default_factory=list)
     image_model: str | None = None
     video_model: str | None = None
@@ -244,6 +252,10 @@ class Settings(BaseSettings):
                     "OpenAI-compatible provider configuration missing: "
                     + ", ".join(missing)
                 )
+            self._validate_external_api_base(
+                self.model_api_base or "",
+                setting_name="CONTENTFLOW_MODEL_API_BASE",
+            )
         uses_http_media = self.image_provider == "http" or self.video_provider == "http"
         if uses_http_media:
             required = {
@@ -262,6 +274,60 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "HTTP media provider configuration missing: " + ", ".join(missing)
                 )
+            self._validate_external_api_base(
+                self.media_api_base or "",
+                setting_name="CONTENTFLOW_MEDIA_API_BASE",
+            )
+            invalid_hosts = [
+                host
+                for host in self.media_download_allowed_hosts
+                if not self._is_exact_hostname(host)
+            ]
+            if invalid_hosts:
+                raise ValueError(
+                    "CONTENTFLOW_MEDIA_DOWNLOAD_ALLOWED_HOSTS must contain only "
+                    "exact hostnames"
+                )
+            if (
+                not isinstance(self.media_api_key, str)
+                or not 1 <= len(self.media_api_key) <= 4096
+                or not self.media_api_key.isascii()
+                or any(
+                    not 0x21 <= ord(char) <= 0x7E
+                    for char in self.media_api_key
+                )
+            ):
+                raise ValueError(
+                    "CONTENTFLOW_MEDIA_API_KEY must contain 1 to 4096 printable "
+                    "ASCII characters without spaces"
+                )
+            active_media_models = {
+                "CONTENTFLOW_IMAGE_MODEL": self.image_model
+                if self.image_provider == "http"
+                else None,
+                "CONTENTFLOW_VIDEO_MODEL": self.video_model
+                if self.video_provider == "http"
+                else None,
+            }
+            invalid_models = [
+                name
+                for name, model in active_media_models.items()
+                if model is not None
+                and (
+                    not 1 <= len(model) <= 200
+                    or model != model.strip()
+                    or any(
+                        ord(char) < 0x20 or ord(char) == 0x7F
+                        for char in model
+                    )
+                    or not self._is_utf8_text(model)
+                )
+            ]
+            if invalid_models:
+                raise ValueError(
+                    "HTTP media provider model names are invalid: "
+                    + ", ".join(invalid_models)
+                )
         if self.storage_backend == "s3":
             required = {
                 "CONTENTFLOW_S3_ENDPOINT_URL": self.s3_endpoint_url,
@@ -276,6 +342,43 @@ class Settings(BaseSettings):
             and self.embedding_dimensions != 1024
         ):
             raise ValueError("当前 pgvector 迁移固定使用 1024 维向量")
+
+    def _validate_external_api_base(self, value: str, *, setting_name: str) -> None:
+        message = (
+            f"{setting_name} must be an HTTP(S) URL without credentials, "
+            "query or fragment"
+        )
+        try:
+            value.encode("utf-8")
+            parsed = urlparse(value)
+            parsed.port
+        except ValueError as error:
+            raise ValueError(message) from error
+        if (
+            any(ord(char) <= 0x20 or ord(char) == 0x7F for char in value)
+            or parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or normalize_exact_host(parsed.hostname) is None
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(message)
+        if self.production and parsed.scheme != "https":
+            raise ValueError(f"Production requires HTTPS for {setting_name}")
+
+    @staticmethod
+    def _is_exact_hostname(value: str) -> bool:
+        return normalize_exact_host(value) is not None
+
+    @staticmethod
+    def _is_utf8_text(value: str) -> bool:
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
 
 
 @lru_cache

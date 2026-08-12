@@ -159,9 +159,18 @@ CONTENTFLOW_IMAGE_MODEL=configured-image-model
 CONTENTFLOW_VIDEO_MODEL=configured-video-model
 ```
 
-HTTP 媒体契约使用 `POST /images/generations`、`POST /videos/generations` 和 `GET /videos/generations/{task_id}`；图片可返回受限 base64 或下载 URL，视频可同步完成或返回任务 ID 后由 Worker 轮询。生产启动会拒绝缺少端点、密钥、模型名或精确下载域名允许列表的真实 Provider 配置；下载器还会校验重定向后的最终域名。
+HTTP 媒体契约使用 `POST /images/generations`、`POST /videos/generations` 和 `GET /videos/generations/{task_id}`；图片可返回受限 base64 或下载 URL，视频可同步完成或返回任务 ID 后由 Worker 轮询。生产启动会拒绝缺少端点、密钥、模型名或精确下载域名允许列表的真实 Provider 配置；下载器会在发出每一跳请求前校验非空精确域名 allowlist，生产仅允许默认 HTTPS 端口；Provider JSON 响应默认硬限制为 32 MiB，较大素材必须使用受控下载 URL。
 
 v1 的机器可读定义见 [OpenAPI](docs/contracts/contentflow-media-v1.openapi.yml)，强制语义和对接边界见 [媒体 Provider 契约](docs/media_provider_contract.md)。生成请求携带协议版本和稳定、不透明的 `Idempotency-Key`；Worker 会区分永久协议错误与可重试的超时、限流和服务端错误，并在 `429` 等场景遵守有界 `Retry-After`。数据库内部元数据只按白名单转换为媒体参数，不会原样透传。
+
+目标媒体服务上线前，应把上述 `CONTENTFLOW_*` 配置注入当前 shell，并运行一次可能计费的受控验收：
+
+```powershell
+$contentFlowEvidenceStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+uv run --locked contentflow-media-conformance --kind both --output ".contentflow/evidence/media-conformance-$contentFlowEvidenceStamp.json" --confirm-live-generation
+```
+
+runner 会在联网前独占预留新报告文件，并验证正常生成、同键重放/冲突、版本拒绝、鉴权拒绝和视频轮询；报告不保存密钥、端点、模型、Prompt、任务 ID、媒体 URL 或原始响应。它不能替代限流/超时/审核/下载过期注入、账单核对和人工质量验收。生产配置切换前必须排空在途媒体任务；旧异步任务的目标配置指纹与当前配置不一致时会失败关闭，避免误轮询新服务。
 ## 平台连接边界
 
 - 抖音：需要开放平台应用、用户 OAuth、`access_token` 和 `open_id`，能力还受应用 scope 与平台审核状态限制。适配器按“上传视频 → 创建作品 → 拉取视频数据”拆分。
@@ -246,3 +255,6 @@ npm audit --audit-level=moderate
 - [系统能力概览](docs/capability_overview.md)
 - [生产化验收清单](docs/production_requirements.md)
 - [外部服务真实验收记录](docs/external_acceptance.md)
+- [工程变更台账](docs/engineering_change_log.md)
+- [企业成熟度持续复审](docs/enterprise_readiness_review.md)
+- [项目交接与现场规则](docs/CONTENTFLOW_HANDOFF.md)

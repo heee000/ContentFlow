@@ -11,10 +11,11 @@
 - 明确的 `CONTENTFLOW_CORS_ORIGINS`，不得包含 `*`
 - Web 映射端口与跨域来源一致；例如 `CONTENTFLOW_WEB_PORT=3300` 时，CORS 列表需包含 `http://localhost:3300`
 - 真实生产设置 `CONTENTFLOW_ALLOW_MOCK_PROVIDERS=false`；文本/Embedding 显式配置 `MODEL_API_BASE`、`MODEL_API_KEY` 和模型名，图片/视频显式配置中立 HTTP 媒体契约的 `MEDIA_API_BASE`、`MEDIA_API_KEY`、模型名和精确的 `MEDIA_DOWNLOAD_ALLOWED_HOSTS`
+- 生产模型与媒体 API Base 必须是 HTTPS，且不得包含 URL 凭据、query 或 fragment；媒体下载 allowlist 只填写不带 scheme、路径、端口或凭据的精确主机名
 - 显式设置 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true`；生产启动会拒绝关闭，Compose 的 API/Worker 默认启用
 - 显式设置 `CONTENTFLOW_METRICS_ENABLED=true`，并从密钥管理系统注入独立的 32 位以上 `CONTENTFLOW_METRICS_BEARER_TOKEN`；不得与应用签名或凭据加密密钥复用
 - 初始管理员创建完成后设置 `CONTENTFLOW_ALLOW_REGISTRATION=false`
-- 根据入口网关限制设置 `CONTENTFLOW_MAX_UPLOAD_BYTES`；应用默认上限为 100 MiB
+- 根据入口网关限制设置 `CONTENTFLOW_MAX_UPLOAD_BYTES`；应用默认上限为 100 MiB。媒体 Provider JSON 响应另受 `CONTENTFLOW_MEDIA_PROVIDER_MAX_RESPONSE_BYTES` 限制，默认 32 MiB；超过该值的素材必须走精确 allowlist 的下载 URL，避免在 Worker 内存中缓冲超大 base64 JSON
 
 
 密钥轮换时先把新值设为 `CONTENTFLOW_CREDENTIAL_ENCRYPTION_KEY`，把旧凭据密钥加入 JSON 数组 `CONTENTFLOW_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`，所有 API/Worker 实例同时部署后重新创建平台连接，确认新密钥可解密，再移除旧密钥。应用签名密钥与凭据加密密钥不得复用，也不得只保存在同一台主机的 `.env` 中。
@@ -25,14 +26,25 @@
 
 真实媒体服务必须先按 [`contentflow-media-v1.openapi.yml`](contracts/contentflow-media-v1.openapi.yml) 完成一致性验收：
 
-1. 所有请求识别 `ContentFlow-Media-Version: 1`，所有成功响应回显该版本。
+1. 所有请求识别 `ContentFlow-Media-Version: 1`，所有成功和错误响应都回显该版本。
 2. 相同 `Idempotency-Key` 与相同请求至少 24 小时内返回原任务/结果且不重复计费；同键不同请求返回 409。
 3. 覆盖同步图片、同步/异步视频、轮询、400、401/403、408、425、429、5xx、无效 JSON、超大响应和下载 URL 过期；确认错误体不含密钥或堆栈。
 4. `Retry-After` 使用整数秒；ContentFlow 最多采纳 300 秒。永久 4xx/协议错误应一次失败，可重试错误进入有界退避。
 5. 只允许 OpenAPI 声明的 `parameters`；确认 ContentFlow 的 workspace、asset、内容版本和审计字段不会出现在外部请求。
-6. 下载域名和所有重定向域名逐一加入精确 allowlist；执行越权域名、URL 凭据和超大文件的拒绝测试。
+6. 下载域名和所有重定向域名逐一加入非空精确 allowlist；生产仅允许默认 HTTPS 端口。执行空 allowlist、越权域名、非默认端口、URL 凭据和超大文件的拒绝测试。
 
-v1 尚未交付取消、能力发现和签名 Webhook；部署验收必须使用轮询并为超时结果保留人工收敛流程。
+把上述目标配置注入当前 shell 后，先执行供应商中立的受控 live runner。它会真实创建所选类型素材，可能产生费用；输出路径必须是尚不存在的新文件：
+
+```powershell
+$contentFlowEvidenceStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+uv run --locked contentflow-media-conformance --kind both --output ".contentflow/evidence/media-conformance-$contentFlowEvidenceStamp.json" --confirm-live-generation
+```
+
+退出码 `0` 表示所有自动探针通过，`1` 表示已生成脱敏失败报告，`2` 表示配置/输出路径不安全或不完整。每种所选素材在目标服务遵约时最多产生一次逻辑生成；工具还会发送同键重放、409 冲突、旧版本和无鉴权探针。`--allow-insecure-http` 只允许用于完全隔离的本地适配服务，生产禁止使用。不要把报告与账单、人工质量抽检和故障注入矩阵互相替代。
+
+修改 `MEDIA_API_BASE`、图片/视频模型或 Provider 类型前，先停止新任务入队并排空 `queued/generating/processing` 媒体任务。异步任务会保存不含端点、模型或密钥明文的目标配置指纹；轮询时配置不一致或历史任务缺少指纹会永久失败并要求人工核对，不会把旧任务 ID 发往新服务。排空后再部署全部 API/Worker，并用新报告文件重新执行 conformance。
+
+v1 尚未交付取消操作、能力发现和签名 Webhook；部署验收必须使用轮询并为超时结果保留人工收敛流程。自动 runner 也不能主动制造 408/425/429/5xx、审核拒绝或下载过期，这些仍需目标服务测试钩子和账单侧证据。
 
 ## 受治理 Prompt 的生产初始化
 

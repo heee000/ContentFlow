@@ -251,6 +251,121 @@ class RuntimeSettingsTest(unittest.TestCase):
         )
         settings.validate_runtime()
 
+    def test_production_live_provider_api_bases_require_safe_https_urls(self):
+        base = {
+            "text_provider": "openai-compatible",
+            "model_api_key": "model-key",
+            "text_model": "configured-text-model",
+            "image_provider": "http",
+            "media_api_key": "media-key",
+            "media_download_allowed_hosts": ["assets.example"],
+            "image_model": "configured-image-model",
+        }
+        cases = (
+            ("model_api_base", "http://models.example/v1", "HTTPS"),
+            (
+                "model_api_base",
+                "https://user:pass@models.example/v1",
+                "without credentials",
+            ),
+            ("media_api_base", "http://media.example/v1", "HTTPS"),
+            (
+                "media_api_base",
+                "https://media.example/v1?key=secret",
+                "without credentials",
+            ),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field, value=value):
+                values = {
+                    **base,
+                    "model_api_base": "https://models.example/v1",
+                    "media_api_base": "https://media.example/v1",
+                    field: value,
+                }
+                with self.assertRaisesRegex(ValueError, message):
+                    production_settings(**values).validate_runtime()
+
+    def test_provider_api_base_rejects_malformed_port_stably(self):
+        settings = production_settings(
+            image_provider="http",
+            media_api_base="https://media.example:broken/v1",
+            media_api_key="media-key",
+            media_download_allowed_hosts=["assets.example"],
+            image_model="configured-image-model",
+        )
+        with self.assertRaisesRegex(ValueError, "without credentials"):
+            settings.validate_runtime()
+
+    def test_media_download_allowlist_requires_exact_hostnames(self):
+        for host in (
+            "https://assets.example",
+            "assets.example/path",
+            "assets.example:443",
+            "user@assets.example",
+            "[broken",
+            "*.example",
+            "asset_service.example",
+            "-assets.example",
+            "assets-.example",
+            "assets..example",
+            "assets.example.",
+            " assets.example",
+        ):
+            with self.subTest(host=host):
+                settings = production_settings(
+                    image_provider="http",
+                    media_api_base="https://media.example/v1",
+                    media_api_key="media-key",
+                    media_download_allowed_hosts=[host],
+                    image_model="configured-image-model",
+                )
+                with self.assertRaisesRegex(ValueError, "exact hostnames"):
+                    settings.validate_runtime()
+
+    def test_media_provider_credentials_and_models_fail_at_startup(self):
+        invalid_values = (
+            {"media_api_key": "bad key"},
+            {"media_api_key": "bad\nkey"},
+            {"image_model": " padded-model "},
+            {"image_model": "x" * 201},
+            {"image_model": "bad\ud800model"},
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid):
+                settings = production_settings(
+                    **{
+                        "image_provider": "http",
+                        "media_api_base": "https://media.example/v1",
+                        "media_api_key": "media-key",
+                        "media_download_allowed_hosts": ["assets.example"],
+                        "image_model": "configured-image-model",
+                        **invalid,
+                    }
+                )
+                with self.assertRaises(ValueError):
+                    settings.validate_runtime()
+
+    def test_media_provider_response_cap_is_bounded(self):
+        self.assertEqual(
+            Settings().media_provider_max_response_bytes,
+            32 * 1024 * 1024,
+        )
+        for invalid in (64 * 1024 - 1, 256 * 1024 * 1024 + 1):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    Settings(media_provider_max_response_bytes=invalid)
+
+    def test_development_live_provider_may_use_local_http_endpoint(self):
+        Settings(
+            database_url="sqlite:///contentflow-test.db",
+            image_provider="http",
+            media_api_base="http://127.0.0.1:8081/v1",
+            media_api_key="media-key",
+            media_download_allowed_hosts=["127.0.0.1"],
+            image_model="configured-image-model",
+        ).validate_runtime()
+
     def test_production_accepts_explicit_offline_validation_mode(self):
         production_settings().validate_runtime()
 

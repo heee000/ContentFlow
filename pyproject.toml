@@ -44,6 +44,7 @@ target-version = "py311"
 
 [project.scripts]
 contentflow = "contentflow.cli:main"
+contentflow-media-conformance = "contentflow.media_conformance:main"
 contentflow-migrate = "contentflow.migrate:main"
 contentflow-worker = "contentflow.worker:main"
 

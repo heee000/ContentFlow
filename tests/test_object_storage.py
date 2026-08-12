@@ -5,10 +5,32 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 
+from contentflow.filenames import safe_filename
 from contentflow.object_storage import LocalObjectStorage
 
 
 class LocalObjectStorageTest(unittest.TestCase):
+    def test_safe_filename_is_cross_platform_and_keeps_basename_compatibility(self):
+        self.assertEqual(safe_filename("../中文 资料.txt"), "中文 资料.txt")
+        for invalid in (
+            None,
+            "",
+            ".",
+            "..",
+            "asset.txt:secret",
+            "bad\nname.txt",
+            "trailing.",
+            "trailing ",
+            "CON",
+            "nul.txt",
+            "COM1.log",
+            "COM1 .log",
+            "LPT9",
+            "x" * 256,
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "文件名无效"):
+                    safe_filename(invalid)
     def test_put_read_and_check(self):
         with tempfile.TemporaryDirectory() as temporary:
             storage = LocalObjectStorage(

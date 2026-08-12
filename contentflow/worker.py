@@ -46,6 +46,7 @@ from .media_providers import (
     MediaProviderError,
     build_media_provider,
     download_generated_media,
+    media_provider_profile_fingerprint,
 )
 from .object_storage import build_object_storage
 from .prompt_eval import execute_prompt_eval_run
@@ -316,11 +317,20 @@ def _store_generation(
     settings: Settings,
     generation,
 ) -> None:
-    data = download_generated_media(
-        generation,
-        max_bytes=settings.max_upload_bytes,
-        allowed_hosts=tuple(settings.media_download_allowed_hosts),
-    )
+    try:
+        data = download_generated_media(
+            generation,
+            max_bytes=settings.max_upload_bytes,
+            allowed_hosts=tuple(settings.media_download_allowed_hosts),
+            require_https=settings.production,
+        )
+    except MediaProviderError:
+        raise
+    except ValueError:
+        raise MediaProviderError(
+            "素材下载结果违反安全或大小边界",
+            retryable=False,
+        ) from None
     filename = generation.filename or (
         "asset.png" if asset.kind == "image" else "asset.mp4"
     )
@@ -377,12 +387,17 @@ def handle_asset_generate(
         return {"asset_id": asset.id, "status": asset.status}
     asset.status = "generating"
     provider = build_media_provider(settings, asset.kind)
+    provider_profile = media_provider_profile_fingerprint(settings, asset.kind)
     generation = provider.generate(
         kind=asset.kind,
         prompt=asset.prompt or "",
         metadata=dict(asset.metadata_json or {}),
         idempotency_key=media_generation_idempotency_key(asset),
     )
+    generation.metadata = {
+        **generation.metadata,
+        "media_provider_profile_fingerprint": provider_profile,
+    }
     if generation.status == "processing":
         if not generation.external_task_id:
             raise RuntimeError("异步素材任务没有 external_task_id")
@@ -427,6 +442,15 @@ def handle_asset_poll(
         return {"asset_id": asset.id, "status": asset.status}
     if not asset.external_task_id:
         raise ValueError("素材任务缺少 external_task_id")
+    expected_profile = (asset.metadata_json or {}).get(
+        "media_provider_profile_fingerprint"
+    )
+    current_profile = media_provider_profile_fingerprint(settings, asset.kind)
+    if not isinstance(expected_profile, str) or expected_profile != current_profile:
+        raise MediaProviderError(
+            "异步素材任务的 Provider 配置已变化或缺少目标指纹，请人工核对",
+            retryable=False,
+        )
     provider = build_media_provider(settings, asset.kind)
     generation = provider.poll(asset.external_task_id)
     if generation.status == "processing":

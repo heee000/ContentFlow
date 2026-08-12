@@ -33,6 +33,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ImageGenerationResponse'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/ContractError'
+        '403':
+          $ref: '#/components/responses/ContractError'
+        '409':
+          $ref: '#/components/responses/ContractError'
+        '429':
+          $ref: '#/components/responses/ContractError'
+        '500':
+          $ref: '#/components/responses/ContractError'
         default:
           $ref: '#/components/responses/ContractError'
   /videos/generations:
@@ -67,6 +79,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/VideoGenerationResponse'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/ContractError'
+        '403':
+          $ref: '#/components/responses/ContractError'
+        '409':
+          $ref: '#/components/responses/ContractError'
+        '429':
+          $ref: '#/components/responses/ContractError'
+        '500':
+          $ref: '#/components/responses/ContractError'
         default:
           $ref: '#/components/responses/ContractError'
   /videos/generations/{task_id}:
@@ -82,6 +106,7 @@ paths:
             type: string
             minLength: 1
             maxLength: 255
+          pattern: '^[^\u0000-\u001F\u007F]*$'
       responses:
         '200':
           description: Current generation state
@@ -92,6 +117,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/VideoGenerationResponse'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/ContractError'
+        '403':
+          $ref: '#/components/responses/ContractError'
+        '404':
+          $ref: '#/components/responses/ContractError'
+        '429':
+          $ref: '#/components/responses/ContractError'
+        '500':
+          $ref: '#/components/responses/ContractError'
         default:
           $ref: '#/components/responses/ContractError'
 components:
@@ -114,12 +151,15 @@ components:
       description: >-
         Opaque key for one logical generation. Reusing the key with the same
         request returns the original result; reusing it with a different request
-        returns HTTP 409.
+        returns HTTP 409 with error.code=idempotency_conflict. The service must
+        retain the key and its canonical request identity for at least 24 hours.
+        Leading or trailing whitespace is invalid; the opaque key must not be trimmed.
+      x-contentflow-idempotency-retention-hours: 24
       schema:
         type: string
         minLength: 8
         maxLength: 128
-        pattern: '^[\x20-\x7E]+$'
+        pattern: '^[\x21-\x7E](?:[\x20-\x7E]*[\x21-\x7E])?$'
   headers:
     ContractVersion:
       required: true
@@ -161,7 +201,41 @@ components:
         shots:
           type: array
           maxItems: 100
-          items: {}
+          x-contentflow-max-canonical-json-bytes: 262144
+          items:
+            $ref: '#/components/schemas/Shot'
+    Shot:
+      oneOf:
+        - type: string
+          minLength: 1
+          maxLength: 5000
+          pattern: '^[^\u0000-\u001F\u007F]+$'
+        - type: object
+          additionalProperties: false
+          minProperties: 1
+          properties:
+            time:
+              $ref: '#/components/schemas/ShotText'
+            visual:
+              $ref: '#/components/schemas/ShotText'
+            voiceover:
+              $ref: '#/components/schemas/ShotText'
+            subtitle:
+              $ref: '#/components/schemas/ShotText'
+    ShotText:
+      type: string
+      minLength: 1
+      maxLength: 5000
+      pattern: '^[^\u0000-\u001F\u007F]+$'
+    PortableFilename:
+      type: string
+      minLength: 1
+      maxLength: 255
+      description: >-
+        Cross-platform basename. It excludes filesystem control and reserved
+        characters, trailing space or dot, dot-only names, and Windows device
+        stems, including those followed by spaces or an extension.
+      pattern: '^(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Ll][Oo][Cc][Kk]\$|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:[ .]*\.|[ .]*$))(?!\.{1,2}$)[^<>:"/\\|?*\u0000-\u001F\u007F]*[^<>:"/\\|?* .\u0000-\u001F\u007F]$'
     ImageGenerationRequest:
       type: object
       additionalProperties: false
@@ -171,6 +245,7 @@ components:
           type: string
           minLength: 1
           maxLength: 200
+          pattern: '^\S(?:[^\u0000-\u001F\u007F]*\S)?$'
         prompt:
           type: string
           minLength: 1
@@ -189,6 +264,7 @@ components:
           type: string
           minLength: 1
           maxLength: 200
+          pattern: '^\S(?:[^\u0000-\u001F\u007F]*\S)?$'
         prompt:
           type: string
           minLength: 1
@@ -201,13 +277,16 @@ components:
       properties:
         request_id:
           type: string
+          minLength: 1
           maxLength: 255
+          pattern: '^[^\u0000-\u001F\u007F]+$'
     ImageResult:
       type: object
       additionalProperties: false
       properties:
         b64_json:
           type: string
+          minLength: 4
           contentEncoding: base64
         url:
           type: string
@@ -220,9 +299,9 @@ components:
         mime_type:
           type: string
           maxLength: 120
+          pattern: '^[^\s/]+/[^\s/]+$'
         filename:
-          type: string
-          maxLength: 255
+          $ref: '#/components/schemas/PortableFilename'
       oneOf:
         - required: [b64_json]
         - required: [url]
@@ -233,10 +312,14 @@ components:
       properties:
         request_id:
           type: string
+          minLength: 1
           maxLength: 255
+          pattern: '^[^\u0000-\u001F\u007F]+$'
         requestId:
           type: string
+          minLength: 1
           maxLength: 255
+          pattern: '^[^\u0000-\u001F\u007F]+$'
         data:
           oneOf:
             - $ref: '#/components/schemas/ImageResult'
@@ -246,6 +329,8 @@ components:
               items:
                 $ref: '#/components/schemas/ImageResult'
       required: [data]
+      not:
+        required: [request_id, requestId]
     VideoResult:
       type: object
       additionalProperties: false
@@ -255,13 +340,15 @@ components:
           type: string
           minLength: 1
           maxLength: 255
+          pattern: '^[^\u0000-\u001F\u007F]+$'
         task_id:
           type: string
           minLength: 1
           maxLength: 255
+          pattern: '^[^\u0000-\u001F\u007F]+$'
         status:
           type: string
-          enum: [queued, pending, processing, running, ready, completed, succeeded]
+          enum: [queued, pending, processing, running, ready, completed, succeeded, failed, cancelled, expired]
         url:
           type: string
           format: uri
@@ -273,20 +360,67 @@ components:
         mime_type:
           type: string
           maxLength: 120
+          pattern: '^[^\s/]+/[^\s/]+$'
         filename:
-          type: string
-          maxLength: 255
+          $ref: '#/components/schemas/PortableFilename'
+        error:
+          $ref: '#/components/schemas/ErrorDetail'
+      oneOf:
+        - properties:
+            status:
+              enum: [queued, pending, processing, running]
+          anyOf:
+            - required: [id]
+            - required: [task_id]
+          not:
+            anyOf:
+              - required: [url]
+              - required: [download_url]
+              - required: [error]
+        - properties:
+            status:
+              enum: [ready, completed, succeeded]
+          oneOf:
+            - required: [url]
+              not:
+                required: [download_url]
+            - required: [download_url]
+              not:
+                required: [url]
+          not:
+            required: [error]
+        - properties:
+            status:
+              enum: [failed, cancelled, expired]
+            error:
+              allOf:
+                - $ref: '#/components/schemas/ErrorDetail'
+                - type: object
+                  properties:
+                    retryable:
+                      const: false
+          required: [error]
+          not:
+            anyOf:
+              - required: [url]
+              - required: [download_url]
     VideoGenerationResponse:
       type: object
       additionalProperties: false
       required: [data]
+      not:
+        required: [request_id, requestId]
       properties:
         request_id:
           type: string
+          minLength: 1
           maxLength: 255
+          pattern: '^[^\u0000-\u001F\u007F]+$'
         requestId:
           type: string
+          minLength: 1
           maxLength: 255
+          pattern: '^[^\u0000-\u001F\u007F]+$'
         data:
           $ref: '#/components/schemas/VideoResult'
     ErrorResponse:
@@ -296,19 +430,29 @@ components:
       properties:
         request_id:
           type: string
+          minLength: 1
           maxLength: 255
+          pattern: '^[^\u0000-\u001F\u007F]+$'
         error:
-          type: object
-          additionalProperties: false
-          required: [code, message, retryable]
-          properties:
-            code:
-              type: string
-              minLength: 1
-              maxLength: 80
-            message:
-              type: string
-              minLength: 1
-              maxLength: 500
-            retryable:
-              type: boolean
+          $ref: '#/components/schemas/ErrorDetail'
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 80
+          pattern: '^[A-Za-z0-9._-]+$'
+          description: >-
+            Stable machine code. Unsupported ContentFlow-Media-Version uses
+            contract_version_unsupported; HTTP 409 caused by reusing an
+            idempotency key with a different request uses idempotency_conflict.
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500
+          pattern: '^[^\u0000-\u001F\u007F]+$'
+        retryable:
+          type: boolean
