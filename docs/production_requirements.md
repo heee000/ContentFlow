@@ -107,7 +107,7 @@
 ### 最终生产发布门禁
 
 - [x] 仓库已发布供应商中立的 Media Contract v1 OpenAPI、版本头、稳定生成幂等键、请求参数白名单、永久/暂时错误分类、有界 `Retry-After` 和 Worker 终态回归测试；实现提交 `58238f3fc694da4ab884ed3d0c158b9e49bc593e` 已由 [ContentFlow CI #31390831127](https://github.com/heee000/ContentFlow/actions/runs/31390831127) 完成真实 PostgreSQL/pgvector、MinIO、Linux、覆盖率、双构建和双端安全审计签收。
-- [x] 2026-08-12 正式媒体运行时已与 v1/runner 对齐：响应有界、封闭信封、状态/来源/标识互斥、跨平台文件名、精确下载 allowlist、逐跳重定向、配置漂移和脱敏错误均有本地回归；live 报告升级为运行级 HMAC 指纹与完整 JSON 转义秘密扫描，幂等键拒绝首尾空白。全量 177 passed、7 skipped、130 subtests，分支覆盖率 82.13%，Ruff、锁文件、pip/npm 审计、前端双构建、Compose 与 15 个 YAML/JSON 解析通过。实现提交 `8a79658` 已推送到功能分支，但该 push 不触发现有 workflow，当前 Actions 运行数为 0，因此不能标为远程签收。
+- [x] 2026-08-12 正式媒体运行时已与 v1/runner 对齐：响应有界、封闭信封、状态/来源/标识互斥、跨平台文件名、精确下载 allowlist、逐跳重定向、配置漂移和脱敏错误均有本地回归；live 报告升级为运行级 HMAC 指纹与完整 JSON 转义秘密扫描，幂等键拒绝首尾空白。全量 177 passed、7 skipped、130 subtests，分支覆盖率 82.13%，Ruff、锁文件、pip/npm 审计、前端双构建、Compose 与 15 个 YAML/JSON 解析通过。实现提交 `8a79658` 与证据提交 `285de6a` 已普通快进同步到 `main`；[ContentFlow CI #31560723174](https://github.com/heee000/ContentFlow/actions/runs/31560723174) 为 success，后端真实 PostgreSQL/pgvector/MinIO 与前端双 Job 已远程签收。
 - [ ] 使用目标环境的真实模型与媒体 Provider 完成调用和 v1 conformance matrix，记录请求模式、错误、时延、令牌/成本、同键不重复计费，以及视频任务轮询、下载和过期行为。
 - [ ] live runner 当前尚未取得目标媒体 Base、API Key、模型名和下载域名，因此没有执行真实媒体生成；自动探针也不能替代限流/超时/审核/下载过期测试钩子、账单核对和人工质量签收。
 - [x] 在用户授权和 `auto_publish=false` 前提下完成微信公众号真实鉴权、素材/草稿计数与一份“不发布”草稿验收；未调用公开发布提交接口。
