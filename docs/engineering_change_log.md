@@ -254,6 +254,17 @@
 - 验证：提交推送后检查 GitHub Commit API 的 author.login、Contributors API、Description 与 Topics；不使用强制推送，不修改或重写历史提交。
 - 剩余边界：既有提交仍保留原始作者元数据和 SHA，这是保护公开历史的刻意选择；GitHub Contributors 统计可能存在短暂缓存，但新提交的账号归属不依赖历史改写。
 
+### CF-20260812-24：历史提交未关联 GitHub 账号
+
+- 状态：用户已明确授权历史重写和 `force-with-lease`；隔离镜像已完成身份迁移与逐提交树校验，本条提交记录迁移映射，远程分支与 CI 在推送后复核。
+- 问题与影响：默认分支前 21 个提交使用不可关联 GitHub 账号的 `ContentFlow Builder <contentflow-builder@users.noreply.local>`，GitHub Contributors 与个人贡献记录将其显示为匿名，只有最近 2 个提交归属 `@heee000`。
+- 根因：仓库早期自动化提交使用本地 `.local` 占位邮箱；GitHub 按提交 author email 关联账号，无法把该通用地址添加为账号验证邮箱。
+- 解决方案：在隔离裸仓库中重建 9 个分支的 30 个可达提交；只把完全匹配旧身份的 21 个提交改为 `John Wang <182348029+heee000@users.noreply.github.com>`，保留原始树、消息、作者时间和提交时间；父 SHA 随历史重写映射，Dependabot 作者身份保留。
+- 涉及范围：`main`、`codex/enterprise-media-runtime` 与 7 个 Dependabot 分支；完整旧→新 SHA 映射见 [Git 历史身份重写映射](git_history_rewrite_20260812.md)。
+- 安全措施：重写前 9 个分支已生成完整 Git bundle 并验证，bundle SHA-256 为 `196FB9C6EF87E1B8A964E22E6A16CE7CCF5DAEB5ED9711A40A3AE873E36B476F`；推送必须逐分支声明旧 tip 的 `force-with-lease` 并使用 atomic，任一远端分支变化则整组拒绝。
+- 验证：30 个新旧提交逐项验证 tree SHA 完全一致；重写基础 `main` 含 23 个提交且全部归属 `John Wang (@heee000)`；可达历史中旧 `.local` 邮箱为 0。
+- 副作用：7 个 Dependabot 提交因父 SHA 改变，原 GitHub Bot GPG 签名不再适用于新对象并已移除；作者仍为 `dependabot[bot]`。既有文档保留旧 SHA 与历史 CI 链接作为原始证据，新旧对应关系由映射文档解释，不能把旧 CI 误称为验证过新 SHA。
+- 剩余边界：GitHub Contributors 与贡献日历存在缓存，官方说明可能需要约 24 小时刷新；7 个开放 Dependabot PR 必须在推送后逐项核验仍开放且 diff 未丢失。
 ## 4. 阶段签收清单
 
 | 门禁 | 当前结果 |

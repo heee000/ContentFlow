@@ -260,5 +260,6 @@ npm audit --audit-level=moderate
 - [生产化验收清单](docs/production_requirements.md)
 - [外部服务真实验收记录](docs/external_acceptance.md)
 - [工程变更台账](docs/engineering_change_log.md)
+- [Git 历史身份重写映射](docs/git_history_rewrite_20260812.md)
 - [企业成熟度持续复审](docs/enterprise_readiness_review.md)
 - [项目交接与现场规则](docs/CONTENTFLOW_HANDOFF.md)
