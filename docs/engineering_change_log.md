@@ -314,17 +314,17 @@
 
 ### CF-20260813-04：脚本发布结果缺少可校验证据和职责分离
 
-- 状态：本地实现与复审完成，等待当前提交的远程 CI 签收。
+- 状态：已由修复提交 `8294a09de3581002d6606b53753826537473a6bb` 的 [ContentFlow CI #31715817953](https://github.com/heee000/ContentFlow/actions/runs/31715817953) 签收；四个 Job 全部 success。
 - 问题与影响：原脚本通道只要求 reviewer 填写结果和理由，单人误操作、错误任务包、事后追加附件或对象被替换都可能造成无法可靠复核的成功记录。
 - 根因：发布任务没有独立脚本尝试标识、证据实体、规范化摘要、证据清单和确认实体；渠道也没有可选双人策略，任务包下载地址会被最终平台 URL 覆盖。
 - 解决方案：每次任务包生成独立 UUID `script_attempt_id` 并绑定包 SHA-256；新增截图/平台 JSON 证据上传、列表和授权下载。PNG/JPEG/WebP 经 Pillow 解码、像素/帧限制和服务端重编码去元数据，JSON 限对象/数组并规范化；对象写入后校验长度与 SHA-256，下载再次按数据库摘要复验。新增不可由 API 修改的确认记录；脚本渠道可选 1 或 2 人确认，双人模式要求不同 reviewer 针对同一尝试、任务包和证据 manifest 作出相同决定，第一次确认后冻结证据，决定或平台引用冲突返回 409。任务包 URI 独立保留，使待二次确认和终态仍能下载核验。
 - 涉及文件：`contentflow/publish_evidence.py`、`contentflow/routers/publish_evidence.py`、`contentflow/entities.py`、`contentflow/schemas.py`、`contentflow/routers/publishing.py`、`contentflow/routers/channels.py`、`contentflow/script_publishing.py`、`contentflow/worker.py`、`contentflow/api.py`、`web/app/contentflow-app.tsx`、相关测试和用户/运维文档。
-- 验证：规范化单元测试覆盖图片去元数据的确定输出、JSON 规范化、重复键/100 层以上嵌套/畸形输入拒绝、manifest 稳定性和尝试绑定；端到端覆盖无证据拒绝、授权上传/下载与摘要、跨工作区 404、首人冻结、同人重复拒绝、第二名一致确认、冲突决定拒绝和终态。迁移结构覆盖约束、唯一键、复合索引、旧 head 接管和半组表失败关闭；后端全量 `206 passed, 7 skipped, 135 subtests passed`，前端 ESLint/生产构建与其余本地门禁通过；远程 CI 结果在本阶段签收后回填。
+- 验证：规范化单元测试覆盖图片去元数据的确定输出、JSON 规范化、重复键/100 层以上嵌套/畸形输入拒绝、manifest 稳定性和尝试绑定；端到端覆盖无证据拒绝、授权上传/下载与摘要、跨工作区 404、首人冻结、同人重复拒绝、第二名一致确认、冲突决定拒绝和终态。迁移结构覆盖约束、唯一键、复合索引、旧 head 接管和半组表失败关闭；本地后端 `206 passed, 7 skipped, 135 subtests passed`。成功 CI Backend 为 `213 passed, 135 subtests passed`、覆盖率 83.33%，真实 PostgreSQL/pgvector、MinIO 与依赖审计通过；Frontend、SBOM/可复现源码和签名证明 Job 同时成功。Artifact `9187195019` 摘要为 `sha256:37cfa753125f76d76a974efe7f6420ff6ee64e2c161d6d7a9bdb33fa82b593bf`。
 - 剩余边界：应用层记录不是平台签名回执、可信时间戳或 WORM 法律证据；数据库管理员仍可绕过 API 改表；对象写入后若数据库事务失败可能留下孤儿对象；没有恶意软件/DLP、法务保留、自动平台交叉核验、确认到期/升级或真正组织级职责分离策略。
 
 ### CF-20260813-05：新增迁移未同步灾备默认门槛
 
-- 状态：本地修复完成，等待当前提交的远程 PostgreSQL/MinIO 与恢复门禁签收。
+- 状态：迁移已由提交 `8294a09de3581002d6606b53753826537473a6bb` 的 [ContentFlow CI #31715817953](https://github.com/heee000/ContentFlow/actions/runs/31715817953) 在真实 PostgreSQL/pgvector 与 MinIO 环境签收；26 表联合恢复演练仍待独立执行。
 - 问题与影响：发布证据新增两张表后，备份和恢复脚本仍默认旧 head 与 24 张表，会错误拒绝当前备份，或允许运维继续按旧结构判断完整性。
 - 根因：数据库功能迁移与灾备脚本默认值没有作为同一变更面维护；首版 SHA-256 长度约束还曾被误嵌入 kind 约束，差异复核时发现且未进入提交。
 - 解决方案：修正迁移为独立 kind/size/SHA-256 约束并补断言；备份默认 revision 更新为 `e28a6b9c4f10`，恢复最低 public 表数更新为 26；运维和交接文档同步当前事实，历史演练保留为历史证据而不冒充当前签收。
@@ -334,10 +334,11 @@
 
 ### CF-20260813-06：CI 的 MinIO 边界 fixture 未同步证据上传上限
 
-- 状态：修复已完成，等待下一次远程 CI 签收。
+- 状态：修复已由提交 `8294a09de3581002d6606b53753826537473a6bb` 的 [ContentFlow CI #31715817953](https://github.com/heee000/ContentFlow/actions/runs/31715817953) 签收；四个 Job 全部 success。
 - 问题与影响：实现提交 `20ff9d30179382822af0fca0cabc99152d0dd339` 的 [ContentFlow CI #31715306166](https://github.com/heee000/ContentFlow/actions/runs/31715306166) 中，Frontend 与 SBOM/可复现源码 Job 成功，但 Backend Job 在真实 MinIO fixture 初始化时失败，签名 Job 因依赖失败按设计跳过。
 - 根因：该 fixture 为验证 64 字节对象边界显式设置 `max_upload_bytes=64`；新增跨字段保护要求 `publish_evidence_max_bytes <= max_upload_bytes`，但 fixture 仍使用默认 10 MiB。失败发生在测试设置构造阶段，不是 PostgreSQL 迁移、MinIO 读写或产品运行时失败。
 - 解决方案：只在该专用 fixture 显式设置 `publish_evidence_max_bytes=64`，保持生产默认 10 MiB 和“证据上限不得超过通用上限”的失败关闭保护不变。
 - 涉及文件：`tests/test_minio_integration.py`、`docs/engineering_change_log.md`。
 - 验证：本地安全+MinIO 专项 `33 passed, 2 skipped, 28 subtests passed`；CI 失败运行中的其余测试为 `211 passed, 135 subtests passed`、覆盖率 82.56%。真实 MinIO 两项将在下一次 CI 中执行，不用本地跳过结果冒充签收。
-- 剩余边界：该修复只纠正测试 fixture；当前 head 的真实 PostgreSQL/MinIO、供应链证明和四 Job 全绿仍必须由新提交重新取得。
+- 验证补充：成功运行中 Backend 为 `213 passed, 135 subtests passed`、覆盖率 83.33%，Python 审计 0 已知漏洞；Frontend、SBOM/可复现源码、SLSA provenance 与双 CycloneDX attest/反向验证全部成功。Artifact `9187195019` 摘要为 `sha256:37cfa753125f76d76a974efe7f6420ff6ee64e2c161d6d7a9bdb33fa82b593bf`。
+- 剩余边界：该修复只纠正测试 fixture；成功 CI 不等于 26 表数据库+对象联合恢复、PITR/异地或真实平台账号签收。

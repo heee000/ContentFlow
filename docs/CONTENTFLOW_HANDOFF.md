@@ -1509,7 +1509,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 
 ### 当前验证与事实边界
 
-- 迁移编译和 11 项空库/接管/半迁移/降级测试通过；证据规范化与端到端流程覆盖上传、下载摘要、跨工作区 404、冻结、同人重复、冲突和第二人确认。后端全量 `206 passed, 7 skipped, 135 subtests passed`；Ruff、Python 编译、依赖/锁文件、前端 ESLint/生产构建、默认与 observability Compose、灾备脚本语法均通过。当前提交的 GitHub Actions run 在签收后回填。
+- 迁移编译和 11 项空库/接管/半迁移/降级测试通过；证据规范化与端到端流程覆盖上传、下载摘要、跨工作区 404、冻结、同人重复、冲突和第二人确认。后端全量 `206 passed, 7 skipped, 135 subtests passed`；Ruff、Python 编译、依赖/锁文件、前端 ESLint/生产构建、默认与 observability Compose、灾备脚本语法均通过。实现提交 `20ff9d30179382822af0fca0cabc99152d0dd339` 的首轮 CI `31715306166` 因 MinIO 64 字节 fixture 未同步证据上限失败；修复提交 `8294a09de3581002d6606b53753826537473a6bb` 的 [ContentFlow CI #31715817953](https://github.com/heee000/ContentFlow/actions/runs/31715817953) 四个 Job 全部成功。Backend 为 `213 passed, 135 subtests passed`、覆盖率 83.33%，真实 PostgreSQL/pgvector、MinIO 与依赖审计通过；Artifact `9187195019` 摘要为 `sha256:37cfa753125f76d76a974efe7f6420ff6ee64e2c161d6d7a9bdb33fa82b593bf`，SLSA 与双 CycloneDX 证明已发布并反向验证。
 - `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_BYTES` 默认 10 MiB，`CONTENTFLOW_PUBLISH_EVIDENCE_MAX_PIXELS` 默认 4000 万；前者不能超过通用上传上限。
 - 当前是应用层可审计证据，不是平台签名回执、可信时间戳或 WORM 法律证据；数据库管理员可绕过 API，写对象后事务失败可留下孤儿，尚无恶意扫描/DLP/法务保留。
 - 双人模式只有不同用户与一致性约束，不含岗位冲突、step-up MFA、确认到期/升级/委派。启用前应确保至少两名可用 reviewer，否则任务会合理停留在待二次确认。
