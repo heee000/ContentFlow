@@ -51,6 +51,8 @@
 - [x] Media Contract v1 live conformance runner：显式计费确认、HTTPS/目标校验、同键重放/冲突、版本/鉴权拒绝、视频轮询、响应上限、下载域名校验与脱敏独占报告；异步任务保存非敏感目标配置指纹并在配置漂移时失败关闭。
 - [x] 抖音：OAuth 凭据校验、视频上传/创建和数据拉取；图片发布与审核回调不冒充已实现。
 - [x] 公众号：封面素材、草稿和可选发布提交；可用能力由账号接口权限决定。
+- [x] 脚本辅助发布：小红书/抖音/公众号可显式选择无平台凭据的本机 Playwright 辅助；任务包带 SHA-256、固定依赖、官方入口 allowlist 和人工最终提交门禁，结果人工回填。
+- [x] 安全发布降级：仅无外部副作用的 scheduled/queued/failed/exported 可切脚本；publishing/submitted/reconciliation_required 必须先对账，自动指标拉取拒绝非 API 任务。
 - [x] 小红书：在缺少公开发布资质时提供审核后的导出包，不伪造自动发布成功。
 
 ## 4. 运营工作台
@@ -58,7 +60,7 @@
 - [x] 登录、注册、工作区创建/切换、成员增删改角色与最后管理员保护；PostgreSQL 管理操作锁定 Workspace 行，避免并发降级/移除留下零管理员。
 - [x] 总览、活动创建/编辑/归档、知识库、可回看全部内容及版本的审核台、素材库、发布排期/取消、连接器、人工指标录入与数据复盘、任务队列，以及包含 Prompt Eval 套件/运行证据、Prompt 审批/发布/回滚的团队管理与审计。
 - [x] Web 操作与 `viewer/editor/reviewer/admin` 权限保持一致，只读成员不会看到上传、重试或审批入口。
-- [x] 清晰展示每一步状态、来源引用、失败原因、重试与人工确认。
+- [x] 清晰展示每一步状态、来源引用、失败原因、发布方式、脚本包下载/结果回填、重试与人工确认。
 - [x] 响应式布局、键盘可操作、空状态、加载状态和错误状态。
 
 ## 5. 当前验收结论（2026-08-03）
@@ -93,7 +95,7 @@
 - [x] 生产受治理 Prompt 提交 `47fe3444d9a4a2f7c2c8a284c4e6b0b95fcad4c2` 已由 [ContentFlow CI #31364881430](https://github.com/heee000/ContentFlow/actions/runs/31364881430) 完成真实 PostgreSQL/pgvector、MinIO、覆盖率、双端构建与依赖安全签收。
 - [x] 受保护 Prometheus 指标提交 `fe3ee101799e36dc05e644f51efbca8204cc7b02` 已由 [ContentFlow CI #31367481260](https://github.com/heee000/ContentFlow/actions/runs/31367481260) 签收鉴权、低基数标签、异常安全返回、生产 fail-fast、真实 PostgreSQL Collector、MinIO、覆盖率和双端构建/安全门禁。
 - [x] Prometheus/Grafana 交付资产已通过本地 YAML/JSON/Compose 契约与同版本 promtool 验证；提交 `c9d73101e7318da5fed5e496ad9a78eb7fb09832` 的 [ContentFlow CI #31374854714](https://github.com/heee000/ContentFlow/actions/runs/31374854714) 已完成固定 promtool 配置/规则/故障行为、真实 PostgreSQL/MinIO 和双端安全签收。
-- [x] 2026-08-13 已实现 Python/前端 CycloneDX、可复现源码归档、SHA-256 清单、离线失败关闭校验，以及只在非 PR 运行的 SLSA/CycloneDX GitHub Artifact Attestations；本地真实材料为 144 个跟踪文件、76 个 Python 组件、620 个前端组件，两次源码归档 SHA-256 一致。远程签名证明需由本条所在提交的 CI 回填 URL 后才算签收。
+- [x] 2026-08-13 已实现 Python/前端 CycloneDX、可复现源码归档、SHA-256 清单、离线失败关闭校验，以及只在非 PR 运行的 SLSA/CycloneDX GitHub Artifact Attestations；本地真实材料为 144 个跟踪文件、76 个 Python 组件、620 个前端组件，两次源码归档 SHA-256 一致。提交 `38ad07c64d60f19330b4f4b42aebcdd328a4cd63` 已由 [ContentFlow CI #31691997756](https://github.com/heee000/ContentFlow/actions/runs/31691997756) 签收四个 Job；Artifact `9177772957` 摘要为 `sha256:5dad8fa59cab27e89b7a127dd718270f68faab19bea27b9a988d26ac8fbd481b`，SLSA/Python/前端三份证明已在同一证明 Job 中发布并验证。
 - [ ] 受保护分支必需检查、浏览器 E2E、双 Worker/SIGKILL/数据库闪断、PITR/异地恢复、OCI 镜像扫描/签名、独立迁移与灰度回滚仍待补齐。
 - [ ] 2026-08-08 未重新跑完整 Compose 栈：Docker Hub 拉取 python:3.12-slim 时网络失败；PostgreSQL 16/pgvector 单服务的 SKIP LOCKED、内容冲突和取消/分发竞态验证已通过，但不能替代完整栈验收。
 

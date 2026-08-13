@@ -50,6 +50,7 @@ from .media_providers import (
 )
 from .object_storage import build_object_storage
 from .prompt_eval import execute_prompt_eval_run
+from .script_publishing import build_script_package, store_script_package
 from .settings import Settings, get_settings
 from .workflow_service import execute_workflow_run
 
@@ -590,6 +591,8 @@ def handle_publish_dispatch(
         "cancelled",
         "published",
         "exported",
+        "script_ready",
+        "script_published",
         "draft_created",
         "submitted",
     }:
@@ -629,11 +632,76 @@ def handle_publish_dispatch(
     unfinished = [asset.id for asset in assets if asset.status != "ready"]
     if unfinished:
         raise ValueError(f"仍有素材未就绪: {', '.join(unfinished)}")
-    connector = build_connector(
-        channel=channel,
-        settings=settings,
-        storage=build_object_storage(settings),
-    )
+    delivery_mode = publish_job.delivery_mode
+    # Jobs queued before delivery modes were introduced used the connector default
+    # for Xiaohongshu's export-only channel. Preserve that already-supported path.
+    if (
+        delivery_mode == "connector"
+        and channel.platform == "xiaohongshu"
+        and channel.status == "export_only"
+    ):
+        delivery_mode = "manual_export"
+        request_json = dict(publish_job.request_json or {})
+        request_json["delivery_mode"] = delivery_mode
+        publish_job.request_json = request_json
+    if delivery_mode not in {"connector", "script", "manual_export"}:
+        raise ValueError(f"未知发布方式: {delivery_mode}")
+    if delivery_mode == "connector" and channel.status != "connected":
+        raise ValueError("官方 API 发布要求已通过连接测试的 connected 渠道")
+    if delivery_mode == "manual_export" and channel.platform != "xiaohongshu":
+        raise ValueError("人工导出目前只适用于小红书")
+
+    storage = build_object_storage(settings)
+    if delivery_mode == "script":
+        package = build_script_package(
+            publish_job=publish_job,
+            content=content,
+            channel=channel,
+            assets=assets,
+            storage=storage,
+            max_total_bytes=settings.max_upload_bytes,
+        )
+        stored = store_script_package(
+            package=package,
+            publish_job=publish_job,
+            storage=storage,
+        )
+        publish_job.status = "script_ready"
+        publish_job.attempts += 1
+        publish_job.external_id = None
+        publish_job.external_url = stored.uri
+        publish_job.response_json = {
+            "mode": "script",
+            "package_uri": stored.uri,
+            "package_sha256": stored.checksum,
+            "size_bytes": stored.size_bytes,
+            "platform": channel.platform,
+            "final_submission_requires_human": True,
+        }
+        publish_job.error = None
+        publish_job.published_at = None
+        record_audit(
+            session,
+            action="publish.script_package_ready",
+            entity_type="publish_job",
+            entity_id=publish_job.id,
+            workspace_id=publish_job.workspace_id,
+            actor_user_id=None,
+            metadata={
+                "channel_id": channel.id,
+                "package_sha256": stored.checksum,
+                "size_bytes": stored.size_bytes,
+            },
+        )
+        session.commit()
+        return {
+            "publish_job_id": publish_job.id,
+            "status": publish_job.status,
+            "external_id": publish_job.external_id,
+            "external_url": publish_job.external_url,
+        }
+
+    connector = build_connector(channel=channel, settings=settings, storage=storage)
 
     request_json = dict(publish_job.request_json or {})
     request_json["dispatch_token"] = (
@@ -769,6 +837,8 @@ def handle_publish_reconcile(
         "cancelled",
         "published",
         "exported",
+        "script_ready",
+        "script_published",
         "draft_created",
         "failed",
     }:
@@ -819,6 +889,8 @@ def handle_publish_reconcile(
         "cancelled",
         "published",
         "exported",
+        "script_ready",
+        "script_published",
         "draft_created",
         "failed",
     }

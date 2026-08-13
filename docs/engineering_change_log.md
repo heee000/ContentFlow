@@ -284,7 +284,7 @@
 
 ### CF-20260813-01：交付源码和依赖没有可独立验证的供应链证明
 
-- 状态：本地实现与真实材料验证通过；远程 CI、Artifact 和三份 GitHub Attestations 待本条所在提交推送后回填。
+- 状态：已由提交 `38ad07c64d60f19330b4f4b42aebcdd328a4cd63` 的 [ContentFlow CI #31691997756](https://github.com/heee000/ContentFlow/actions/runs/31691997756) 签收；Backend、Frontend、SBOM/可复现源码和签名证明四个 Job 全部 success。Artifact `9177772957` 未过期，摘要为 `sha256:5dad8fa59cab27e89b7a127dd718270f68faab19bea27b9a988d26ac8fbd481b`；证明 Job 已发布并反向验证 SLSA 来源、Python CycloneDX 与前端 CycloneDX 三份 attestation。
 - 问题与影响：仓库已有 uv/npm 锁、依赖审计和固定 SHA Action，但接收方无法证明下载的源码归档对应哪个 commit，也没有可携带的 Python/前端依赖清单、摘要清单和签名来源；CI 成功页面不能独立绑定某个下载文件。
 - 根因：质量门禁只消费测试/审计结果，没有把源码、依赖清单、摘要和 OIDC 签名组织成可下载、可复验的交付制品；工作流所有 Job 共用全局只读权限，尚未设计证明写权限的最小作用域。
 - 解决方案：新增 `scripts/supply_chain.py`，生成零时间戳 gzip 包装的 `git archive`，要求声明 commit 与 checkout 一致，并在验证时重新生成摘要、比对 `git ls-files`、拒绝私钥/本地环境/`.contentflow` 路径；解析 Python/npm CycloneDX，归并 npm 相同身份的多安装路径，检查组件版本、唯一 purl、依赖图、漏洞字段和构建机绝对路径泄漏；生成和严格核验 `SHA256SUMS`。CI 新增只读 `supply-chain` Job 和仅非 PR 的 `attest-supply-chain` Job，后者等待 Backend/Frontend/SBOM 全部成功，再分别生成 SLSA 来源证明和两份 CycloneDX 证明，并用仓库、签名工作流和源码 SHA 反向验签。所有 checkout 禁止持久化令牌，新增 Action 固定到完整提交 SHA。
@@ -301,3 +301,13 @@
 - 涉及文件：`scripts/supply_chain.py`、`tests/test_supply_chain.py`。
 - 验证：真实 npm 清单从 627 归并到 620 项，重复 component/dependency ref 为 0，所有 dependsOn 都能解析；测试覆盖多路径归并和版本冲突拒绝。
 - 剩余边界：这是针对 npm 当前输出的保守兼容层，不替代 CycloneDX 官方 Schema 校验；npm 未来改变字段或引用语义时，未知冲突会主动阻断 CI，需要审查后版本化适配。
+
+### CF-20260813-03：API 不可用时缺少受控脚本发布通道
+
+- 状态：本地实现、全量门禁与生产构建通过；本条所在提交和远程 CI 待推送后回填。
+- 问题与影响：原系统只有官方连接器和小红书人工导出。平台 API 不支持、账号能力尚未开放或远程调用前明确失败时，运营只能离开系统手工复制，任务状态、内容版本、素材完整性、操作者和最终结果无法形成一致闭环。直接在 API 异常后自动启浏览器脚本又可能在平台已经受理时重复发布。
+- 根因：`PublishJob` 只有连接器隐式路径，没有发布方式、脚本包领域状态、人工结果回填和“确定失败/结果不确定”的降级门禁；渠道模型也默认等同于带凭据的 API 连接。
+- 解决方案：增加 `connector/script/manual_export` 显式方式并保存到既有 `request_json`，避免数据库迁移；脚本渠道拒绝凭据并使用 `script_only`。Worker 在平台副作用前生成确定性 ZIP，包含审核版本、素材、manifest、README、固定 Playwright 依赖、逐文件 SHA-256 和只打开内置官方入口的运行器；运行器使用平台/渠道隔离 profile、验证路径/哈希、尽力填充但不点击最终按钮。工作台支持选择方式、下载、人工登记结果、明确失败后改用脚本；`publishing/submitted/reconciliation_required` 强制先对账。脚本/导出任务不能调用自动指标回收。
+- 涉及文件：`contentflow/script_publishing.py`、`contentflow/entities.py`、`contentflow/schemas.py`、`contentflow/routers/channels.py`、`contentflow/routers/publishing.py`、`contentflow/routers/metrics.py`、`contentflow/worker.py`、`web/app/contentflow-app.tsx`、`tests/test_script_publishing.py`、`tests/test_script_publish_flow.py`、`tests/test_worker_v2.py` 及发布文档。
+- 验证：最终本地后端全量 `194 passed, 7 skipped, 130 subtests passed`，分支覆盖率 `82%`；Ruff 与锁文件检查通过；运行器源码从 ZIP 中取出后真实 `compile()`。测试覆盖可复现包、无凭据、完整哈希、官方入口/路径约束、不含 `.click(`、渠道拒绝凭据/远程测试、脚本排期—Worker—下载—人工结果、非 API 指标拒绝、确定失败切换、结果不确定禁止切换、旧小红书任务兼容。前端 ESLint、2 项渲染测试、Next.js 生产构建通过，`npm audit --audit-level=high` 为 0 vulnerabilities；远程 CI 待推送后回填。
+- 剩余边界：未以小红书/抖音真实账号执行浏览器 E2E；平台 DOM、登录挑战、声明/可见范围/定时发布控件会变化，当前选择器失败时只退化为人工复制；Playwright/Chromium 安装依赖外部下载，任务包未签代码签名；平台条款、账号风控和组织批准需逐平台确认；人工“已发布”证据仍依赖 reviewer 真实性，尚无截图/平台导出/双人复核与长期不可变证据。

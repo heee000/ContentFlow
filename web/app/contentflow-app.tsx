@@ -138,6 +138,7 @@ type PublishJob = {
   channel_id: string;
   status: string;
   scheduled_at: string;
+  delivery_mode: string;
   attempts: number;
   error: string | null;
   external_id: string | null;
@@ -443,6 +444,9 @@ const STATUS: Record<string, string> = {
   draft_created: "已建草稿",
   exported: "已导出",
   export_only: "导出模式",
+  script_only: "脚本模式",
+  script_ready: "脚本包就绪",
+  script_published: "脚本确认发布",
   error: "执行错误",
   failed: "失败",
   generating: "生成中",
@@ -466,6 +470,12 @@ const STATUS: Record<string, string> = {
   stale: "旧版本",
   submitted: "已提交",
   succeeded: "成功",
+};
+
+const DELIVERY_MODE: Record<string, string> = {
+  connector: "官方 API",
+  script: "脚本辅助",
+  manual_export: "人工导出",
 };
 
 const NAV: Array<{ id: View; label: string; icon: IconName }> = [
@@ -532,6 +542,8 @@ function StatusBadge({ value }: { value: string }) {
       : value === "approved" ||
           value === "ready" ||
           value === "published" ||
+          value === "script_published" ||
+          value === "script_ready" ||
           value === "exported" ||
           value === "succeeded" ||
           value === "indexed" ||
@@ -1912,6 +1924,7 @@ function PublishingView({
   const [pulling, setPulling] = useState("");
   const [cancelling, setCancelling] = useState("");
   const [reconciling, setReconciling] = useState("");
+  const [scriptBusy, setScriptBusy] = useState("");
   const [error, setError] = useState("");
   const canSchedule = roleAtLeast(role, "reviewer");
   const [defaultSchedule] = useState(() =>
@@ -1935,6 +1948,7 @@ function PublishingView({
         body: {
           content_item_id: form.get("content_item_id"),
           channel_id: form.get("channel_id"),
+          delivery_mode: form.get("delivery_mode"),
           scheduled_at: new Date(String(form.get("scheduled_at"))).toISOString(),
         },
       });
@@ -2016,13 +2030,65 @@ function PublishingView({
     }
   }
 
+  async function requestScriptPackage(job: PublishJob) {
+    if (!window.confirm("改用本机脚本辅助？请先确认平台没有生成草稿或发布结果，以免重复发布。")) return;
+    setScriptBusy(job.id);
+    setError("");
+    try {
+      await api(`/publishing/jobs/${job.id}/script-package`, { method: "POST" });
+      flash("脚本发布包已进入生成队列");
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setScriptBusy("");
+    }
+  }
+
+  async function recordScriptResult(
+    job: PublishJob,
+    decision: "confirmed_published" | "confirmed_not_published",
+  ) {
+    const confirmedPublished = decision === "confirmed_published";
+    const reason = window.prompt(
+      confirmedPublished
+        ? "请填写在平台后台核对到已发布的依据"
+        : "请填写在平台后台核对到未发布的依据",
+    );
+    if (!reason?.trim()) return;
+    const externalId = confirmedPublished
+      ? window.prompt("平台内容 ID（可选）")?.trim() || null
+      : null;
+    const externalUrl = confirmedPublished
+      ? window.prompt("平台内容链接（可选）")?.trim() || null
+      : null;
+    setScriptBusy(job.id);
+    setError("");
+    try {
+      await api(`/publishing/jobs/${job.id}/script-result`, {
+        method: "POST",
+        body: {
+          decision,
+          reason: reason.trim(),
+          external_id: externalId,
+          external_url: externalUrl,
+        },
+      });
+      flash(confirmedPublished ? "脚本发布结果已登记" : "已登记为未发布，可修正后重新生成脚本包");
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setScriptBusy("");
+    }
+  }
 
   return (
     <>
       <PageHeading
         eyebrow="Distribution"
         title="发布管理"
-        description="内容版本、平台连接和人工审核三项同时满足后，任务才会进入分发队列。"
+        description="审核通过后可选择官方 API、脚本辅助或人工导出；平台结果不确定时必须先对账，禁止直接切换以免重复发布。"
         action={canSchedule ? <Button onClick={() => setCreating((value) => !value)}><Icon name="plus" />安排发布</Button> : undefined}
       />
       {error ? <p className="inline-error">{error}</p> : null}
@@ -2043,6 +2109,14 @@ function PublishingView({
                 {channels.map((item) => <option key={item.id} value={item.id}>{PLATFORM[item.platform]} · {item.display_name}</option>)}
               </select>
             </label>
+            <label>发布方式
+              <select name="delivery_mode" required defaultValue="connector">
+                <option value="connector">官方 API</option>
+                <option value="script">本机脚本辅助（最终点击由人工完成）</option>
+                <option value="manual_export">人工导出（仅小红书）</option>
+              </select>
+              <small>若 API 结果不确定，系统会要求先人工对账，不会静默降级到脚本。</small>
+            </label>
             <label>发布时间
               <input
                 name="scheduled_at"
@@ -2057,18 +2131,36 @@ function PublishingView({
       ) : null}
       <section className="panel">
         <DataTable
-          headers={["内容", "平台连接", "计划时间", "尝试", "状态", "结果"]}
+          headers={["内容", "平台连接", "发布方式", "计划时间", "尝试", "状态", "结果"]}
           rows={publishes.map((job) => [
             contentMap[job.content_item_id]?.title || job.content_item_id,
             channelMap[job.channel_id]?.display_name || job.channel_id,
+            DELIVERY_MODE[job.delivery_mode] || job.delivery_mode,
             formatDateTime(job.scheduled_at),
             job.attempts,
             <StatusBadge key="status" value={job.status} />,
             <div className="table-actions" key="actions">
-              {job.status === "exported" ? (
+              {["exported", "script_ready"].includes(job.status) ? (
                 <button onClick={() => void download(`/publishing/jobs/${job.id}/artifact`, `contentflow-${job.id}.zip`)}>
-                  <Icon name="download" />下载投放包
+                  <Icon name="download" />{job.status === "script_ready" ? "下载脚本包" : "下载投放包"}
                 </button>
+              ) : null}
+              {canSchedule && job.status === "script_ready" ? (
+                <>
+                  <button
+                    disabled={scriptBusy === job.id}
+                    onClick={() => void recordScriptResult(job, "confirmed_published")}
+                  >
+                    登记已发布
+                  </button>
+                  <button
+                    className="danger-text"
+                    disabled={scriptBusy === job.id}
+                    onClick={() => void recordScriptResult(job, "confirmed_not_published")}
+                  >
+                    登记未发布
+                  </button>
+                </>
               ) : null}
               {canSchedule && job.status === "reconciliation_required" ? (
                 <>
@@ -2087,12 +2179,23 @@ function PublishingView({
                   </button>
                 </>
               ) : null}
-              {canSchedule && job.external_id && channelMap[job.channel_id]?.platform !== "xiaohongshu" ? (
+              {canSchedule && job.delivery_mode === "connector" && job.external_id && channelMap[job.channel_id]?.platform !== "xiaohongshu" ? (
                 <button
                   disabled={pulling === job.id}
                   onClick={() => void pullMetrics(job)}
                 >
                   回收指标
+                </button>
+              ) : null}
+              {canSchedule && (
+                job.status === "failed"
+                || (job.delivery_mode !== "script" && ["scheduled", "queued", "exported"].includes(job.status))
+              ) ? (
+                <button
+                  disabled={scriptBusy === job.id}
+                  onClick={() => void requestScriptPackage(job)}
+                >
+                  {job.delivery_mode === "script" ? "重新生成脚本包" : "改用脚本辅助"}
                 </button>
               ) : null}
               {canSchedule && ["scheduled", "queued"].includes(job.status) ? (
@@ -2104,10 +2207,10 @@ function PublishingView({
                   取消排期
                 </button>
               ) : null}
-              {!["scheduled", "queued", "exported"].includes(job.status) && job.external_id ? (
+              {!["scheduled", "queued", "exported", "script_ready"].includes(job.status) && job.external_id ? (
                 <span>ID {job.external_id}</span>
               ) : null}
-              {!job.external_id && !["scheduled", "queued", "reconciliation_required"].includes(job.status) ? <span>—</span> : null}
+              {!job.external_id && !["scheduled", "queued", "reconciliation_required", "script_ready"].includes(job.status) ? <span>—</span> : null}
             </div>,
           ])}
           empty="还没有发布任务"
@@ -2204,6 +2307,7 @@ function ChannelsView({
 }) {
   const [creating, setCreating] = useState(false);
   const [platform, setPlatform] = useState("xiaohongshu");
+  const [connectionMode, setConnectionMode] = useState("manual_export");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const canAdmin = roleAtLeast(role, "admin");
@@ -2211,10 +2315,12 @@ function ChannelsView({
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const credentials: Record<string, string> = {};
-    ["access_token", "open_id", "app_id", "app_secret"].forEach((key) => {
-      const value = String(form.get(key) || "");
-      if (value) credentials[key] = value;
-    });
+    if (connectionMode === "connector") {
+      ["access_token", "open_id", "app_id", "app_secret"].forEach((key) => {
+        const value = String(form.get(key) || "");
+        if (value) credentials[key] = value;
+      });
+    }
     setBusy("create");
     try {
       await api("/channels", {
@@ -2222,8 +2328,9 @@ function ChannelsView({
         body: {
           platform,
           display_name: form.get("display_name"),
+          connection_mode: connectionMode,
           credentials,
-          config: platform === "xiaohongshu" ? { export_format: "zip" } : {},
+          config: connectionMode === "manual_export" ? { export_format: "zip" } : {},
         },
       });
       setCreating(false);
@@ -2253,7 +2360,7 @@ function ChannelsView({
       <PageHeading
         eyebrow="Connectors"
         title="平台连接"
-        description="平台凭据由后端加密保存；公开能力不足的平台使用清晰标注的导出模式。"
+        description="每个平台账号可配置官方 API、无需平台密码的本机脚本辅助，或小红书人工导出。"
         action={canAdmin ? <Button onClick={() => setCreating((value) => !value)}><Icon name="plus" />添加连接</Button> : undefined}
       />
       {error ? <p className="inline-error">{error}</p> : null}
@@ -2264,25 +2371,37 @@ function ChannelsView({
           <form className="stack-form" onSubmit={create}>
             <div className="form-grid">
               <label>平台
-                <select value={platform} onChange={(event) => setPlatform(event.target.value)}>
+                <select value={platform} onChange={(event) => {
+                  const nextPlatform = event.target.value;
+                  setPlatform(nextPlatform);
+                  setConnectionMode(nextPlatform === "xiaohongshu" ? "manual_export" : "connector");
+                }}>
                   {Object.entries(PLATFORM).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
               </label>
               <label>连接名称<input name="display_name" required placeholder="品牌官方账号" /></label>
+              <label>连接方式
+                <select value={connectionMode} onChange={(event) => setConnectionMode(event.target.value)}>
+                  <option value="connector" disabled={platform === "xiaohongshu"}>官方 API</option>
+                  <option value="script">本机脚本辅助</option>
+                  <option value="manual_export" disabled={platform !== "xiaohongshu"}>人工导出</option>
+                </select>
+              </label>
             </div>
-            {platform === "douyin" ? (
+            {connectionMode === "connector" && platform === "douyin" ? (
               <div className="form-grid">
                 <label>Access Token<input name="access_token" type="password" required /></label>
                 <label>Open ID<input name="open_id" required /></label>
               </div>
             ) : null}
-            {platform === "wechat" ? (
+            {connectionMode === "connector" && platform === "wechat" ? (
               <div className="form-grid">
                 <label>App ID<input name="app_id" required /></label>
                 <label>App Secret<input name="app_secret" type="password" required /></label>
               </div>
             ) : null}
-            {platform === "xiaohongshu" ? <p className="form-note">小红书连接不收集账号密码。系统生成审核后的 ZIP 投放包，由运营人员人工发布。</p> : null}
+            {connectionMode === "script" ? <p className="form-note">脚本连接不接收或保存账号密码，使用每个平台账号独立的本机浏览器登录目录，且不会点击最终发布按钮。</p> : null}
+            {connectionMode === "manual_export" ? <p className="form-note">系统生成审核后的 ZIP 投放包，由运营人员人工发布；该方式目前仅支持小红书。</p> : null}
             <div className="form-actions"><Button type="submit" busy={busy === "create"}>保存连接</Button><Button type="button" kind="ghost" onClick={() => setCreating(false)}>取消</Button></div>
           </form>
         </section>
@@ -2296,7 +2415,7 @@ function ChannelsView({
               <h2>{channel.display_name}</h2>
               <StatusBadge value={channel.status} />
             </div>
-            {canAdmin ? <Button kind="ghost" busy={busy === channel.id} onClick={() => void test(channel)}>测试连接</Button> : null}
+            {canAdmin && !["script_only", "export_only"].includes(channel.status) ? <Button kind="ghost" busy={busy === channel.id} onClick={() => void test(channel)}>测试连接</Button> : null}
           </article>
         ))}
         {!channels.length ? <section className="panel span-3"><EmptyState title="还没有平台连接" description="先添加导出连接或经授权的平台账号。" /></section> : null}
@@ -2336,7 +2455,7 @@ function MetricsView({
     [channels],
   );
   const completedPublishes = publishes.filter((job) =>
-    ["exported", "published", "submitted", "draft_created"].includes(job.status),
+    ["exported", "published", "script_published", "submitted", "draft_created"].includes(job.status),
   );
 
   async function ingest(event: FormEvent<HTMLFormElement>) {

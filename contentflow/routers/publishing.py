@@ -26,6 +26,7 @@ from ..schemas import (
     PublishJobResponse,
     PublishReconcileRequest,
     PublishScheduleRequest,
+    PublishScriptResultRequest,
 )
 
 
@@ -97,10 +98,20 @@ def schedule_publish(
         raise HTTPException(status_code=409, detail="内容平台与连接器不匹配")
     if payload.scheduled_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=422, detail="发布时间不能早于当前时间")
+    if payload.delivery_mode == "manual_export" and channel.platform != "xiaohongshu":
+        raise HTTPException(status_code=422, detail="人工导出目前只适用于小红书")
+    delivery_mode = payload.delivery_mode
+    if delivery_mode == "connector" and channel.status == "export_only":
+        delivery_mode = "manual_export"
+    if delivery_mode == "connector" and channel.status == "script_only":
+        raise HTTPException(
+            status_code=409,
+            detail="该连接器不支持官方 API，请选择脚本辅助或人工导出",
+        )
 
     raw_key = (
         f"{principal.workspace_id}:{content.id}:{content.version}:"
-        f"{channel.id}:{payload.scheduled_at.isoformat()}"
+        f"{channel.id}:{delivery_mode}:{payload.scheduled_at.isoformat()}"
     )
     idempotency_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
     existing = session.scalar(
@@ -115,7 +126,10 @@ def schedule_publish(
         scheduled_at=payload.scheduled_at,
         idempotency_key=idempotency_key,
         status="scheduled",
-        request_json={"content_version": content.version},
+        request_json={
+            "content_version": content.version,
+            "delivery_mode": delivery_mode,
+        },
     )
     session.add(publish_job)
     session.flush()
@@ -137,6 +151,7 @@ def schedule_publish(
         metadata={
             "content_id": content.id,
             "channel_id": channel.id,
+            "delivery_mode": delivery_mode,
             "scheduled_at": payload.scheduled_at.isoformat(),
         },
     )
@@ -287,6 +302,130 @@ def reconcile_publish(
     return job
 
 
+@router.post(
+    "/jobs/{publish_job_id}/script-package",
+    response_model=PublishJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_script_package(
+    publish_job_id: str,
+    principal: Reviewer,
+    session: Db,
+):
+    query = select(PublishJob).where(
+        PublishJob.id == publish_job_id,
+        PublishJob.workspace_id == principal.workspace_id,
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    job = session.scalar(query)
+    if job is None:
+        raise HTTPException(status_code=404, detail="发布任务不存在")
+    previous_status = job.status
+    if previous_status in {"publishing", "submitted", "reconciliation_required"}:
+        raise HTTPException(
+            status_code=409,
+            detail="平台结果可能已产生，必须先人工对账，禁止切换脚本以免重复发布",
+        )
+    if previous_status in {"published", "script_published", "cancelled"}:
+        raise HTTPException(status_code=409, detail="当前状态不能切换为脚本发布")
+    if previous_status == "script_ready":
+        return job
+    if previous_status not in {"scheduled", "queued", "failed", "exported"}:
+        raise HTTPException(status_code=409, detail="当前状态不能生成脚本发布包")
+
+    queue_job = get_publish_queue_job_for_update(session, job.id)
+    if queue_job is not None and queue_job.status == "running":
+        raise HTTPException(status_code=409, detail="分发任务正在执行，不能切换发布方式")
+    request_json = dict(job.request_json or {})
+    request_json["delivery_mode"] = "script"
+    request_json["script_requested_by"] = principal.user_id
+    request_json["script_requested_at"] = datetime.now(timezone.utc).isoformat()
+    job.request_json = request_json
+    job.status = "scheduled"
+    job.error = None
+    job.external_id = None
+    job.external_url = None
+    if queue_job is None:
+        queue_job = enqueue_job(
+            session,
+            job_type="publish.dispatch",
+            payload={"publish_job_id": job.id},
+            workspace_id=principal.workspace_id,
+            idempotency_key=f"publish.dispatch:{job.id}",
+            run_at=datetime.now(timezone.utc),
+        )
+    else:
+        queue_job.status = "retry"
+        queue_job.attempts = 0
+        queue_job.run_at = datetime.now(timezone.utc)
+        queue_job.result_json = {}
+        queue_job.last_error = None
+        queue_job.locked_by = None
+        queue_job.locked_at = None
+    record_audit(
+        session,
+        action="publish.script_requested",
+        entity_type="publish_job",
+        entity_id=job.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={"queue_job_id": queue_job.id, "previous_status": previous_status},
+    )
+    return job
+
+
+@router.post("/jobs/{publish_job_id}/script-result", response_model=PublishJobResponse)
+def confirm_script_result(
+    publish_job_id: str,
+    payload: PublishScriptResultRequest,
+    principal: Reviewer,
+    session: Db,
+):
+    query = select(PublishJob).where(
+        PublishJob.id == publish_job_id,
+        PublishJob.workspace_id == principal.workspace_id,
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    job = session.scalar(query)
+    if job is None:
+        raise HTTPException(status_code=404, detail="发布任务不存在")
+    if job.status != "script_ready" or job.delivery_mode != "script":
+        raise HTTPException(status_code=409, detail="只有已生成任务包的脚本发布可以登记结果")
+    confirmed_at = datetime.now(timezone.utc)
+    response_json = dict(job.response_json or {})
+    response_json["script_result"] = {
+        "decision": payload.decision,
+        "reason": payload.reason,
+        "actor_user_id": principal.user_id,
+        "confirmed_at": confirmed_at.isoformat(),
+    }
+    job.response_json = response_json
+    if payload.decision == "confirmed_published":
+        job.status = "script_published"
+        job.external_id = payload.external_id
+        job.external_url = payload.external_url
+        job.published_at = confirmed_at
+        job.error = None
+    else:
+        job.status = "failed"
+        job.external_id = None
+        job.external_url = None
+        job.published_at = None
+        job.error = f"人工确认脚本未发布：{payload.reason}"[:8000]
+    record_audit(
+        session,
+        action="publish.script_result",
+        entity_type="publish_job",
+        entity_id=job.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={"decision": payload.decision, "reason": payload.reason},
+    )
+    return job
+
+
 @router.get("/jobs/{publish_job_id}/artifact")
 def download_publish_artifact(
     publish_job_id: str,
@@ -302,27 +441,25 @@ def download_publish_artifact(
     )
     if job is None:
         raise HTTPException(status_code=404, detail="发布任务不存在")
-    if job.status != "exported" or not job.external_url:
-        raise HTTPException(status_code=409, detail="该任务没有可下载的导出包")
+    if job.status not in {"exported", "script_ready"} or not job.external_url:
+        raise HTTPException(status_code=409, detail="该任务没有可下载的发布包")
+    headers = {
+        "Content-Disposition": f'attachment; filename="contentflow-publish-{job.id}.zip"'
+    }
+    package_checksum = str((job.response_json or {}).get("package_sha256") or "")
+    if len(package_checksum) == 64 and all(
+        character in "0123456789abcdef" for character in package_checksum
+    ):
+        headers["X-ContentFlow-Artifact-SHA256"] = package_checksum
     if job.external_url.startswith("file:"):
         path = local_path_from_uri(job.external_url)
         if not path.is_file():
-            raise HTTPException(status_code=404, detail="导出文件不存在")
-        return FileResponse(
-            path,
-            media_type="application/zip",
-            filename=path.name,
-        )
+            raise HTTPException(status_code=404, detail="发布包文件不存在")
+        return FileResponse(path, media_type="application/zip", headers=headers)
     try:
-        data = build_object_storage(settings).read(job.external_url)
-    except FileNotFoundError as error:
-        raise HTTPException(status_code=404, detail="导出文件不存在") from error
-    return Response(
-        content=data,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": (
-                f'attachment; filename="contentflow-export-{job.id}.zip"'
-            )
-        },
-    )
+        data = build_object_storage(settings).read(
+            job.external_url, max_bytes=settings.max_upload_bytes
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="发布包文件不存在") from error
+    return Response(content=data, media_type="application/zip", headers=headers)

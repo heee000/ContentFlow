@@ -120,6 +120,8 @@ def pull_platform_metrics(
     )
     if publish_job is None:
         raise HTTPException(status_code=404, detail="发布任务不存在")
+    if publish_job.delivery_mode != "connector":
+        raise HTTPException(status_code=409, detail="非 API 发布任务请使用人工指标录入")
     if not publish_job.external_id:
         raise HTTPException(status_code=409, detail="发布任务没有平台作品 ID")
     captured_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H")

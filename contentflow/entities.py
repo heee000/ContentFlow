@@ -520,6 +520,13 @@ class PublishJob(TimestampMixin, Base):
     error: Mapped[str | None] = mapped_column(Text)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    @property
+    def delivery_mode(self) -> str:
+        mode = (self.request_json or {}).get("delivery_mode")
+        if mode in {"connector", "script", "manual_export"}:
+            return str(mode)
+        return "connector"
+
 
 class MetricSnapshot(Base):
     __tablename__ = "metric_snapshots"

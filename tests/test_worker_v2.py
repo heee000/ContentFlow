@@ -747,6 +747,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(channel.status_code, 201, channel.text)
+        self.assertEqual(channel.json()["config_json"]["connection_mode"], "manual_export")
         cancellable = self.client.post(
             "/api/v1/publishing/jobs",
             headers=self.headers,
@@ -791,6 +792,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(scheduled.status_code, 202, scheduled.text)
+        self.assertEqual(scheduled.json()["delivery_mode"], "manual_export")
         with db.SessionLocal() as session:
             queue_job = session.scalar(
                 select(Job).where(
@@ -1014,10 +1016,10 @@ class WorkerIntegrationTest(unittest.TestCase):
             "/api/v1/channels",
             headers=self.headers,
             json={
-                "platform": "xiaohongshu",
+                "platform": "wechat",
                 "display_name": "expired-lease",
-                "credentials": {},
-                "config": {"export_format": "zip"},
+                "credentials": {"app_id": "lease-app", "app_secret": "lease-secret"},
+                "config": {},
             },
         )
         self.assertEqual(channel.status_code, 201, channel.text)

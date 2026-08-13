@@ -199,10 +199,10 @@ class ApiV2Test(unittest.TestCase):
             "/api/v1/channels",
             headers=self.headers,
             json={
-                "platform": "xiaohongshu",
+                "platform": "wechat",
                 "display_name": "可重试连接",
-                "credentials": {},
-                "config": {"export_format": "zip"},
+                "credentials": {"app_id": "retry-app", "app_secret": "retry-secret"},
+                "config": {},
             },
         )
         self.assertEqual(channel.status_code, 201, channel.text)

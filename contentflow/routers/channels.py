@@ -21,6 +21,19 @@ Admin = Annotated[Principal, Depends(require_role("admin"))]
 
 
 def validate_channel_payload(payload: ChannelCreate) -> str:
+    if payload.connection_mode == "script":
+        if payload.credentials:
+            raise HTTPException(
+                status_code=422,
+                detail="脚本连接不接收平台凭据，请在本机浏览器中人工登录",
+            )
+        return "script_only"
+    if payload.connection_mode == "manual_export":
+        if payload.platform != "xiaohongshu":
+            raise HTTPException(status_code=422, detail="人工导出目前只适用于小红书")
+        if payload.credentials:
+            raise HTTPException(status_code=422, detail="人工导出连接不接收平台凭据")
+        return "export_only"
     if payload.platform == "xiaohongshu":
         return "export_only"
     if payload.platform == "douyin":
@@ -66,6 +79,9 @@ def create_channel(
     settings: AppSettings,
 ):
     initial_status = validate_channel_payload(payload)
+    connection_mode = payload.connection_mode
+    if payload.platform == "xiaohongshu" and initial_status == "export_only":
+        connection_mode = "manual_export"
     channel = ChannelConnection(
         workspace_id=principal.workspace_id,
         platform=payload.platform,
@@ -79,7 +95,7 @@ def create_channel(
             if payload.credentials
             else None
         ),
-        config_json=payload.config,
+        config_json={**payload.config, "connection_mode": connection_mode},
     )
     session.add(channel)
     session.flush()
@@ -93,6 +109,7 @@ def create_channel(
         metadata={
             "platform": channel.platform,
             "display_name": channel.display_name,
+            "connection_mode": connection_mode,
         },
     )
     return channel
@@ -113,6 +130,8 @@ def test_channel(
     channel = session.scalar(channel_query)
     if channel is None:
         raise HTTPException(status_code=404, detail="连接器不存在")
+    if channel.status in {"script_only", "export_only"}:
+        raise HTTPException(status_code=409, detail="该连接不需要远程 API 测试")
     if channel.status == "pending_test":
         active_job = session.scalar(
             select(Job)

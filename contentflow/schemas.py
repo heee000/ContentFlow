@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
 
 
 Platform = Literal["xiaohongshu", "douyin", "wechat"]
 WorkspaceRole = Literal["viewer", "editor", "reviewer", "admin"]
+EvidenceReason = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
+]
 
 
 class ORMModel(BaseModel):
@@ -355,6 +358,7 @@ class KnowledgeDocumentResponse(ORMModel):
 class ChannelCreate(BaseModel):
     platform: Platform
     display_name: str = Field(min_length=1, max_length=120)
+    connection_mode: Literal["connector", "script", "manual_export"] = "connector"
     credentials: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
 
@@ -374,11 +378,19 @@ class PublishScheduleRequest(BaseModel):
     content_item_id: str
     channel_id: str
     scheduled_at: datetime
+    delivery_mode: Literal["connector", "script", "manual_export"] = "connector"
 
 
 class PublishReconcileRequest(BaseModel):
     decision: Literal["confirmed_published", "confirmed_not_published"]
-    reason: str = Field(min_length=1, max_length=2000)
+    reason: EvidenceReason
+    external_id: str | None = Field(default=None, max_length=255)
+    external_url: str | None = Field(default=None, max_length=2000)
+
+
+class PublishScriptResultRequest(BaseModel):
+    decision: Literal["confirmed_published", "confirmed_not_published"]
+    reason: EvidenceReason
     external_id: str | None = Field(default=None, max_length=255)
     external_url: str | None = Field(default=None, max_length=2000)
 
@@ -389,6 +401,7 @@ class PublishJobResponse(ORMModel):
     channel_id: str
     status: str
     scheduled_at: datetime
+    delivery_mode: str
     external_id: str | None
     external_url: str | None
     attempts: int
