@@ -78,6 +78,7 @@ def test_script_package_is_reproducible_hashed_and_contains_no_credentials(tmp_p
         publish_job=job,
         content=content,
         channel=channel,
+        script_attempt_id="attempt-1",
         assets=[asset],
         storage=storage,
         max_total_bytes=1024 * 1024,
@@ -86,6 +87,7 @@ def test_script_package_is_reproducible_hashed_and_contains_no_credentials(tmp_p
         publish_job=job,
         content=content,
         channel=channel,
+        script_attempt_id="attempt-1",
         assets=[asset],
         storage=storage,
         max_total_bytes=1024 * 1024,
@@ -109,6 +111,7 @@ def test_script_package_is_reproducible_hashed_and_contains_no_credentials(tmp_p
         assert any(name.startswith("assets/") for name in names)
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["content_version"] == 3
+        assert manifest["script_attempt_id"] == "attempt-1"
         assert manifest["final_submission_requires_human"] is True
         assert manifest["portal_url"].startswith("https://creator.xiaohongshu.com/")
         assert archive.read("requirements.txt") == b"playwright==1.62.0\n"
@@ -116,7 +119,7 @@ def test_script_package_is_reproducible_hashed_and_contains_no_credentials(tmp_p
         compile(runner, "publish_assistant.py", "exec")
         assert "from pathlib import Path" in runner
         assert "EXPECTED_PORTALS" in runner
-        assert 'page.goto(portal_url' in runner
+        assert "page.goto(portal_url" in runner
         assert "confined_package_path" in runner
         assert "final publish" not in runner.lower()
         assert ".click(" not in runner
@@ -138,6 +141,7 @@ def test_script_package_fails_closed_on_version_change_or_asset_limit(tmp_path):
             publish_job=job,
             content=content,
             channel=channel,
+            script_attempt_id="attempt-1",
             assets=[asset],
             storage=storage,
             max_total_bytes=1024 * 1024,
@@ -149,6 +153,7 @@ def test_script_package_fails_closed_on_version_change_or_asset_limit(tmp_path):
             publish_job=job,
             content=content,
             channel=channel,
+            script_attempt_id="attempt-1",
             assets=[asset],
             storage=storage,
             max_total_bytes=4,
@@ -163,6 +168,7 @@ def test_script_package_rejects_unapproved_content_and_unknown_platform(tmp_path
             publish_job=job,
             content=content,
             channel=channel,
+            script_attempt_id="attempt-1",
             assets=[asset],
             storage=storage,
             max_total_bytes=1024 * 1024,
@@ -175,6 +181,7 @@ def test_script_package_rejects_unapproved_content_and_unknown_platform(tmp_path
             publish_job=job,
             content=content,
             channel=channel,
+            script_attempt_id="attempt-1",
             assets=[asset],
             storage=storage,
             max_total_bytes=1024 * 1024,

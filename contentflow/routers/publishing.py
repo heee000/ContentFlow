@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,13 +19,11 @@ from ..dependencies import (
 )
 from ..entities import ChannelConnection, ContentItem, Job, PublishJob
 from ..job_queue import enqueue_job
-from ..knowledge_service import local_path_from_uri
 from ..object_storage import build_object_storage
 from ..schemas import (
     PublishJobResponse,
     PublishReconcileRequest,
     PublishScheduleRequest,
-    PublishScriptResultRequest,
 )
 
 
@@ -291,9 +288,7 @@ def reconcile_publish(
         metadata={
             "decision": payload.decision,
             "reason": payload.reason,
-            "queue_job_id": (
-                dispatch_queue_job.id if dispatch_queue_job else None
-            ),
+            "queue_job_id": (dispatch_queue_job.id if dispatch_queue_job else None),
             "reconciliation_queue_job_id": (
                 reconciliation_queue_job.id if reconciliation_queue_job else None
             ),
@@ -327,7 +322,12 @@ def create_script_package(
             status_code=409,
             detail="平台结果可能已产生，必须先人工对账，禁止切换脚本以免重复发布",
         )
-    if previous_status in {"published", "script_published", "cancelled"}:
+    if previous_status in {
+        "published",
+        "script_published",
+        "script_confirmation_pending",
+        "cancelled",
+    }:
         raise HTTPException(status_code=409, detail="当前状态不能切换为脚本发布")
     if previous_status == "script_ready":
         return job
@@ -336,7 +336,9 @@ def create_script_package(
 
     queue_job = get_publish_queue_job_for_update(session, job.id)
     if queue_job is not None and queue_job.status == "running":
-        raise HTTPException(status_code=409, detail="分发任务正在执行，不能切换发布方式")
+        raise HTTPException(
+            status_code=409, detail="分发任务正在执行，不能切换发布方式"
+        )
     request_json = dict(job.request_json or {})
     request_json["delivery_mode"] = "script"
     request_json["script_requested_by"] = principal.user_id
@@ -375,57 +377,6 @@ def create_script_package(
     return job
 
 
-@router.post("/jobs/{publish_job_id}/script-result", response_model=PublishJobResponse)
-def confirm_script_result(
-    publish_job_id: str,
-    payload: PublishScriptResultRequest,
-    principal: Reviewer,
-    session: Db,
-):
-    query = select(PublishJob).where(
-        PublishJob.id == publish_job_id,
-        PublishJob.workspace_id == principal.workspace_id,
-    )
-    if session.bind and session.bind.dialect.name == "postgresql":
-        query = query.with_for_update()
-    job = session.scalar(query)
-    if job is None:
-        raise HTTPException(status_code=404, detail="发布任务不存在")
-    if job.status != "script_ready" or job.delivery_mode != "script":
-        raise HTTPException(status_code=409, detail="只有已生成任务包的脚本发布可以登记结果")
-    confirmed_at = datetime.now(timezone.utc)
-    response_json = dict(job.response_json or {})
-    response_json["script_result"] = {
-        "decision": payload.decision,
-        "reason": payload.reason,
-        "actor_user_id": principal.user_id,
-        "confirmed_at": confirmed_at.isoformat(),
-    }
-    job.response_json = response_json
-    if payload.decision == "confirmed_published":
-        job.status = "script_published"
-        job.external_id = payload.external_id
-        job.external_url = payload.external_url
-        job.published_at = confirmed_at
-        job.error = None
-    else:
-        job.status = "failed"
-        job.external_id = None
-        job.external_url = None
-        job.published_at = None
-        job.error = f"人工确认脚本未发布：{payload.reason}"[:8000]
-    record_audit(
-        session,
-        action="publish.script_result",
-        entity_type="publish_job",
-        entity_id=job.id,
-        workspace_id=principal.workspace_id,
-        actor_user_id=principal.user_id,
-        metadata={"decision": payload.decision, "reason": payload.reason},
-    )
-    return job
-
-
 @router.get("/jobs/{publish_job_id}/artifact")
 def download_publish_artifact(
     publish_job_id: str,
@@ -441,25 +392,34 @@ def download_publish_artifact(
     )
     if job is None:
         raise HTTPException(status_code=404, detail="发布任务不存在")
-    if job.status not in {"exported", "script_ready"} or not job.external_url:
+    response_json = dict(job.response_json or {})
+    if job.delivery_mode == "script":
+        artifact_uri = response_json.get("package_uri")
+        allowed_statuses = {
+            "script_ready",
+            "script_confirmation_pending",
+            "script_published",
+            "failed",
+        }
+    else:
+        artifact_uri = job.external_url
+        allowed_statuses = {"exported"}
+    if job.status not in allowed_statuses or not isinstance(artifact_uri, str):
         raise HTTPException(status_code=409, detail="该任务没有可下载的发布包")
     headers = {
         "Content-Disposition": f'attachment; filename="contentflow-publish-{job.id}.zip"'
     }
-    package_checksum = str((job.response_json or {}).get("package_sha256") or "")
+    package_checksum = str(response_json.get("package_sha256") or "")
     if len(package_checksum) == 64 and all(
         character in "0123456789abcdef" for character in package_checksum
     ):
         headers["X-ContentFlow-Artifact-SHA256"] = package_checksum
-    if job.external_url.startswith("file:"):
-        path = local_path_from_uri(job.external_url)
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail="发布包文件不存在")
-        return FileResponse(path, media_type="application/zip", headers=headers)
     try:
         data = build_object_storage(settings).read(
-            job.external_url, max_bytes=settings.max_upload_bytes
+            artifact_uri, max_bytes=settings.max_upload_bytes
         )
-    except (FileNotFoundError, ValueError) as error:
+    except (FileNotFoundError, OSError, ValueError) as error:
         raise HTTPException(status_code=404, detail="发布包文件不存在") from error
+    if package_checksum and hashlib.sha256(data).hexdigest() != package_checksum:
+        raise HTTPException(status_code=409, detail="发布包完整性校验失败")
     return Response(content=data, media_type="application/zip", headers=headers)

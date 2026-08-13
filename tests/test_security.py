@@ -356,6 +356,23 @@ class RuntimeSettingsTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     Settings(media_provider_max_response_bytes=invalid)
 
+    def test_publish_evidence_limits_are_bounded(self):
+        settings = Settings()
+        self.assertEqual(settings.publish_evidence_max_bytes, 10 * 1024 * 1024)
+        self.assertEqual(settings.publish_evidence_max_pixels, 40_000_000)
+        for values in (
+            {"publish_evidence_max_bytes": 0},
+            {"publish_evidence_max_bytes": 100 * 1024 * 1024 + 1},
+            {"publish_evidence_max_pixels": 0},
+            {"publish_evidence_max_pixels": 100_000_001},
+            {
+                "max_upload_bytes": 1024,
+                "publish_evidence_max_bytes": 1025,
+            },
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Settings(**values)
+
     def test_development_live_provider_may_use_local_http_endpoint(self):
         Settings(
             database_url="sqlite:///contentflow-test.db",

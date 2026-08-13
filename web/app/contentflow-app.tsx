@@ -142,8 +142,41 @@ type PublishJob = {
   attempts: number;
   error: string | null;
   external_id: string | null;
+  script_confirmation_required: number;
+  script_confirmation_count: number;
+  script_confirmation_decision: string | null;
+  script_evidence_count: number;
+  script_package_available: boolean;
 };
 
+type PublishEvidence = {
+  id: string;
+  publish_job_id: string;
+  script_attempt_id: string;
+  package_sha256: string;
+  kind: string;
+  original_filename: string;
+  source_sha256: string;
+  object_sha256: string;
+  mime_type: string;
+  size_bytes: number;
+  uploaded_by_user_id: string;
+  created_at: string;
+};
+
+type PublishConfirmation = {
+  id: string;
+  script_attempt_id: string;
+  package_sha256: string;
+  external_id: string | null;
+  external_url: string | null;
+  decision: string;
+  reason: string;
+  confirmed_by_user_id: string;
+  evidence_manifest_sha256: string;
+  created_at: string;
+
+};
 type KnowledgeDocument = {
   id: string;
   name: string;
@@ -446,6 +479,7 @@ const STATUS: Record<string, string> = {
   export_only: "导出模式",
   script_only: "脚本模式",
   script_ready: "脚本包就绪",
+  script_confirmation_pending: "Second confirmation pending",
   script_published: "脚本确认发布",
   error: "执行错误",
   failed: "失败",
@@ -1926,6 +1960,10 @@ function PublishingView({
   const [reconciling, setReconciling] = useState("");
   const [scriptBusy, setScriptBusy] = useState("");
   const [error, setError] = useState("");
+  const [evidenceJobId, setEvidenceJobId] = useState("");
+  const [evidence, setEvidence] = useState<PublishEvidence[]>([]);
+  const [confirmations, setConfirmations] = useState<PublishConfirmation[]>([]);
+  const [evidenceBusy, setEvidenceBusy] = useState(false);
   const canSchedule = roleAtLeast(role, "reviewer");
   const [defaultSchedule] = useState(() =>
     toLocalInput(new Date(Date.now() + 10 * 60_000)),
@@ -2045,6 +2083,47 @@ function PublishingView({
     }
   }
 
+  async function openEvidence(job: PublishJob) {
+    setEvidenceBusy(true);
+    setError("");
+    try {
+      const [items, reviews] = await Promise.all([
+        api<PublishEvidence[]>(`/publishing/jobs/${job.id}/evidence`),
+        api<PublishConfirmation[]>(`/publishing/jobs/${job.id}/confirmations`),
+      ]);
+      setEvidenceJobId(job.id);
+      setEvidence(items);
+      setConfirmations(reviews);
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setEvidenceBusy(false);
+    }
+  }
+
+  async function uploadEvidence(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!evidenceJobId) return;
+    const formElement = event.currentTarget;
+    setEvidenceBusy(true);
+    setError("");
+    try {
+      await api<PublishEvidence>(
+        `/publishing/jobs/${evidenceJobId}/evidence`,
+        { method: "POST", body: new FormData(formElement) },
+      );
+      formElement.reset();
+      const job = publishes.find((item) => item.id === evidenceJobId);
+      if (job) await openEvidence(job);
+      await onChanged();
+      flash("Evidence verified and bound to the current script package");
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setEvidenceBusy(false);
+    }
+  }
+
   async function recordScriptResult(
     job: PublishJob,
     decision: "confirmed_published" | "confirmed_not_published",
@@ -2065,7 +2144,7 @@ function PublishingView({
     setScriptBusy(job.id);
     setError("");
     try {
-      await api(`/publishing/jobs/${job.id}/script-result`, {
+      const updated = await api<PublishJob>(`/publishing/jobs/${job.id}/script-result`, {
         method: "POST",
         body: {
           decision,
@@ -2074,7 +2153,14 @@ function PublishingView({
           external_url: externalUrl,
         },
       });
-      flash(confirmedPublished ? "脚本发布结果已登记" : "已登记为未发布，可修正后重新生成脚本包");
+      flash(
+        updated.status === "script_confirmation_pending"
+          ? "首次确认已保存，证据已冻结，等待另一位审核人独立确认"
+          : confirmedPublished
+            ? "脚本发布结果已登记"
+            : "已登记为未发布，可修正后重新生成脚本包",
+      );
+      await openEvidence(updated);
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -2129,6 +2215,74 @@ function PublishingView({
           </form>
         </section>
       ) : null}
+      {evidenceJobId ? (
+        <section className="panel form-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Publication evidence</p>
+              <h2>Script publication evidence and confirmations</h2>
+            </div>
+            <Button kind="ghost" onClick={() => setEvidenceJobId("")}>Close</Button>
+          </div>
+          {canSchedule
+            && publishes.find((item) => item.id === evidenceJobId)?.status === "script_ready" ? (
+            <form className="stack-form" onSubmit={uploadEvidence}>
+              <div className="form-grid">
+                <label>Evidence type
+                  <select name="kind" defaultValue="screenshot">
+                    <option value="screenshot">Platform screenshot (PNG/JPEG/WebP)</option>
+                    <option value="platform_export">Platform export (JSON)</option>
+                  </select>
+                </label>
+                <label>Evidence file
+                  <input
+                    name="file"
+                    type="file"
+                    accept=".png,.jpg,.jpeg,.webp,.json"
+                    required
+                  />
+                </label>
+              </div>
+              <small>The server decodes, normalizes, and hashes every file. Evidence freezes after the first confirmation.</small>
+              <Button type="submit" busy={evidenceBusy}>Upload and verify</Button>
+            </form>
+          ) : null}
+          <div className="record-list">
+            {evidence.map((item) => (
+              <div className="record-row" key={item.id}>
+                <div className="document-icon">{item.kind === "screenshot" ? "IMG" : "JSON"}</div>
+                <div className="record-main">
+                  <strong>{item.original_filename}</strong>
+                  <small>{formatBytes(item.size_bytes)} · SHA-256 {item.object_sha256.slice(0, 16)}…</small>
+                </div>
+                <button onClick={() => void download(
+                  `/publishing/jobs/${item.publish_job_id}/evidence/${item.id}/download`,
+                  `evidence-${item.id}`,
+                )}>
+                  <Icon name="download" />Download
+                </button>
+              </div>
+            ))}
+            {!evidence.length ? <p className="form-note">Upload at least one evidence file before confirming the result.</p> : null}
+          </div>
+          {confirmations.length ? (
+            <div className="record-list">
+              {confirmations.map((item, index) => (
+                <div className="record-row" key={item.id}>
+                  <div className="document-icon">{index + 1}</div>
+                  <div className="record-main">
+                    <strong>{item.decision === "confirmed_published" ? "Confirmed published" : "Confirmed not published"}</strong>
+                    <small>
+                      Reviewer {item.confirmed_by_user_id.slice(0, 8)} · Manifest {item.evidence_manifest_sha256.slice(0, 16)}…
+                    </small>
+                  </div>
+                  <span>{formatDateTime(item.created_at)}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       <section className="panel">
         <DataTable
           headers={["内容", "平台连接", "发布方式", "计划时间", "尝试", "状态", "结果"]}
@@ -2140,12 +2294,20 @@ function PublishingView({
             job.attempts,
             <StatusBadge key="status" value={job.status} />,
             <div className="table-actions" key="actions">
-              {["exported", "script_ready"].includes(job.status) ? (
+              {job.status === "exported" || job.script_package_available ? (
                 <button onClick={() => void download(`/publishing/jobs/${job.id}/artifact`, `contentflow-${job.id}.zip`)}>
                   <Icon name="download" />{job.status === "script_ready" ? "下载脚本包" : "下载投放包"}
                 </button>
               ) : null}
-              {canSchedule && job.status === "script_ready" ? (
+              {job.script_package_available ? (
+                <button
+                  disabled={evidenceBusy}
+                  onClick={() => void openEvidence(job)}
+                >
+                  Evidence {job.script_evidence_count} · Confirmations {job.script_confirmation_count}/{job.script_confirmation_required}
+                </button>
+              ) : null}
+              {canSchedule && ["script_ready", "script_confirmation_pending"].includes(job.status) ? (
                 <>
                   <button
                     disabled={scriptBusy === job.id}
@@ -2330,6 +2492,7 @@ function ChannelsView({
           display_name: form.get("display_name"),
           connection_mode: connectionMode,
           credentials,
+          script_confirmation_required: connectionMode === "script" ? Number(form.get("script_confirmation_required") || 1) : 1,
           config: connectionMode === "manual_export" ? { export_format: "zip" } : {},
         },
       });
@@ -2399,6 +2562,15 @@ function ChannelsView({
                 <label>App ID<input name="app_id" required /></label>
                 <label>App Secret<input name="app_secret" type="password" required /></label>
               </div>
+            ) : null}
+            {connectionMode === "script" ? (
+              <label>Result confirmation policy
+                <select name="script_confirmation_required" defaultValue="1">
+                  <option value="1">One reviewer with evidence</option>
+                  <option value="2">Two independent reviewers</option>
+                </select>
+                <small>Two-person mode requires two reviewer-or-admin users in this workspace.</small>
+              </label>
             ) : null}
             {connectionMode === "script" ? <p className="form-note">脚本连接不接收或保存账号密码，使用每个平台账号独立的本机浏览器登录目录，且不会点击最终发布按钮。</p> : null}
             {connectionMode === "manual_export" ? <p className="form-note">系统生成审核后的 ZIP 投放包，由运营人员人工发布；该方式目前仅支持小红书。</p> : null}

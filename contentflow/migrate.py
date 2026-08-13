@@ -13,7 +13,7 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "c95f1e4a8d73"
+HEAD_REVISION = "e28a6b9c4f10"
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
 LAYOUT_REVISION = "8b6c1f3a9d21"
@@ -23,6 +23,9 @@ AUTH_SESSION_TABLE = "auth_sessions"
 AUTH_REFRESH_HISTORY_TABLE = "auth_refresh_token_history"
 AUTH_SESSION_REVISION = "f4c2d8e7a190"
 AUTH_RATE_LIMIT_TABLE = "auth_rate_limits"
+PUBLISH_EVIDENCE_TABLE = "publish_evidence_items"
+PUBLISH_CONFIRMATION_TABLE = "publish_confirmations"
+PUBLISH_EVIDENCE_REVISION = "e28a6b9c4f10"
 PROMPT_RELEASE_TABLE = "prompt_releases"
 PROMPT_RELEASE_REVISION = "b84e0d3f7c92"
 PROMPT_EVAL_SUITE_TABLE = "prompt_eval_suites"
@@ -64,6 +67,8 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         PROMPT_RELEASE_TABLE,
         PROMPT_EVAL_SUITE_TABLE,
         PROMPT_EVAL_RUN_TABLE,
+        PUBLISH_EVIDENCE_TABLE,
+        PUBLISH_CONFIRMATION_TABLE,
     }
     expected_tables = set(db.Base.metadata.tables)
     missing_tables = (expected_tables - incrementally_added) - tables
@@ -97,6 +102,8 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
     auth_refresh_history_exists = AUTH_REFRESH_HISTORY_TABLE in tables
     auth_rate_limit_exists = AUTH_RATE_LIMIT_TABLE in tables
     prompt_release_exists = PROMPT_RELEASE_TABLE in tables
+    publish_evidence_exists = PUBLISH_EVIDENCE_TABLE in tables
+    publish_confirmation_exists = PUBLISH_CONFIRMATION_TABLE in tables
     prompt_eval_suite_exists = PROMPT_EVAL_SUITE_TABLE in tables
     prompt_eval_run_exists = PROMPT_EVAL_RUN_TABLE in tables
     if worker_node_exists and not all(layout_state.values()):
@@ -137,8 +144,21 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             "migration. Back up the database and repair the schema before "
             "continuing."
         )
+    if publish_evidence_exists != publish_confirmation_exists:
+        raise RuntimeError(
+            "The publication evidence tables are incomplete. Back up the "
+            "database and repair the schema before continuing."
+        )
+    if publish_evidence_exists and not prompt_eval_suite_exists:
+        raise RuntimeError(
+            "The publication evidence tables exist without the prompt "
+            "evaluation migration. Back up the database and repair the "
+            "schema before continuing."
+        )
 
-    if prompt_eval_suite_exists:
+    if publish_evidence_exists:
+        revision = PUBLISH_EVIDENCE_REVISION
+    elif prompt_eval_suite_exists:
         revision = PROMPT_EVAL_REVISION
     elif prompt_release_exists:
         revision = PROMPT_RELEASE_REVISION

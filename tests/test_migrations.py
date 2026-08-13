@@ -28,6 +28,8 @@ class MigrationTest(unittest.TestCase):
                 self.assertIn("content_items", tables)
                 self.assertIn("content_revisions", tables)
                 self.assertIn("publish_jobs", tables)
+                self.assertIn("publish_evidence_items", tables)
+                self.assertIn("publish_confirmations", tables)
                 self.assertIn("audit_logs", tables)
                 self.assertIn("worker_nodes", tables)
                 self.assertIn("auth_sessions", tables)
@@ -79,6 +81,57 @@ class MigrationTest(unittest.TestCase):
                     )
                 }
                 self.assertIn("ck_prompt_eval_runs_status", eval_run_checks)
+                evidence_checks = {
+                    item["name"]
+                    for item in inspect(engine).get_check_constraints(
+                        "publish_evidence_items"
+                    )
+                }
+                self.assertIn("ck_publish_evidence_items_kind", evidence_checks)
+                self.assertIn(
+                    "ck_publish_evidence_items_size_bytes_positive",
+                    evidence_checks,
+                )
+                self.assertIn(
+                    "ck_publish_evidence_items_sha256_lengths",
+                    evidence_checks,
+                )
+                evidence_unique = {
+                    item["name"]
+                    for item in inspect(engine).get_unique_constraints(
+                        "publish_evidence_items"
+                    )
+                }
+                self.assertIn("uq_publish_evidence_attempt_object", evidence_unique)
+                evidence_indexes = {
+                    item["name"]
+                    for item in inspect(engine).get_indexes("publish_evidence_items")
+                }
+                self.assertIn("ix_publish_evidence_attempt_created", evidence_indexes)
+                confirmation_checks = {
+                    item["name"]
+                    for item in inspect(engine).get_check_constraints(
+                        "publish_confirmations"
+                    )
+                }
+                self.assertIn(
+                    "ck_publish_confirmations_decision",
+                    confirmation_checks,
+                )
+                self.assertIn(
+                    "ck_publish_confirmations_sha256_lengths",
+                    confirmation_checks,
+                )
+                confirmation_unique = {
+                    item["name"]
+                    for item in inspect(engine).get_unique_constraints(
+                        "publish_confirmations"
+                    )
+                }
+                self.assertIn(
+                    "uq_publish_confirmation_attempt_user",
+                    confirmation_unique,
+                )
                 columns = {
                     column["name"]
                     for column in inspect(engine).get_columns("content_items")
@@ -323,6 +376,76 @@ class MigrationTest(unittest.TestCase):
                     )
                 self.assertEqual(revision, HEAD_REVISION)
                 engine.dispose()
+            finally:
+                if previous is None:
+                    os.environ.pop("CONTENTFLOW_DATABASE_URL", None)
+                else:
+                    os.environ["CONTENTFLOW_DATABASE_URL"] = previous
+
+    def test_unversioned_prompt_eval_head_adds_publish_evidence_tables(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "prompt-eval-head.db"
+            url = f"sqlite:///{database.as_posix()}"
+            previous = os.environ.get("CONTENTFLOW_DATABASE_URL")
+            os.environ["CONTENTFLOW_DATABASE_URL"] = url
+            try:
+                config = Config("alembic.ini")
+                command.upgrade(config, "c95f1e4a8d73")
+                engine = create_engine(url)
+                with engine.begin() as connection:
+                    connection.execute(text("DELETE FROM alembic_version"))
+                engine.dispose()
+
+                upgrade_database(
+                    Settings(
+                        database_url=url,
+                        secret_key="migration-test-secret",
+                        local_storage_dir=Path(temp_dir) / "storage",
+                    )
+                )
+
+                engine = create_engine(url)
+                tables = set(inspect(engine).get_table_names())
+                self.assertIn("publish_evidence_items", tables)
+                self.assertIn("publish_confirmations", tables)
+                with engine.connect() as connection:
+                    revision = connection.scalar(
+                        text("SELECT version_num FROM alembic_version")
+                    )
+                self.assertEqual(revision, HEAD_REVISION)
+                engine.dispose()
+            finally:
+                if previous is None:
+                    os.environ.pop("CONTENTFLOW_DATABASE_URL", None)
+                else:
+                    os.environ["CONTENTFLOW_DATABASE_URL"] = previous
+
+    def test_unversioned_partial_publish_evidence_tables_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "partial-publish-evidence.db"
+            url = f"sqlite:///{database.as_posix()}"
+            previous = os.environ.get("CONTENTFLOW_DATABASE_URL")
+            os.environ["CONTENTFLOW_DATABASE_URL"] = url
+            try:
+                config = Config("alembic.ini")
+                command.upgrade(config, "head")
+                engine = create_engine(url)
+                with engine.begin() as connection:
+                    connection.execute(text("DELETE FROM alembic_version"))
+                    connection.execute(text("DROP TABLE publish_confirmations"))
+                engine.dispose()
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "publication evidence tables are incomplete",
+                ):
+                    upgrade_database(
+                        Settings(
+                            database_url=url,
+                            secret_key="migration-test-secret",
+                            local_storage_dir=Path(temp_dir) / "storage",
+                        )
+                    )
             finally:
                 if previous is None:
                     os.environ.pop("CONTENTFLOW_DATABASE_URL", None)

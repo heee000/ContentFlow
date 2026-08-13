@@ -20,6 +20,9 @@ PLATFORM_PORTALS = {
     "douyin": "https://creator.douyin.com/creator-micro/content/upload",
     "wechat": "https://mp.weixin.qq.com/",
 }
+SAFE_ID_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
 
 
 class ScriptPackageError(RuntimeError):
@@ -50,7 +53,7 @@ def _markdown(content: ContentItem) -> bytes:
 
 
 def _runner_source() -> bytes:
-    source = r'''from __future__ import annotations
+    source = r"""from __future__ import annotations
 
 import argparse
 import hashlib
@@ -130,6 +133,17 @@ def main() -> int:
         character not in SAFE_ID_CHARS for character in channel_id
     ):
         raise RuntimeError("任务包渠道标识无效")
+    script_attempt_id = str(manifest.get("script_attempt_id") or "")
+    publish_job_id = str(manifest.get("publish_job_id") or "")
+    for label, identifier in (
+        ("发布任务", publish_job_id),
+        ("脚本尝试", script_attempt_id),
+    ):
+        if not 1 <= len(identifier) <= 128 or any(
+            character not in SAFE_ID_CHARS for character in identifier
+        ):
+            raise RuntimeError(f"任务包{label}标识无效")
+
     profile_dir = (
         args.profile_dir
         or Path.home() / ".contentflow" / "browser-profiles" / platform / channel_id
@@ -210,7 +224,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-'''
+"""
     return source.encode("utf-8")
 
 
@@ -257,6 +271,7 @@ def build_script_package(
     content: ContentItem,
     channel: ChannelConnection,
     assets: list[Asset],
+    script_attempt_id: str,
     storage: ObjectStorage,
     max_total_bytes: int,
 ) -> ScriptPackage:
@@ -269,6 +284,15 @@ def build_script_package(
         raise ScriptPackageError("内容版本已变化，请重新审核并创建发布任务")
     if not assets:
         raise ScriptPackageError("当前内容版本没有可发布素材")
+    for label, identifier in (
+        ("publish job", publish_job.id),
+        ("script attempt", script_attempt_id),
+        ("channel", channel.id),
+    ):
+        if not 1 <= len(identifier) <= 128 or any(
+            character not in SAFE_ID_CHARS for character in identifier
+        ):
+            raise ScriptPackageError(f"Invalid {label} identifier")
 
     manifest_assets, files = _read_assets(
         assets,
@@ -285,6 +309,7 @@ def build_script_package(
     manifest: dict[str, object] = {
         "schema_version": SCRIPT_PACKAGE_SCHEMA_VERSION,
         "publish_job_id": publish_job.id,
+        "script_attempt_id": script_attempt_id,
         "content_item_id": content.id,
         "content_version": content.version,
         "channel_id": channel.id,
@@ -330,7 +355,9 @@ def build_script_package(
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             info.create_system = 3
-            archive.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+            archive.writestr(
+                info, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9
+            )
     data = output.getvalue()
     return ScriptPackage(
         data=data,

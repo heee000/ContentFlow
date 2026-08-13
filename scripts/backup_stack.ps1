@@ -3,7 +3,7 @@ param(
     [string]$Destination = "",
     [switch]$SkipObjects,
     [switch]$AllowLiveWrites,
-    [string]$ExpectedAlembicRevision = "c95f1e4a8d73"
+    [string]$ExpectedAlembicRevision = "e28a6b9c4f10"
 )
 
 $ErrorActionPreference = "Stop"

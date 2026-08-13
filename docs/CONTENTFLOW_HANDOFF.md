@@ -65,7 +65,7 @@ ContentFlow 面向营销内容生产，把一份活动 Brief 和品牌/产品知
 |---|---|---|
 | Web | Next.js 16.2.12、React 19.2.8、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
 | API | FastAPI 0.115+、Pydantic | REST API 前缀默认 `/api/v1` |
-| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`c95f1e4a8d73` |
+| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`e28a6b9c4f10` |
 | 隔离测试数据库 | SQLite | 仅在测试显式指定 URL 时使用，不是默认生产运行库 |
 | 生产数据库 | PostgreSQL 16 + pgvector | 迁移创建 1024 维向量表与 HNSW 索引 |
 | 异步任务 | 数据库 Job 队列 + 独立 Python Worker | 不依赖 Redis/Celery |
@@ -1496,3 +1496,25 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 ### 成熟度判断
 
 多路径发布子系统从“API 或纯人工导出”提升为“API、受控脚本、人工导出均有显式状态与防重复门禁”的 L2-L3 仓库基线。综合 ContentFlow 仍约 L2；真实账号矩阵、平台适配治理、证据防抵赖和整体企业能力闭环前，不能宣称成熟生产签收。
+
+## 21.28 脚本发布证据、双人确认与第二十四轮复审
+
+### 本轮已完成
+
+1. 每个脚本包使用独立 `script_attempt_id`，任务包 SHA-256、证据和确认均绑定该尝试；包 URI 独立保存，不再被最终平台 URL 覆盖。
+2. reviewer 必须先上传至少一项受控证据。截图仅接受 PNG/JPEG/WebP，限制字节、像素和单帧，服务端解码并重新编码去元数据；平台导出仅接受 UTF-8 JSON 对象/数组并规范化。原始与规范化 SHA-256 均入库。
+3. 证据写入对象存储后校验长度/摘要，工作区授权下载时再次比对数据库摘要；证据列表、下载、上传和确认均经工作区与角色门禁。
+4. 脚本渠道可配置 1 人或 2 人确认。双人模式要求不同 reviewer 对同一任务包和证据 manifest 给出一致决定；第一次确认后任务进入 `script_confirmation_pending` 并冻结证据，决定或平台引用冲突失败关闭。
+5. Alembic head 更新为 `e28a6b9c4f10`，新增 `publish_evidence_items` 与 `publish_confirmations`；未版本化上一 head 可安全接管，半组表拒绝。备份默认 head 同步，恢复最低 public 表数从 24 更新为 26。
+
+### 当前验证与事实边界
+
+- 迁移编译和 11 项空库/接管/半迁移/降级测试通过；证据规范化与端到端流程覆盖上传、下载摘要、跨工作区 404、冻结、同人重复、冲突和第二人确认。后端全量 `206 passed, 7 skipped, 135 subtests passed`；Ruff、Python 编译、依赖/锁文件、前端 ESLint/生产构建、默认与 observability Compose、灾备脚本语法均通过。当前提交的 GitHub Actions run 在签收后回填。
+- `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_BYTES` 默认 10 MiB，`CONTENTFLOW_PUBLISH_EVIDENCE_MAX_PIXELS` 默认 4000 万；前者不能超过通用上传上限。
+- 当前是应用层可审计证据，不是平台签名回执、可信时间戳或 WORM 法律证据；数据库管理员可绕过 API，写对象后事务失败可留下孤儿，尚无恶意扫描/DLP/法务保留。
+- 双人模式只有不同用户与一致性约束，不含岗位冲突、step-up MFA、确认到期/升级/委派。启用前应确保至少两名可用 reviewer，否则任务会合理停留在待二次确认。
+- 仍未读取、修改或暂存 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。
+
+### 第二十四轮成熟度判断
+
+脚本发布子系统已从“人工文本登记”升级为“任务包绑定、受控证据、摘要复验、冻结和可选双人一致确认”的 L2-L3 仓库基线。综合 ContentFlow 仍约 L2：真实平台真实性、组织职责策略、合规证据保留、真实浏览器矩阵、SRE/灾备/IAM/成本和部署供应链共同签收前，不能宣称成熟企业生产系统。

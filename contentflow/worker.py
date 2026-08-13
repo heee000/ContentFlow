@@ -593,6 +593,7 @@ def handle_publish_dispatch(
         "exported",
         "script_ready",
         "script_published",
+        "script_confirmation_pending",
         "draft_created",
         "submitted",
     }:
@@ -653,11 +654,18 @@ def handle_publish_dispatch(
 
     storage = build_object_storage(settings)
     if delivery_mode == "script":
+        script_attempt_id = str(uuid.uuid4())
+        confirmation_required = (
+            2
+            if (channel.config_json or {}).get("script_confirmation_required") == 2
+            else 1
+        )
         package = build_script_package(
             publish_job=publish_job,
             content=content,
             channel=channel,
             assets=assets,
+            script_attempt_id=script_attempt_id,
             storage=storage,
             max_total_bytes=settings.max_upload_bytes,
         )
@@ -672,11 +680,17 @@ def handle_publish_dispatch(
         publish_job.external_url = stored.uri
         publish_job.response_json = {
             "mode": "script",
+            "script_attempt_id": script_attempt_id,
             "package_uri": stored.uri,
             "package_sha256": stored.checksum,
             "size_bytes": stored.size_bytes,
             "platform": channel.platform,
             "final_submission_requires_human": True,
+            "script_confirmation_required": confirmation_required,
+            "script_confirmation_count": 0,
+            "script_confirmation_decision": None,
+            "script_evidence_count": 0,
+            "script_evidence_frozen": False,
         }
         publish_job.error = None
         publish_job.published_at = None
@@ -690,6 +704,8 @@ def handle_publish_dispatch(
             metadata={
                 "channel_id": channel.id,
                 "package_sha256": stored.checksum,
+                "script_attempt_id": script_attempt_id,
+                "script_confirmation_required": confirmation_required,
                 "size_bytes": stored.size_bytes,
             },
         )
@@ -839,6 +855,7 @@ def handle_publish_reconcile(
         "exported",
         "script_ready",
         "script_published",
+        "script_confirmation_pending",
         "draft_created",
         "failed",
     }:
@@ -891,6 +908,7 @@ def handle_publish_reconcile(
         "exported",
         "script_ready",
         "script_published",
+        "script_confirmation_pending",
         "draft_created",
         "failed",
     }

@@ -523,9 +523,140 @@ class PublishJob(TimestampMixin, Base):
     @property
     def delivery_mode(self) -> str:
         mode = (self.request_json or {}).get("delivery_mode")
+
         if mode in {"connector", "script", "manual_export"}:
             return str(mode)
         return "connector"
+
+    @property
+    def script_confirmation_required(self) -> int:
+        value = (self.response_json or {}).get("script_confirmation_required")
+        return 2 if value == 2 else 1
+
+    @property
+    def script_confirmation_count(self) -> int:
+        value = (self.response_json or {}).get("script_confirmation_count")
+        return max(0, int(value)) if isinstance(value, int) else 0
+
+    @property
+    def script_confirmation_decision(self) -> str | None:
+        value = (self.response_json or {}).get("script_confirmation_decision")
+        return value if isinstance(value, str) else None
+
+    @property
+    def script_evidence_count(self) -> int:
+        value = (self.response_json or {}).get("script_evidence_count")
+        return max(0, int(value)) if isinstance(value, int) else 0
+
+    @property
+    def script_package_available(self) -> bool:
+        response_json = self.response_json or {}
+        package_uri = response_json.get("package_uri")
+        package_sha256 = response_json.get("package_sha256")
+        return (
+            isinstance(package_uri, str)
+            and isinstance(package_sha256, str)
+            and len(package_sha256) == 64
+            and all(character in "0123456789abcdef" for character in package_sha256)
+        )
+
+
+class PublishEvidence(Base):
+    __tablename__ = "publish_evidence_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "publish_job_id",
+            "script_attempt_id",
+            "object_sha256",
+            name="uq_publish_evidence_attempt_object",
+        ),
+        CheckConstraint(
+            "kind IN ('screenshot', 'platform_export')",
+            name="kind",
+        ),
+        CheckConstraint("size_bytes > 0", name="size_bytes_positive"),
+        CheckConstraint(
+            "length(package_sha256) = 64 AND length(source_sha256) = 64 "
+            "AND length(object_sha256) = 64",
+            name="sha256_lengths",
+        ),
+        Index(
+            "ix_publish_evidence_attempt_created",
+            "publish_job_id",
+            "script_attempt_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    publish_job_id: Mapped[str] = mapped_column(
+        ForeignKey("publish_jobs.id", ondelete="CASCADE"), index=True
+    )
+    script_attempt_id: Mapped[str] = mapped_column(String(36), index=True)
+    package_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(24), index=True)
+    original_filename: Mapped[str] = mapped_column(String(255))
+    storage_uri: Mapped[str] = mapped_column(Text)
+    source_sha256: Mapped[str] = mapped_column(String(64))
+    object_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    mime_type: Mapped[str] = mapped_column(String(80))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    uploaded_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+
+
+class PublishConfirmation(Base):
+    __tablename__ = "publish_confirmations"
+    __table_args__ = (
+        UniqueConstraint(
+            "publish_job_id",
+            "script_attempt_id",
+            "confirmed_by_user_id",
+            name="uq_publish_confirmation_attempt_user",
+        ),
+        CheckConstraint(
+            "decision IN ('confirmed_published', 'confirmed_not_published')",
+            name="decision",
+        ),
+        CheckConstraint(
+            "length(package_sha256) = 64 AND length(evidence_manifest_sha256) = 64",
+            name="sha256_lengths",
+        ),
+        Index(
+            "ix_publish_confirmation_attempt_created",
+            "publish_job_id",
+            "script_attempt_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    publish_job_id: Mapped[str] = mapped_column(
+        ForeignKey("publish_jobs.id", ondelete="CASCADE"), index=True
+    )
+    script_attempt_id: Mapped[str] = mapped_column(String(36), index=True)
+    package_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    decision: Mapped[str] = mapped_column(String(32), index=True)
+    reason: Mapped[str] = mapped_column(Text)
+    external_id: Mapped[str | None] = mapped_column(String(255))
+    external_url: Mapped[str | None] = mapped_column(Text)
+    evidence_manifest_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    confirmed_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
 
 
 class MetricSnapshot(Base):

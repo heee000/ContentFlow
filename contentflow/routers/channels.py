@@ -27,7 +27,16 @@ def validate_channel_payload(payload: ChannelCreate) -> str:
                 status_code=422,
                 detail="脚本连接不接收平台凭据，请在本机浏览器中人工登录",
             )
+        if payload.script_confirmation_required not in {1, 2}:
+            raise HTTPException(
+                status_code=422, detail="Confirmation count must be 1 or 2"
+            )
         return "script_only"
+    if payload.script_confirmation_required != 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Two-person confirmation is only valid for script connections",
+        )
     if payload.connection_mode == "manual_export":
         if payload.platform != "xiaohongshu":
             raise HTTPException(status_code=422, detail="人工导出目前只适用于小红书")
@@ -95,7 +104,11 @@ def create_channel(
             if payload.credentials
             else None
         ),
-        config_json={**payload.config, "connection_mode": connection_mode},
+        config_json={
+            **payload.config,
+            "connection_mode": connection_mode,
+            "script_confirmation_required": payload.script_confirmation_required,
+        },
     )
     session.add(channel)
     session.flush()
@@ -110,6 +123,7 @@ def create_channel(
             "platform": channel.platform,
             "display_name": channel.display_name,
             "connection_mode": connection_mode,
+            "script_confirmation_required": payload.script_confirmation_required,
         },
     )
     return channel

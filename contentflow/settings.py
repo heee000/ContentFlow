@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     storage_backend: str = "local"
     local_storage_dir: Path = Path(".contentflow/storage")
     max_upload_bytes: int = Field(default=100 * 1024 * 1024, gt=0, le=1024**3)
+    publish_evidence_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        gt=0,
+        le=100 * 1024 * 1024,
+    )
+    publish_evidence_max_pixels: int = Field(
+        default=40_000_000,
+        gt=0,
+        le=100_000_000,
+    )
     public_base_url: str = "http://localhost:8000"
     s3_endpoint_url: str | None = None
     s3_region: str = "us-east-1"
@@ -115,6 +125,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "worker_stale_seconds must be greater than twice "
                 "worker_heartbeat_seconds"
+            )
+        if self.publish_evidence_max_bytes > self.max_upload_bytes:
+            raise ValueError(
+                "publish_evidence_max_bytes must not exceed max_upload_bytes"
             )
         return self
 
@@ -292,10 +306,7 @@ class Settings(BaseSettings):
                 not isinstance(self.media_api_key, str)
                 or not 1 <= len(self.media_api_key) <= 4096
                 or not self.media_api_key.isascii()
-                or any(
-                    not 0x21 <= ord(char) <= 0x7E
-                    for char in self.media_api_key
-                )
+                or any(not 0x21 <= ord(char) <= 0x7E for char in self.media_api_key)
             ):
                 raise ValueError(
                     "CONTENTFLOW_MEDIA_API_KEY must contain 1 to 4096 printable "
@@ -316,10 +327,7 @@ class Settings(BaseSettings):
                 and (
                     not 1 <= len(model) <= 200
                     or model != model.strip()
-                    or any(
-                        ord(char) < 0x20 or ord(char) == 0x7F
-                        for char in model
-                    )
+                    or any(ord(char) < 0x20 or ord(char) == 0x7F for char in model)
                     or not self._is_utf8_text(model)
                 )
             ]

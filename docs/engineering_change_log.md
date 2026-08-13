@@ -311,3 +311,23 @@
 - 涉及文件：`contentflow/script_publishing.py`、`contentflow/entities.py`、`contentflow/schemas.py`、`contentflow/routers/channels.py`、`contentflow/routers/publishing.py`、`contentflow/routers/metrics.py`、`contentflow/worker.py`、`web/app/contentflow-app.tsx`、`tests/test_script_publishing.py`、`tests/test_script_publish_flow.py`、`tests/test_worker_v2.py` 及发布文档。
 - 验证：最终本地后端全量 `194 passed, 7 skipped, 130 subtests passed`，分支覆盖率 `82%`；Ruff 与锁文件检查通过；运行器源码从 ZIP 中取出后真实 `compile()`。测试覆盖可复现包、无凭据、完整哈希、官方入口/路径约束、不含 `.click(`、渠道拒绝凭据/远程测试、脚本排期—Worker—下载—人工结果、非 API 指标拒绝、确定失败切换、结果不确定禁止切换、旧小红书任务兼容。前端 ESLint、2 项渲染测试、Next.js 生产构建通过，`npm audit --audit-level=high` 为 0 vulnerabilities。远程 run `31699801246` 的 PostgreSQL+MinIO 后端/安全、前端、SBOM/可复现源码、SLSA provenance 与双 CycloneDX attest/发布后验证四个 job 全部成功；artifact `9180780462` 摘要为 `sha256:8b852e875588ab637dcdf7f09c4874031424cb59ad10e5bd87f7a29179cd36f1`。
 - 剩余边界：未以小红书/抖音真实账号执行浏览器 E2E；平台 DOM、登录挑战、声明/可见范围/定时发布控件会变化，当前选择器失败时只退化为人工复制；Playwright/Chromium 安装依赖外部下载，任务包未签代码签名；平台条款、账号风控和组织批准需逐平台确认；人工“已发布”证据仍依赖 reviewer 真实性，尚无截图/平台导出/双人复核与长期不可变证据。
+
+### CF-20260813-04：脚本发布结果缺少可校验证据和职责分离
+
+- 状态：本地实现与复审完成，等待当前提交的远程 CI 签收。
+- 问题与影响：原脚本通道只要求 reviewer 填写结果和理由，单人误操作、错误任务包、事后追加附件或对象被替换都可能造成无法可靠复核的成功记录。
+- 根因：发布任务没有独立脚本尝试标识、证据实体、规范化摘要、证据清单和确认实体；渠道也没有可选双人策略，任务包下载地址会被最终平台 URL 覆盖。
+- 解决方案：每次任务包生成独立 UUID `script_attempt_id` 并绑定包 SHA-256；新增截图/平台 JSON 证据上传、列表和授权下载。PNG/JPEG/WebP 经 Pillow 解码、像素/帧限制和服务端重编码去元数据，JSON 限对象/数组并规范化；对象写入后校验长度与 SHA-256，下载再次按数据库摘要复验。新增不可由 API 修改的确认记录；脚本渠道可选 1 或 2 人确认，双人模式要求不同 reviewer 针对同一尝试、任务包和证据 manifest 作出相同决定，第一次确认后冻结证据，决定或平台引用冲突返回 409。任务包 URI 独立保留，使待二次确认和终态仍能下载核验。
+- 涉及文件：`contentflow/publish_evidence.py`、`contentflow/routers/publish_evidence.py`、`contentflow/entities.py`、`contentflow/schemas.py`、`contentflow/routers/publishing.py`、`contentflow/routers/channels.py`、`contentflow/script_publishing.py`、`contentflow/worker.py`、`contentflow/api.py`、`web/app/contentflow-app.tsx`、相关测试和用户/运维文档。
+- 验证：规范化单元测试覆盖图片去元数据的确定输出、JSON 规范化、重复键/100 层以上嵌套/畸形输入拒绝、manifest 稳定性和尝试绑定；端到端覆盖无证据拒绝、授权上传/下载与摘要、跨工作区 404、首人冻结、同人重复拒绝、第二名一致确认、冲突决定拒绝和终态。迁移结构覆盖约束、唯一键、复合索引、旧 head 接管和半组表失败关闭；后端全量 `206 passed, 7 skipped, 135 subtests passed`，前端 ESLint/生产构建与其余本地门禁通过；远程 CI 结果在本阶段签收后回填。
+- 剩余边界：应用层记录不是平台签名回执、可信时间戳或 WORM 法律证据；数据库管理员仍可绕过 API 改表；对象写入后若数据库事务失败可能留下孤儿对象；没有恶意软件/DLP、法务保留、自动平台交叉核验、确认到期/升级或真正组织级职责分离策略。
+
+### CF-20260813-05：新增迁移未同步灾备默认门槛
+
+- 状态：本地修复完成，等待当前提交的远程 PostgreSQL/MinIO 与恢复门禁签收。
+- 问题与影响：发布证据新增两张表后，备份和恢复脚本仍默认旧 head 与 24 张表，会错误拒绝当前备份，或允许运维继续按旧结构判断完整性。
+- 根因：数据库功能迁移与灾备脚本默认值没有作为同一变更面维护；首版 SHA-256 长度约束还曾被误嵌入 kind 约束，差异复核时发现且未进入提交。
+- 解决方案：修正迁移为独立 kind/size/SHA-256 约束并补断言；备份默认 revision 更新为 `e28a6b9c4f10`，恢复最低 public 表数更新为 26；运维和交接文档同步当前事实，历史演练保留为历史证据而不冒充当前签收。
+- 涉及文件：`migrations/versions/e28a6b9c4f10_add_publish_evidence.py`、`contentflow/migrate.py`、`tests/test_migrations.py`、`scripts/backup_stack.ps1`、`scripts/verify_backup.ps1`、`docs/operations.md`、`docs/CONTENTFLOW_HANDOFF.md`。
+- 验证：迁移 Python 编译与 11 项 SQLite 空库/接管/半迁移/降级测试通过；真实 PostgreSQL 和 26 表恢复仍必须由当前 CI/独立恢复演练签收。
+- 剩余边界：CI 的数据库迁移不等于数据库与对象联合恢复演练，也不等于 PITR、异地复制或 Object Lock；当前阶段不会启动或改写用户持久数据库。

@@ -359,6 +359,7 @@ class ChannelCreate(BaseModel):
     platform: Platform
     display_name: str = Field(min_length=1, max_length=120)
     connection_mode: Literal["connector", "script", "manual_export"] = "connector"
+    script_confirmation_required: Literal[1, 2] = 1
     credentials: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
 
@@ -404,11 +405,44 @@ class PublishJobResponse(ORMModel):
     delivery_mode: str
     external_id: str | None
     external_url: str | None
+    script_confirmation_required: int
+    script_confirmation_count: int
+    script_confirmation_decision: str | None
+    script_evidence_count: int
     attempts: int
+    script_package_available: bool
     error: str | None
     published_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class PublishEvidenceResponse(ORMModel):
+    id: str
+    publish_job_id: str
+    script_attempt_id: str
+    package_sha256: str
+    kind: str
+    original_filename: str
+    source_sha256: str
+    object_sha256: str
+    mime_type: str
+    size_bytes: int
+    uploaded_by_user_id: str
+    created_at: datetime
+
+
+class PublishConfirmationResponse(ORMModel):
+    id: str
+    script_attempt_id: str
+    package_sha256: str
+    external_id: str | None
+    external_url: str | None
+    decision: str
+    reason: str
+    confirmed_by_user_id: str
+    evidence_manifest_sha256: str
+    created_at: datetime
 
 
 class MetricInput(BaseModel):

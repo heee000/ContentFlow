@@ -31,6 +31,7 @@ from .routers import (
     knowledge,
     metrics,
     publishing,
+    publish_evidence,
     runs,
 )
 from .settings import Settings, get_settings
@@ -211,6 +212,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(assets.router, prefix=prefix)
     application.include_router(channels.router, prefix=prefix)
     application.include_router(publishing.router, prefix=prefix)
+    application.include_router(publish_evidence.router, prefix=prefix)
     application.include_router(metrics.router, prefix=prefix)
     application.include_router(dashboard.router, prefix=prefix)
     application.include_router(jobs.router, prefix=prefix)

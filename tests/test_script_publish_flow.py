@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import uuid
 import zipfile
+from PIL import Image
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -54,9 +55,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
             },
         )
         self.assertEqual(registered.status_code, 201, registered.text)
-        self.headers = {
-            "Authorization": f"Bearer {registered.json()['access_token']}"
-        }
+        self.headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
         self.workspace_id = registered.json()["workspace_id"]
         self.worker = Worker(
             settings=self.settings,
@@ -153,13 +152,13 @@ class ScriptPublishFlowTest(unittest.TestCase):
             session.commit()
             return content.id
 
-    def _schedule(self, *, mode: str = "script") -> dict:
+    def _schedule(self, *, mode: str = "script", channel_id: str | None = None) -> dict:
         response = self.client.post(
             "/api/v1/publishing/jobs",
             headers=self.headers,
             json={
                 "content_item_id": self.content_id,
-                "channel_id": self.channel_id,
+                "channel_id": channel_id or self.channel_id,
                 "delivery_mode": mode,
                 "scheduled_at": (
                     datetime.now(timezone.utc) + timedelta(minutes=1)
@@ -224,6 +223,49 @@ class ScriptPublishFlowTest(unittest.TestCase):
             f"/api/v1/metrics/pull/{scheduled['id']}", headers=self.headers
         )
         self.assertEqual(automatic_metrics.status_code, 409, automatic_metrics.text)
+        missing_evidence = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/script-result",
+            headers=self.headers,
+            json={
+                "decision": "confirmed_published",
+                "reason": "运营人员已在平台后台按标题和时间核对",
+                "external_id": "script-post-001",
+            },
+        )
+        self.assertEqual(missing_evidence.status_code, 409, missing_evidence.text)
+
+        evidence_buffer = io.BytesIO()
+        Image.new("RGB", (12, 8), color=(13, 89, 140)).save(
+            evidence_buffer,
+            format="PNG",
+        )
+        evidence = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=self.headers,
+            data={"kind": "screenshot"},
+            files={
+                "file": (
+                    "platform-result.png",
+                    evidence_buffer.getvalue(),
+                    "text/html",
+                )
+            },
+        )
+        self.assertEqual(evidence.status_code, 201, evidence.text)
+        evidence_payload = evidence.json()
+        self.assertEqual(evidence_payload["mime_type"], "image/png")
+        evidence_download = self.client.get(
+            (
+                f"/api/v1/publishing/jobs/{scheduled['id']}/evidence/"
+                f"{evidence_payload['id']}/download"
+            ),
+            headers=self.headers,
+        )
+        self.assertEqual(evidence_download.status_code, 200, evidence_download.text)
+        self.assertEqual(
+            evidence_download.headers["x-contentflow-evidence-sha256"],
+            hashlib.sha256(evidence_download.content).hexdigest(),
+        )
         self.assertIn("人工指标", automatic_metrics.json()["error"]["message"])
         with zipfile.ZipFile(io.BytesIO(artifact.content)) as archive:
             self.assertIn("publish_assistant.py", archive.namelist())
@@ -251,9 +293,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
             queue_job = session.get(Job, queue_job_id)
             actions = set(
                 session.scalars(
-                    select(AuditLog.action).where(
-                        AuditLog.entity_id == scheduled["id"]
-                    )
+                    select(AuditLog.action).where(AuditLog.entity_id == scheduled["id"])
                 )
             )
             self.assertEqual(queue_job.status, "succeeded")
@@ -316,6 +356,152 @@ class ScriptPublishFlowTest(unittest.TestCase):
         with db.SessionLocal() as session:
             publish_job = session.get(PublishJob, scheduled["id"])
             self.assertEqual(publish_job.status, "reconciliation_required")
+
+    def test_two_distinct_reviewers_confirm_the_same_frozen_evidence(self):
+        channel = self.client.post(
+            "/api/v1/channels",
+            headers=self.headers,
+            json={
+                "platform": "xiaohongshu",
+                "display_name": "Two-reviewer script account",
+                "connection_mode": "script",
+                "script_confirmation_required": 2,
+                "credentials": {},
+                "config": {},
+            },
+        )
+        self.assertEqual(channel.status_code, 201, channel.text)
+        scheduled = self._schedule(channel_id=channel.json()["id"])
+        self._make_dispatch_due(scheduled["id"])
+        self.assertTrue(self.worker.run_once())
+
+        evidence_buffer = io.BytesIO()
+        Image.new("RGB", (10, 10), color=(60, 120, 30)).save(
+            evidence_buffer,
+            format="PNG",
+        )
+        evidence = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=self.headers,
+            data={"kind": "screenshot"},
+            files={
+                "file": (
+                    "two-person-proof.png",
+                    evidence_buffer.getvalue(),
+                    "image/png",
+                )
+            },
+        )
+        self.assertEqual(evidence.status_code, 201, evidence.text)
+
+        first = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/script-result",
+            headers=self.headers,
+            json={
+                "decision": "confirmed_published",
+                "reason": "First reviewer checked the platform timestamp and title",
+                "external_id": "two-reviewer-post",
+            },
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["status"], "script_confirmation_pending")
+        self.assertEqual(first.json()["script_confirmation_count"], 1)
+        self.assertEqual(first.json()["script_confirmation_required"], 2)
+
+        same_reviewer = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/script-result",
+            headers=self.headers,
+            json={
+                "decision": "confirmed_published",
+                "reason": "The same reviewer cannot supply both confirmations",
+                "external_id": "two-reviewer-post",
+            },
+        )
+        self.assertEqual(same_reviewer.status_code, 409, same_reviewer.text)
+        frozen_evidence = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=self.headers,
+            data={"kind": "platform_export"},
+            files={"file": ("later.json", b"{}", "application/json")},
+        )
+        self.assertEqual(frozen_evidence.status_code, 409, frozen_evidence.text)
+
+        registered = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "second-reviewer@example.com",
+                "password": "a-second-secure-password",
+                "display_name": "Second Reviewer",
+                "workspace_name": "Second Reviewer Workspace",
+            },
+        )
+        self.assertEqual(registered.status_code, 201, registered.text)
+        second_headers = {
+            "Authorization": f"Bearer {registered.json()['access_token']}"
+        }
+        cross_workspace_list = self.client.get(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=second_headers,
+        )
+        self.assertEqual(cross_workspace_list.status_code, 404)
+        cross_workspace_download = self.client.get(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence/"
+            f"{evidence.json()['id']}/download",
+            headers=second_headers,
+        )
+        self.assertEqual(cross_workspace_download.status_code, 404)
+        member = self.client.post(
+            "/api/v1/admin/members",
+            headers=self.headers,
+            json={"email": "second-reviewer@example.com", "role": "reviewer"},
+        )
+        self.assertEqual(member.status_code, 201, member.text)
+        switched = self.client.post(
+            f"/api/v1/auth/switch/{self.workspace_id}",
+            headers=second_headers,
+        )
+        self.assertEqual(switched.status_code, 200, switched.text)
+        switched_headers = {
+            "Authorization": f"Bearer {switched.json()['access_token']}"
+        }
+
+        disagreement = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/script-result",
+            headers=switched_headers,
+            json={
+                "decision": "confirmed_not_published",
+                "reason": "Second reviewer supplied a conflicting decision",
+            },
+        )
+        self.assertEqual(disagreement.status_code, 409, disagreement.text)
+        second = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/script-result",
+            headers=switched_headers,
+            json={
+                "decision": "confirmed_published",
+                "reason": "Second reviewer independently checked the same platform record",
+                "external_id": "two-reviewer-post",
+            },
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["status"], "script_published")
+        self.assertEqual(second.json()["script_confirmation_count"], 2)
+
+        confirmations = self.client.get(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/confirmations",
+            headers=self.headers,
+        )
+        self.assertEqual(confirmations.status_code, 200, confirmations.text)
+        confirmation_items = confirmations.json()
+        self.assertEqual(len(confirmation_items), 2)
+        self.assertEqual(
+            len({item["confirmed_by_user_id"] for item in confirmation_items}),
+            2,
+        )
+        self.assertEqual(
+            len({item["evidence_manifest_sha256"] for item in confirmation_items}),
+            1,
+        )
 
 
 if __name__ == "__main__":
