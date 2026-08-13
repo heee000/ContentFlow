@@ -235,7 +235,7 @@ API 等价操作是 `POST /api/v1/publishing/jobs/{publish_job_id}/reconcile`，
 
 仓库的 `.github/workflows/ci.yml` 在 main 推送、Pull Request 和人工触发时定义两条只读门禁：
 
-1. 后端使用固定 digest 的 PostgreSQL/pgvector 和临时 MinIO 服务，从 `uv.lock` 重建全部依赖，执行 Ruff、56 项测试、真实 PostgreSQL/MinIO 集成场景、75% 分支覆盖率和严格 `pip-audit`。
+1. 后端使用固定 digest 的 PostgreSQL/pgvector 和临时 MinIO 服务，从 `uv.lock` 重建全部依赖，执行 Ruff、全量 pytest、真实 PostgreSQL/MinIO 集成场景、75% 分支覆盖率和严格 `pip-audit`。
 2. 前端使用 Node 22.13.0 和 `npm ci`，执行 ESLint、Sites/vinext 渲染测试、Next.js 生产构建和高危级别 npm 审计。
 3. checkout、setup-uv 和 setup-node 均固定到完整提交 SHA；`.github/dependabot.yml` 每周检查 uv、npm、GitHub Actions 和 Docker 依赖。
 
@@ -258,6 +258,8 @@ npm audit --audit-level=moderate
 ```
 
 升级 Python 依赖后必须重新运行 `uv lock` 和漏洞审计；升级前端依赖后必须更新 `package-lock.json` 并从空 `node_modules` 执行 `npm ci`。不要未经依赖链审查直接运行 `npm audit fix --force`。工作流文件存在不等于远程门禁已经启用：仓库管理员仍需在 GitHub 受保护分支上要求后端和前端检查通过后才能合并。
+
+CI 还会生成 CycloneDX、可复现源码归档和 SHA-256 清单；非 PR 运行在三条低权限门禁通过后发布 SLSA/CycloneDX 签名证明。下载后的离线验证与 `gh attestation verify` 命令见 [软件供应链证据](supply_chain.md)。分支保护除后端/前端外还应要求 `SBOM and reproducible source evidence`；证明 Job 只在非 PR 运行，不能设为 PR 必需检查。当前没有签名 OCI 镜像，不得用源码证明替代镜像扫描、签名和部署时验签。
 
 ### 租约耗尽与权限竞态补充
 

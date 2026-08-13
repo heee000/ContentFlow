@@ -281,3 +281,23 @@
 | Git/远程 | 实现提交 `8a79658952ebac63ed866c24b57940e3286c023b` 与证据提交 `285de6a32de15124d1f7a59b771b6972b086bce9` 已普通快进到 `main`；[ContentFlow CI #31560723174](https://github.com/heee000/ContentFlow/actions/runs/31560723174) 为 success，Backend/Frontend 两个 Job 均成功 |
 
 后续新增改动继续按本台账逐项记录，并为新的提交重新取得本地门禁与远程 CI；本次成功运行不得替代未来阶段证据。
+
+### CF-20260813-01：交付源码和依赖没有可独立验证的供应链证明
+
+- 状态：本地实现与真实材料验证通过；远程 CI、Artifact 和三份 GitHub Attestations 待本条所在提交推送后回填。
+- 问题与影响：仓库已有 uv/npm 锁、依赖审计和固定 SHA Action，但接收方无法证明下载的源码归档对应哪个 commit，也没有可携带的 Python/前端依赖清单、摘要清单和签名来源；CI 成功页面不能独立绑定某个下载文件。
+- 根因：质量门禁只消费测试/审计结果，没有把源码、依赖清单、摘要和 OIDC 签名组织成可下载、可复验的交付制品；工作流所有 Job 共用全局只读权限，尚未设计证明写权限的最小作用域。
+- 解决方案：新增 `scripts/supply_chain.py`，生成零时间戳 gzip 包装的 `git archive`，要求声明 commit 与 checkout 一致，并在验证时重新生成摘要、比对 `git ls-files`、拒绝私钥/本地环境/`.contentflow` 路径；解析 Python/npm CycloneDX，归并 npm 相同身份的多安装路径，检查组件版本、唯一 purl、依赖图、漏洞字段和构建机绝对路径泄漏；生成和严格核验 `SHA256SUMS`。CI 新增只读 `supply-chain` Job 和仅非 PR 的 `attest-supply-chain` Job，后者等待 Backend/Frontend/SBOM 全部成功，再分别生成 SLSA 来源证明和两份 CycloneDX 证明，并用仓库、签名工作流和源码 SHA 反向验签。所有 checkout 禁止持久化令牌，新增 Action 固定到完整提交 SHA。
+- 涉及文件：`.github/workflows/ci.yml`、`scripts/supply_chain.py`、`tests/test_supply_chain.py`、`docs/supply_chain.md`、`README.md`、`docs/operations.md`、`docs/production_requirements.md`、`docs/CONTENTFLOW_HANDOFF.md`、`docs/enterprise_readiness_review.md`。
+- 验证：新增 10 项定向测试通过；全量 187 passed、7 skipped、130 subtests，分支覆盖率 82.13%；真实 `pip-audit` CycloneDX 为 76 个组件且 0 已知漏洞，npm CycloneDX 原始 627 项包含 6 组重复 `bom-ref`，身份一致归并后为 620 个组件；源码归档包含当前 commit 的 144 个跟踪文件，现有未知未跟踪文件和 `.contentflow` 不在归档；两次生成 SHA-256 均为 `A2559A273ADD925ADE73B04CC735830DDE7778DC826FDCC501473D1AF5631F36`；完整材料离线验真通过。该摘要属于实现前基准 commit `34ffb3f4` 的本地样本，最终提交会因树变化产生新摘要，必须以远程 Artifact 为准。
+- 剩余边界：当前证明对象是源码归档，不是 OCI 镜像；Python 清单对应 `--all-extras` 环境，前端对应完整 lockfile，不等于裁剪后的生产容器层；Actions Artifact 只保留 30 天，仍缺制品仓库不可变保留、镜像扫描/签名、部署时验签、受保护分支、环境审批和灰度回滚。
+
+### CF-20260813-02：npm CycloneDX 存在重复 bom-ref，直接签名会留下歧义
+
+- 状态：已修复并由真实 lockfile 验证。
+- 问题与影响：当前 npm 10 的 `npm sbom` 为 627 个组件生成 6 组重复 `bom-ref`，共 7 个重复项；这些记录对应同版本包的不同嵌套安装路径。重复引用会使依赖图消费者无法唯一定位组件，而简单去重又可能丢失范围、哈希、许可证或安装路径。
+- 根因：npm 以 `name@version` 作为 `bom-ref`，没有把物理安装路径编码进引用；同版本包在 lockfile 中可出现在多个嵌套路径。
+- 解决方案：规范化步骤按 `bom-ref` 分组，只允许 type/name/version/group/purl 完全一致的记录合并；scope 取 required 优先，哈希/许可证/外部引用去重，所有 npm 安装路径保存到 `contentflow:npm:package:paths`，依赖边合并去重；任一身份或未知字段冲突失败关闭。签名和上传的始终是规范化后文件。
+- 涉及文件：`scripts/supply_chain.py`、`tests/test_supply_chain.py`。
+- 验证：真实 npm 清单从 627 归并到 620 项，重复 component/dependency ref 为 0，所有 dependsOn 都能解析；测试覆盖多路径归并和版本冲突拒绝。
+- 剩余边界：这是针对 npm 当前输出的保守兼容层，不替代 CycloneDX 官方 Schema 校验；npm 未来改变字段或引用语义时，未知冲突会主动阻断 CI，需要审查后版本化适配。

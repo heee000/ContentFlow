@@ -227,6 +227,18 @@ npm audit --audit-level=moderate
 - Next.js 和 Sites 两套生产构建与服务端渲染烟测
 
 
+## 可验证的软件供应链材料
+
+CI 会在只读权限 Job 中生成 Python 与前端 CycloneDX SBOM、只含 Git 跟踪文件的可复现源码归档和 `SHA256SUMS`，并在上传 Artifact 前离线验证组件/版本/依赖图、绝对路径泄漏、归档文件集和摘要。非 Pull Request 运行在后端、前端和供应链门禁全部通过后，使用隔离的 OIDC/attestation 权限发布 SLSA 来源证明和两份 CycloneDX SBOM 证明；所有 Action 固定到完整提交 SHA，checkout 不持久化令牌。
+
+```powershell
+gh attestation verify .\contentflow-source-<commit>.tar.gz --repo heee000/ContentFlow --signer-workflow heee000/ContentFlow/.github/workflows/ci.yml --source-digest <commit>
+gh attestation verify .\contentflow-source-<commit>.tar.gz --repo heee000/ContentFlow --signer-workflow heee000/ContentFlow/.github/workflows/ci.yml --source-digest <commit> --predicate-type https://cyclonedx.org/bom
+```
+
+完整的本地生成、哈希核对、证明验证和边界说明见 [软件供应链证据](docs/supply_chain.md)。当前签名对象是源码归档，不是 OCI 镜像；镜像扫描/签名、注册表保留和部署时验签仍需后续生产签收。
+
+
 ## 备份与隔离恢复校验
 
 ```powershell
@@ -260,6 +272,7 @@ npm audit --audit-level=moderate
 - [生产化验收清单](docs/production_requirements.md)
 - [外部服务真实验收记录](docs/external_acceptance.md)
 - [工程变更台账](docs/engineering_change_log.md)
+- [软件供应链证据与验签](docs/supply_chain.md)
 - [Git 历史身份重写映射](docs/git_history_rewrite_20260812.md)
 - [企业成熟度持续复审](docs/enterprise_readiness_review.md)
 - [项目交接与现场规则](docs/CONTENTFLOW_HANDOFF.md)

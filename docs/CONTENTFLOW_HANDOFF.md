@@ -1,10 +1,10 @@
 # ContentFlow 项目交接文档
 
-> 更新日期：2026-08-10
+> 更新日期：2026-08-13
 > 适用仓库：ContentFlow 仓库根目录
 > GitHub：<https://github.com/heee000/ContentFlow>
-> 当前分支：`main`
-> 当前基准提交：`4a9f8da Add versioned prompt evaluation gates`
+> 当前工作分支：`codex/enterprise-media-runtime`
+> 本轮接手基线：`34ffb3f4 Complete GitHub history attribution rewrite`
 
 ## 0. 给接手者的最短说明
 
@@ -63,9 +63,9 @@ ContentFlow 面向营销内容生产，把一份活动 Brief 和品牌/产品知
 
 | 层级 | 当前实现 | 说明 |
 |---|---|---|
-| Web | Next.js 16.2.12、React 19.2.6、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
+| Web | Next.js 16.2.12、React 19.2.8、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
 | API | FastAPI 0.115+、Pydantic | REST API 前缀默认 `/api/v1` |
-| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前迁移 head：`b84e0d3f7c92` |
+| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`c95f1e4a8d73` |
 | 隔离测试数据库 | SQLite | 仅在测试显式指定 URL 时使用，不是默认生产运行库 |
 | 生产数据库 | PostgreSQL 16 + pgvector | 迁移创建 1024 维向量表与 HNSW 索引 |
 | 异步任务 | 数据库 Job 队列 + 独立 Python Worker | 不依赖 Redis/Celery |
@@ -111,6 +111,7 @@ ContentFlow/
 │  ├─ app/contentflow-app.tsx   前端主要界面和状态逻辑
 │  └─ lib/contentflow-api.ts    API Base、Cookie 会话刷新、fetch 和下载封装
 ├─ docs/                        架构、使用、运维和平台边界说明
+├─ scripts/supply_chain.py      CycloneDX 归并、可复现源码包、哈希与离线验真
 ├─ scripts/validate_stack.py    完整容器栈验收脚本
 ├─ docker-compose.yml           PostgreSQL、MinIO、API、Worker、Web
 └─ .contentflow/                本机数据库和素材，已被 Git 忽略

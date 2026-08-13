@@ -93,7 +93,8 @@
 - [x] 生产受治理 Prompt 提交 `47fe3444d9a4a2f7c2c8a284c4e6b0b95fcad4c2` 已由 [ContentFlow CI #31364881430](https://github.com/heee000/ContentFlow/actions/runs/31364881430) 完成真实 PostgreSQL/pgvector、MinIO、覆盖率、双端构建与依赖安全签收。
 - [x] 受保护 Prometheus 指标提交 `fe3ee101799e36dc05e644f51efbca8204cc7b02` 已由 [ContentFlow CI #31367481260](https://github.com/heee000/ContentFlow/actions/runs/31367481260) 签收鉴权、低基数标签、异常安全返回、生产 fail-fast、真实 PostgreSQL Collector、MinIO、覆盖率和双端构建/安全门禁。
 - [x] Prometheus/Grafana 交付资产已通过本地 YAML/JSON/Compose 契约与同版本 promtool 验证；提交 `c9d73101e7318da5fed5e496ad9a78eb7fb09832` 的 [ContentFlow CI #31374854714](https://github.com/heee000/ContentFlow/actions/runs/31374854714) 已完成固定 promtool 配置/规则/故障行为、真实 PostgreSQL/MinIO 和双端安全签收。
-- [ ] 受保护分支必需检查、浏览器 E2E、双 Worker/SIGKILL/数据库闪断、PITR/异地恢复、SBOM、镜像签名、独立迁移与灰度回滚仍待补齐。
+- [x] 2026-08-13 已实现 Python/前端 CycloneDX、可复现源码归档、SHA-256 清单、离线失败关闭校验，以及只在非 PR 运行的 SLSA/CycloneDX GitHub Artifact Attestations；本地真实材料为 144 个跟踪文件、76 个 Python 组件、620 个前端组件，两次源码归档 SHA-256 一致。远程签名证明需由本条所在提交的 CI 回填 URL 后才算签收。
+- [ ] 受保护分支必需检查、浏览器 E2E、双 Worker/SIGKILL/数据库闪断、PITR/异地恢复、OCI 镜像扫描/签名、独立迁移与灰度回滚仍待补齐。
 - [ ] 2026-08-08 未重新跑完整 Compose 栈：Docker Hub 拉取 python:3.12-slim 时网络失败；PostgreSQL 16/pgvector 单服务的 SKIP LOCKED、内容冲突和取消/分发竞态验证已通过，但不能替代完整栈验收。
 
 ### 2026-08-09 认证会话增量验收
