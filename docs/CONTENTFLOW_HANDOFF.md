@@ -1480,11 +1480,11 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 4. 发布工作台可选择方式、下载脚本包、登记已发布/未发布，并从尚未产生平台副作用的失败任务显式切换脚本；API 已开始或结果不确定时必须先对账，禁止直接切换。
 5. 脚本结果和审计持久化，脚本/人工导出任务只允许人工指标；下载响应提供完整包 SHA-256。旧小红书导出任务由 Worker 归一并持久化 `manual_export`。
 
-### 当前本地证据
+### 当前验证证据
 
 - 最终本地后端全量 `194 passed, 7 skipped, 130 subtests passed`，分支覆盖率 `82%`；Ruff、锁文件检查和运行器从 ZIP 读取后的真实编译均通过。
 - 覆盖确定性/哈希/无凭据/官方入口/路径边界/无最终 click、端到端状态、明确失败切换、不确定结果阻断、自动指标 API 拒绝、旧任务兼容。
-- 前端 ESLint、2 项渲染测试、Next.js 生产构建通过，`npm audit --audit-level=high` 为 0 vulnerabilities；远程 CI 仍需在本条最终提交上重新签收。
+- 前端 ESLint、2 项渲染测试、Next.js 生产构建通过，`npm audit --audit-level=high` 为 0 vulnerabilities。实现提交 `a8f58cfc9449e74ec3c2f9d783dbdd98f728228a` 已同步功能分支与 `main`；远程 CI run `31699801246` 的 PostgreSQL+MinIO 后端/安全、前端、SBOM/可复现源码、SLSA provenance 与双 CycloneDX attest/发布后验证四个 job 全部成功。artifact `9180780462` 摘要为 `sha256:8b852e875588ab637dcdf7f09c4874031424cb59ad10e5bd87f7a29179cd36f1`。
 - 未读取、修改或暂存 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。
 
 ### 持续复审与边界

@@ -304,10 +304,10 @@
 
 ### CF-20260813-03：API 不可用时缺少受控脚本发布通道
 
-- 状态：本地实现、全量门禁与生产构建通过；本条所在提交和远程 CI 待推送后回填。
+- 状态：完成。实现提交 `a8f58cfc9449e74ec3c2f9d783dbdd98f728228a` 已同步 `codex/enterprise-media-runtime` 与 `main`；远程 CI run `31699801246` 全部成功。
 - 问题与影响：原系统只有官方连接器和小红书人工导出。平台 API 不支持、账号能力尚未开放或远程调用前明确失败时，运营只能离开系统手工复制，任务状态、内容版本、素材完整性、操作者和最终结果无法形成一致闭环。直接在 API 异常后自动启浏览器脚本又可能在平台已经受理时重复发布。
 - 根因：`PublishJob` 只有连接器隐式路径，没有发布方式、脚本包领域状态、人工结果回填和“确定失败/结果不确定”的降级门禁；渠道模型也默认等同于带凭据的 API 连接。
 - 解决方案：增加 `connector/script/manual_export` 显式方式并保存到既有 `request_json`，避免数据库迁移；脚本渠道拒绝凭据并使用 `script_only`。Worker 在平台副作用前生成确定性 ZIP，包含审核版本、素材、manifest、README、固定 Playwright 依赖、逐文件 SHA-256 和只打开内置官方入口的运行器；运行器使用平台/渠道隔离 profile、验证路径/哈希、尽力填充但不点击最终按钮。工作台支持选择方式、下载、人工登记结果、明确失败后改用脚本；`publishing/submitted/reconciliation_required` 强制先对账。脚本/导出任务不能调用自动指标回收。
 - 涉及文件：`contentflow/script_publishing.py`、`contentflow/entities.py`、`contentflow/schemas.py`、`contentflow/routers/channels.py`、`contentflow/routers/publishing.py`、`contentflow/routers/metrics.py`、`contentflow/worker.py`、`web/app/contentflow-app.tsx`、`tests/test_script_publishing.py`、`tests/test_script_publish_flow.py`、`tests/test_worker_v2.py` 及发布文档。
-- 验证：最终本地后端全量 `194 passed, 7 skipped, 130 subtests passed`，分支覆盖率 `82%`；Ruff 与锁文件检查通过；运行器源码从 ZIP 中取出后真实 `compile()`。测试覆盖可复现包、无凭据、完整哈希、官方入口/路径约束、不含 `.click(`、渠道拒绝凭据/远程测试、脚本排期—Worker—下载—人工结果、非 API 指标拒绝、确定失败切换、结果不确定禁止切换、旧小红书任务兼容。前端 ESLint、2 项渲染测试、Next.js 生产构建通过，`npm audit --audit-level=high` 为 0 vulnerabilities；远程 CI 待推送后回填。
+- 验证：最终本地后端全量 `194 passed, 7 skipped, 130 subtests passed`，分支覆盖率 `82%`；Ruff 与锁文件检查通过；运行器源码从 ZIP 中取出后真实 `compile()`。测试覆盖可复现包、无凭据、完整哈希、官方入口/路径约束、不含 `.click(`、渠道拒绝凭据/远程测试、脚本排期—Worker—下载—人工结果、非 API 指标拒绝、确定失败切换、结果不确定禁止切换、旧小红书任务兼容。前端 ESLint、2 项渲染测试、Next.js 生产构建通过，`npm audit --audit-level=high` 为 0 vulnerabilities。远程 run `31699801246` 的 PostgreSQL+MinIO 后端/安全、前端、SBOM/可复现源码、SLSA provenance 与双 CycloneDX attest/发布后验证四个 job 全部成功；artifact `9180780462` 摘要为 `sha256:8b852e875588ab637dcdf7f09c4874031424cb59ad10e5bd87f7a29179cd36f1`。
 - 剩余边界：未以小红书/抖音真实账号执行浏览器 E2E；平台 DOM、登录挑战、声明/可见范围/定时发布控件会变化，当前选择器失败时只退化为人工复制；Playwright/Chromium 安装依赖外部下载，任务包未签代码签名；平台条款、账号风控和组织批准需逐平台确认；人工“已发布”证据仍依赖 reviewer 真实性，尚无截图/平台导出/双人复核与长期不可变证据。
