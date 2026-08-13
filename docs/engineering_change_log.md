@@ -331,3 +331,13 @@
 - 涉及文件：`migrations/versions/e28a6b9c4f10_add_publish_evidence.py`、`contentflow/migrate.py`、`tests/test_migrations.py`、`scripts/backup_stack.ps1`、`scripts/verify_backup.ps1`、`docs/operations.md`、`docs/CONTENTFLOW_HANDOFF.md`。
 - 验证：迁移 Python 编译与 11 项 SQLite 空库/接管/半迁移/降级测试通过；真实 PostgreSQL 和 26 表恢复仍必须由当前 CI/独立恢复演练签收。
 - 剩余边界：CI 的数据库迁移不等于数据库与对象联合恢复演练，也不等于 PITR、异地复制或 Object Lock；当前阶段不会启动或改写用户持久数据库。
+
+### CF-20260813-06：CI 的 MinIO 边界 fixture 未同步证据上传上限
+
+- 状态：修复已完成，等待下一次远程 CI 签收。
+- 问题与影响：实现提交 `20ff9d30179382822af0fca0cabc99152d0dd339` 的 [ContentFlow CI #31715306166](https://github.com/heee000/ContentFlow/actions/runs/31715306166) 中，Frontend 与 SBOM/可复现源码 Job 成功，但 Backend Job 在真实 MinIO fixture 初始化时失败，签名 Job 因依赖失败按设计跳过。
+- 根因：该 fixture 为验证 64 字节对象边界显式设置 `max_upload_bytes=64`；新增跨字段保护要求 `publish_evidence_max_bytes <= max_upload_bytes`，但 fixture 仍使用默认 10 MiB。失败发生在测试设置构造阶段，不是 PostgreSQL 迁移、MinIO 读写或产品运行时失败。
+- 解决方案：只在该专用 fixture 显式设置 `publish_evidence_max_bytes=64`，保持生产默认 10 MiB 和“证据上限不得超过通用上限”的失败关闭保护不变。
+- 涉及文件：`tests/test_minio_integration.py`、`docs/engineering_change_log.md`。
+- 验证：本地安全+MinIO 专项 `33 passed, 2 skipped, 28 subtests passed`；CI 失败运行中的其余测试为 `211 passed, 135 subtests passed`、覆盖率 82.56%。真实 MinIO 两项将在下一次 CI 中执行，不用本地跳过结果冒充签收。
+- 剩余边界：该修复只纠正测试 fixture；当前 head 的真实 PostgreSQL/MinIO、供应链证明和四 Job 全绿仍必须由新提交重新取得。

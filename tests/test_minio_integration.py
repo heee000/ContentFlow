@@ -73,6 +73,7 @@ def minio_harness():
         secret_key="minio-integration-test-secret-key",
         storage_backend="s3",
         max_upload_bytes=64,
+        publish_evidence_max_bytes=64,
         s3_endpoint_url=TEST_S3_ENDPOINT_URL,
         s3_region="us-east-1",
         s3_bucket=bucket,
