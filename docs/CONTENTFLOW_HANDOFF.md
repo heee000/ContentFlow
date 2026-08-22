@@ -1488,6 +1488,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 ## 21.27 受控脚本辅助发布、状态机防重复与第二十三轮复审
 
 ### 本轮已完成
+
 1. 发布任务和渠道新增 `connector/script/manual_export` 显式方式，存入既有 JSON 以兼容当前数据库；小红书既有默认导出与旧排队任务保持兼容。
 2. 脚本连接拒绝平台凭据；Worker 在平台副作用前生成带审核版本、素材、manifest、README、固定 Playwright 依赖和逐文件 SHA-256 的确定性 ZIP。
 3. 本机运行器仅接受内置官方入口，约束包内路径/重复摘要/渠道 ID，使用按平台和渠道隔离的持久 profile；可尽力上传/填充，但绝不点击最终发布按钮。
@@ -1550,7 +1551,9 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 全仓 Ruff 与 Python 编译通过；全量后端 `208 passed, 7 skipped, 137 subtests passed`，分支覆盖率 82.10%。7 个跳过项需要运行中的 PostgreSQL/pgvector 或 MinIO。
 - uv lock、pip check、pip-audit strict 通过；默认和 observability Compose 使用仅当前进程虚拟密钥完成 `config --quiet`。前端 ESLint、2 项渲染测试、Sites 和 Next 生产构建通过，npm audit moderate 为 0 vulnerabilities。
 - 本机 Node 22.11 低于项目要求的 22.13+，且 `npm ci` 命中 Windows 可选原生依赖安装问题；产品锁文件只精确改变 `nanoid`，最终以 Linux/Node 22.13 CI 为准。
-- 本地门禁已完成；远程 PostgreSQL/pgvector/MinIO、Linux npm ci 和供应链证明仍须由本阶段提交重新签收，未把旧 CI 冒充当前证据。- 未读取、修改或暂存 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`，忽略的账号资料也未读取或输出。
+- 实现提交 `c290f6420e30b365a0af4f7540b1d9b86355c1d7` 已普通快进到功能分支与 `main`；[ContentFlow CI #32568712614](https://github.com/heee000/ContentFlow/actions/runs/32568712614) 四个 Job 全部成功。Backend 在真实 PostgreSQL/pgvector 与 MinIO 上为 `215 passed, 137 subtests passed`、分支覆盖率 83.14%；前端、Python/npm 审计、SBOM/可复现源码均成功。
+- Artifact `9474759779` 摘要为 `sha256:272cab55b8bff31e3f3a7bc8b39e2573b79c57a0d7756b2ae99dc49b9ccb5ce2`；SLSA 来源证明和两份 CycloneDX attestation 已发布并反向验真。
+- 未读取、修改或暂存 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`，忽略的账号资料也未读取或输出。
 
 ### 第二十五轮复审：当前 5 个不足
 

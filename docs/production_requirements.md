@@ -113,6 +113,7 @@
 - [x] 2026-08-12 正式媒体运行时已与 v1/runner 对齐：响应有界、封闭信封、状态/来源/标识互斥、跨平台文件名、精确下载 allowlist、逐跳重定向、配置漂移和脱敏错误均有本地回归；live 报告升级为运行级 HMAC 指纹与完整 JSON 转义秘密扫描，幂等键拒绝首尾空白。全量 177 passed、7 skipped、130 subtests，分支覆盖率 82.13%，Ruff、锁文件、pip/npm 审计、前端双构建、Compose 与 15 个 YAML/JSON 解析通过。实现提交 `8a79658` 与证据提交 `285de6a` 已普通快进同步到 `main`；[ContentFlow CI #31560723174](https://github.com/heee000/ContentFlow/actions/runs/31560723174) 为 success，后端真实 PostgreSQL/pgvector/MinIO 与前端双 Job 已远程签收。
 - [ ] 使用目标环境的真实模型与媒体 Provider 完成调用和 v1 conformance matrix，记录请求模式、错误、时延、令牌/成本、同键不重复计费，以及视频任务轮询、下载和过期行为。
 - [x] 受控脚本发布要求至少一项规范化截图或平台 JSON 证据；任务包、脚本尝试和证据 manifest 以 SHA-256 绑定，下载重新验真。脚本渠道可选不同 reviewer 的双人一致确认，首次确认后冻结证据，冲突失败关闭。
+- [x] `c290f64` 为脚本尝试增加发起/确认分离、15 分钟至 30 天 TTL、过期重建和对象事务补偿；[CI #32568712614](https://github.com/heee000/ContentFlow/actions/runs/32568712614) 的 PostgreSQL/pgvector、MinIO、Linux 前端、安全审计和供应链四个 Job 全部成功。
 - [x] 脚本发起人与确认人分离；任务包默认 24 小时有效，过期后运行器、下载、证据上传和确认失败关闭，并可显式重建新尝试。对象写入后数据库失败会执行同步补偿删除。
 - [ ] 历史脚本尝试的证据行会保留，但当前运营 API/UI 只聚焦当前尝试；仍需历史尝试归档视图、不可变证据存储、可信时间戳和 legal hold。
 - [ ] 当前发布证据仍需补平台签名/官方查询交叉核验、可信时间戳与 WORM/Object Lock、恶意扫描/DLP、保留与 legal hold；双人策略仍需企业职责分离、step-up MFA 和确认 SLA。

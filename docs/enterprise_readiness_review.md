@@ -1508,10 +1508,10 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 | 时效性 | 15 分钟至 30 天 TTL；运行器/API 统一失败关闭；显式重建 | 过期包真实子进程拒绝、四入口 409、重建新 ID/摘要/期限 | 无撤销列表、通知和超时升级 |
 | 职责分离 | 保存发起人，禁止发起人确认；前端校验团队人数 | 单/双确认发起人拒绝和不同用户成功测试 | 无岗位冲突、MFA、委派和例外治理 |
 | 存储补偿 | 本地/S3 幂等删除；DB 失败补偿；过期清理旧包 | 路径/prefix 边界、删除、flush/commit 失败和重建测试 | 删除服务故障仍需异步巡检；无 WORM |
-| 依赖安全 | nanoid 3.3.18 精确修复 | audit 0；前端 lint/test/build 通过 | Linux npm ci 与供应链证明待当前提交 CI |
+| 依赖安全 | nanoid 3.3.18 精确修复 | 本地和 CI audit 0；Linux 锁定安装、前端双构建通过 | 其他大版本更新仍需单独兼容评估 |
 | 项目治理 | 中断残留分类清理、乱码修复、四级完成度报告 | Git 状态、历史、GitHub 配置和当前门禁复核 | 无 LICENSE/保护分支/Release/公开政策 |
 
-本地全量为 `208 passed, 7 skipped, 137 subtests passed`、分支覆盖率 82.10%；Ruff、编译、锁/依赖/漏洞审计、双 Compose 配置和前端双构建均通过。真实 PostgreSQL/pgvector、MinIO、Linux npm ci 和供应链证明必须由本阶段提交的远程 CI 重新签收。
+本地全量为 `208 passed, 7 skipped, 137 subtests passed`、分支覆盖率 82.10%；Ruff、编译、锁/依赖/漏洞审计、双 Compose 配置和前端双构建均通过。实现提交 `c290f64` 的 [CI #32568712614](https://github.com/heee000/ContentFlow/actions/runs/32568712614) 四个 Job 全部成功：真实 PostgreSQL/pgvector 与 MinIO 为 `215 passed, 137 subtests passed`、分支覆盖率 83.14%，Artifact `9474759779` 及 SLSA/双 CycloneDX 证明发布后验真成功。
 
 ### 35.3 当前仍存在的 5 个不足
 

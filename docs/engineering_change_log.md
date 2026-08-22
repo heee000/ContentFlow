@@ -345,19 +345,22 @@
 
 ### CF-20260822-01：脚本尝试没有期限，发起人可确认自己的结果
 
-- 状态：实现完成，等待本阶段提交和远程 CI 签收。
+- 状态：实现提交 `c290f6420e30b365a0af4f7540b1d9b86355c1d7` 已由 [ContentFlow CI #32568712614](https://github.com/heee000/ContentFlow/actions/runs/32568712614) 签收，四个 Job 全部 success。
 - 问题与影响：长期有效的任务包可在内容、页面或组织授权变化后继续运行；单人确认策略只校验 reviewer 角色，没有把脚本发起人排除，无法形成最基本的四眼原则。
 - 根因：尝试元数据只有 ID、包摘要和确认策略，没有发起人及过期时间；运行器和四个 API 入口也没有统一期限门禁。
 - 解决方案：生成时记录 `script_requested_by` 和带时区的 `script_confirmation_expires_at`；默认 TTL 为 1440 分钟，限制 15-43200 分钟。发起人不能确认；过期后运行器、下载、上传和确认失败关闭，允许显式重建新尝试。
 - 涉及文件：`contentflow/entities.py`、`contentflow/script_publishing.py`、`contentflow/settings.py`、`contentflow/worker.py`、`contentflow/routers/publishing.py`、`contentflow/routers/publish_evidence.py`、`contentflow/schemas.py`、前端、环境/Compose 和相关测试。
-- 验证：全量后端 `208 passed, 7 skipped, 137 subtests passed`，分支覆盖率 82.10%；Ruff、编译、锁/依赖/漏洞审计、双 Compose 配置、前端 ESLint/2 项渲染测试/Sites/Next 构建/npm 审计均通过。远程 PostgreSQL/MinIO/Linux/供应链证据待回填。- 剩余边界：无岗位/组织冲突策略、step-up MFA、委派/升级和管理员例外治理；旧尝试历史仍缺运营归档视图。
+- 本地验证：全量后端 `208 passed, 7 skipped, 137 subtests passed`，分支覆盖率 82.10%；Ruff、编译、锁/依赖/漏洞审计、双 Compose 配置、前端 ESLint/2 项渲染测试/Sites/Next 构建/npm 审计均通过。
+- 远程验证：真实 PostgreSQL/pgvector 与 MinIO 为 `215 passed, 137 subtests passed`、分支覆盖率 83.14%；Python/npm 0 已知漏洞，前端双构建、供应链证据和发布后验签成功。Artifact `9474759779` 摘要为 `sha256:272cab55b8bff31e3f3a7bc8b39e2573b79c57a0d7756b2ae99dc49b9ccb5ce2`。
+- 剩余边界：无岗位/组织冲突策略、step-up MFA、委派/升级和管理员例外治理；旧尝试历史仍缺运营归档视图。
 
 ### CF-20260822-02：对象写入与数据库事务失败可能留下孤儿
 
-- 状态：实现和本地全量门禁完成，等待真实 MinIO CI 签收。- 问题与影响：任务包或证据已写入对象存储但数据库 flush/commit 失败时，对象不再有业务引用；过期重建也会持续积累旧包。
+- 状态：实现、本地门禁和真实 MinIO CI 已完成。
+- 问题与影响：任务包或证据已写入对象存储但数据库 flush/commit 失败时，对象不再有业务引用；过期重建也会持续积累旧包。
 - 根因：对象存储契约缺删除能力，API/Worker 没有同步补偿路径。
 - 解决方案：本地和 S3 实现有边界校验的幂等 `delete`；数据库失败时回滚并尽力删除本次对象，过期重建在新状态提交后清理旧包。删除失败写日志/审计，不回滚已经成功提交的新状态。
-- 验证与边界：本地删除、路径逃逸、S3 delete_object、事务失败和过期重建定向测试通过；真实 MinIO 删除待 CI。对象存储自身故障仍可能产生孤儿，生产需定期引用对账、告警和异步补偿。
+- 验证与边界：本地删除、路径逃逸、S3 delete_object、事务失败和过期重建定向测试通过；CI 真实 MinIO 删除通过。对象存储自身故障仍可能产生孤儿，生产需定期引用对账、告警和异步补偿。
 
 ### CF-20260822-03：中断残留与跟踪文档乱码
 
@@ -368,14 +371,22 @@
 
 ### CF-20260822-04：主线新增 nanoid 高危公告
 
-- 状态：已精确修复，等待 Linux CI 确认依赖安装与双构建。
+- 状态：已精确修复，并由 Linux/Node 锁定安装、双构建和 npm audit 远程签收。
 - 问题与影响：主线 override 固定 `nanoid 3.3.17`，后来发布的公告把 `<3.3.18` 标为高危，导致当前 npm 安全门禁失败。
 - 解决方案：只把 override 和 lock 中 nanoid 更新到 `3.3.18`，不使用 `npm audit fix --force`，不混入 Next/vinext 大版本升级。
-- 验证与边界：本机 audit 为 0，lint/test/build 通过；本机 Node 22.11 低于项目要求且 Windows npm 可选原生包有安装瑕疵，最终以 CI 的 Node 22.13/Linux `npm ci` 为准。其他 Dependabot PR 仍需逐条评估。
+- 验证与边界：本机 audit 为 0，lint/test/build 通过；CI 使用 Node 22.13+ 从锁文件重建环境，双构建和 audit 为 0 漏洞。其他 Dependabot PR 仍需逐条评估。
 
 ### CF-20260822-05：缺少跨目标的阶段完成度与公开交付边界
 
 - 状态：已建立阶段报告，结论随当前提交继续校准。
-- 解决方案：新增 [阶段性总结与分层完成度](phase_summary_2026-08-22.md)，以接手基线、28 个提交、当前代码/门禁和 GitHub 治理为证据，分别给出个人本地、个人公开、公开 Beta、企业商业项目的当前比例、缺口和完成判据。
+- 解决方案：新增 [阶段性总结与分层完成度](phase_summary_2026-08-22.md)，以截至实现提交 `c290f64` 的 29 个提交、当前代码/门禁和 GitHub 治理为证据，分别给出个人本地、个人公开、公开 Beta、企业商业项目的当前比例、缺口和完成判据。
 - 当前判断：综合 L2+；四项目标约为 80%-85%、60%-65%、45%-50%、25%-35%。比例表示门禁完成度，不表示代码覆盖率或工期。
 - 剩余边界：真实平台、Provider、容量、故障恢复、组织流程和法律合规未验证部分继续明确标为未签收。
+
+### CF-20260822-06：Git Smart HTTP 网络不可用时的安全同步
+
+- 状态：两个远端分支已普通快进，未使用 force/force-with-lease；远端提交 SHA 与本地一致。
+- 问题与影响：Git HTTPS 多次连接重置/超时；SSH 主机指纹与 GitHub 官方值一致，但本机没有绑定账号的 SSH 私钥。继续重复 push 只会制造失败噪声。
+- 解决方案：通过已登录 GitHub CLI 的 Git Data API 上传本地 commit 的 29 个原始 Git blob；每个 blob SHA、tree SHA 和 commit SHA 都必须与本地逐项一致。更新引用前再次确认功能分支和 main 仍指向预期父提交，两个 PATCH 均使用 `force=false`，更新后再次读取 SHA 验证。
+- 验证：本地/API commit 均为 `c290f6420e30b365a0af4f7540b1d9b86355c1d7`，tree 均为 `3cfd24e814a208fb7e14f4f1033ebf73eb6e1492`；两个远端引用均为该提交。临时 SSH known-hosts 和 API 归档目录已删除，没有修改全局 Git/SSH 配置。
+- 剩余边界：这是本次网络故障的等价传输路径，不替代恢复正常 Git HTTPS/配置正式 SSH key；后续默认仍优先普通 `git push`。
