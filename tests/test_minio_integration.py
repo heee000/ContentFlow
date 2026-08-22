@@ -54,10 +54,7 @@ def _delete_all_bucket_objects(client, bucket: str) -> None:
 
     object_paginator = client.get_paginator("list_objects_v2")
     for page in object_paginator.paginate(Bucket=bucket):
-        objects = [
-            {"Key": item["Key"]}
-            for item in page.get("Contents") or []
-        ]
+        objects = [{"Key": item["Key"]} for item in page.get("Contents") or []]
         if objects:
             client.delete_objects(
                 Bucket=bucket,
@@ -135,9 +132,9 @@ def test_minio_round_trip_metadata_boundaries_and_size_limit(
     with pytest.raises(ValueError, match="超过读取大小限制"):
         minio_harness.storage.read(stored.uri, max_bytes=len(payload) - 1)
 
-    before = minio_harness.client.list_objects_v2(
-        Bucket=minio_harness.bucket
-    ).get("KeyCount", 0)
+    before = minio_harness.client.list_objects_v2(Bucket=minio_harness.bucket).get(
+        "KeyCount", 0
+    )
     with pytest.raises(ValueError, match="exceeds"):
         minio_harness.storage.put(
             workspace_id="workspace-minio",
@@ -145,10 +142,24 @@ def test_minio_round_trip_metadata_boundaries_and_size_limit(
             filename="oversized.bin",
             stream=BytesIO(b"x" * 65),
         )
-    after = minio_harness.client.list_objects_v2(
-        Bucket=minio_harness.bucket
-    ).get("KeyCount", 0)
+    after = minio_harness.client.list_objects_v2(Bucket=minio_harness.bucket).get(
+        "KeyCount", 0
+    )
     assert after == before
+    disposable = minio_harness.storage.put(
+        workspace_id="workspace-minio",
+        category="evidence",
+        filename="delete-me.bin",
+        stream=BytesIO(b"delete-me"),
+    )
+    disposable_key = _key_from_uri(minio_harness.bucket, disposable.uri)
+    minio_harness.storage.delete(disposable.uri)
+    assert (
+        minio_harness.client.list_objects_v2(
+            Bucket=minio_harness.bucket, Prefix=disposable_key
+        ).get("KeyCount", 0)
+        == 0
+    )
 
 
 def test_minio_detects_corruption_and_reads_legacy_checksum_keys(
@@ -173,15 +184,13 @@ def test_minio_detects_corruption_and_reads_legacy_checksum_keys(
 
     legacy_payload = b"legacy-contentflow-object"
     legacy_checksum = hashlib.sha256(legacy_payload).hexdigest()
-    legacy_key = (
-        "workspace-minio/legacy/"
-        f"{legacy_checksum[:16]}-legacy.bin"
-    )
+    legacy_key = f"workspace-minio/legacy/{legacy_checksum[:16]}-legacy.bin"
     minio_harness.client.put_object(
         Bucket=minio_harness.bucket,
         Key=legacy_key,
         Body=legacy_payload,
     )
-    assert minio_harness.storage.read(
-        f"s3://{minio_harness.bucket}/{legacy_key}"
-    ) == legacy_payload
+    assert (
+        minio_harness.storage.read(f"s3://{minio_harness.bucket}/{legacy_key}")
+        == legacy_payload
+    )

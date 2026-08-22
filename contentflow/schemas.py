@@ -409,6 +409,9 @@ class PublishJobResponse(ORMModel):
     script_confirmation_count: int
     script_confirmation_decision: str | None
     script_evidence_count: int
+    script_confirmation_expires_at: datetime | None
+    script_confirmation_expired: bool
+    script_requested_by_user_id: str | None
     attempts: int
     script_package_available: bool
     error: str | None

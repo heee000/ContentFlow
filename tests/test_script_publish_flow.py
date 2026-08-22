@@ -152,6 +152,33 @@ class ScriptPublishFlowTest(unittest.TestCase):
             session.commit()
             return content.id
 
+    def _add_reviewer(self, email: str, display_name: str) -> dict[str, str]:
+        registered = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": email,
+                "password": "a-second-secure-password",
+                "display_name": display_name,
+                "workspace_name": f"{display_name} Workspace",
+            },
+        )
+        self.assertEqual(registered.status_code, 201, registered.text)
+        isolated_headers = {
+            "Authorization": f"Bearer {registered.json()['access_token']}"
+        }
+        member = self.client.post(
+            "/api/v1/admin/members",
+            headers=self.headers,
+            json={"email": email, "role": "reviewer"},
+        )
+        self.assertEqual(member.status_code, 201, member.text)
+        switched = self.client.post(
+            f"/api/v1/auth/switch/{self.workspace_id}",
+            headers=isolated_headers,
+        )
+        self.assertEqual(switched.status_code, 200, switched.text)
+        return {"Authorization": f"Bearer {switched.json()['access_token']}"}
+
     def _schedule(self, *, mode: str = "script", channel_id: str | None = None) -> dict:
         response = self.client.post(
             "/api/v1/publishing/jobs",
@@ -209,6 +236,12 @@ class ScriptPublishFlowTest(unittest.TestCase):
         ).json()[0]
         self.assertEqual(current["status"], "script_ready")
         self.assertEqual(current["delivery_mode"], "script")
+        self.assertFalse(current["script_confirmation_expired"])
+        self.assertIsNotNone(current["script_requested_by_user_id"])
+        self.assertGreater(
+            datetime.fromisoformat(current["script_confirmation_expires_at"]),
+            datetime.now(timezone.utc),
+        )
         self.assertIsNone(current["external_id"])
         artifact = self.client.get(
             f"/api/v1/publishing/jobs/{scheduled['id']}/artifact",
@@ -272,9 +305,12 @@ class ScriptPublishFlowTest(unittest.TestCase):
             runner = archive.read("publish_assistant.py").decode("utf-8")
             self.assertNotIn(".click(", runner)
 
+        reviewer_headers = self._add_reviewer(
+            "result-reviewer@example.com", "Result Reviewer"
+        )
         result = self.client.post(
             f"/api/v1/publishing/jobs/{scheduled['id']}/script-result",
-            headers=self.headers,
+            headers=reviewer_headers,
             json={
                 "decision": "confirmed_published",
                 "reason": "运营人员已在平台后台按标题和时间核对",
@@ -299,6 +335,95 @@ class ScriptPublishFlowTest(unittest.TestCase):
             self.assertEqual(queue_job.status, "succeeded")
             self.assertIn("publish.script_package_ready", actions)
             self.assertIn("publish.script_result", actions)
+
+    def test_expired_script_attempt_is_blocked_cleaned_and_rebuilt(self):
+        scheduled = self._schedule()
+        self._make_dispatch_due(scheduled["id"])
+        self.assertTrue(self.worker.run_once())
+        storage = build_object_storage(self.settings)
+
+        with db.SessionLocal() as session:
+            publish_job = session.get(PublishJob, scheduled["id"])
+            requester = session.scalar(
+                select(User).where(User.email == "script-publisher@example.com")
+            )
+            self.assertIsNotNone(publish_job)
+            self.assertIsNotNone(requester)
+            response_json = dict(publish_job.response_json or {})
+            old_attempt_id = response_json["script_attempt_id"]
+            old_package_uri = response_json["package_uri"]
+            self.assertEqual(response_json["script_requested_by_user_id"], requester.id)
+            response_json["script_confirmation_expires_at"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat()
+            publish_job.response_json = response_json
+            session.commit()
+
+        artifact = self.client.get(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/artifact",
+            headers=self.headers,
+        )
+        self.assertEqual(artifact.status_code, 409, artifact.text)
+
+        evidence_buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), color=(120, 40, 20)).save(
+            evidence_buffer,
+            format="PNG",
+        )
+        expired_evidence = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=self.headers,
+            data={"kind": "screenshot"},
+            files={"file": ("expired.png", evidence_buffer.getvalue(), "image/png")},
+        )
+        self.assertEqual(expired_evidence.status_code, 409, expired_evidence.text)
+
+        reviewer_headers = self._add_reviewer(
+            "expiry-reviewer@example.com", "Expiry Reviewer"
+        )
+        expired_confirmation = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/script-result",
+            headers=reviewer_headers,
+            json={
+                "decision": "confirmed_not_published",
+                "reason": "Expired attempts must not accept a decision",
+            },
+        )
+        self.assertEqual(
+            expired_confirmation.status_code, 409, expired_confirmation.text
+        )
+
+        rebuilt = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/script-package",
+            headers=self.headers,
+        )
+        self.assertEqual(rebuilt.status_code, 202, rebuilt.text)
+        self.assertEqual(rebuilt.json()["status"], "scheduled")
+        self.assertFalse(rebuilt.json()["script_package_available"])
+        with self.assertRaises(FileNotFoundError):
+            storage.read(old_package_uri)
+
+        self.assertTrue(self.worker.run_once())
+        current = next(
+            item
+            for item in self.client.get(
+                "/api/v1/publishing/jobs", headers=self.headers
+            ).json()
+            if item["id"] == scheduled["id"]
+        )
+        self.assertEqual(current["status"], "script_ready")
+        self.assertFalse(current["script_confirmation_expired"])
+        with db.SessionLocal() as session:
+            current_job = session.get(PublishJob, scheduled["id"])
+            self.assertNotEqual(
+                current_job.response_json["script_attempt_id"], old_attempt_id
+            )
+            actions = set(
+                session.scalars(
+                    select(AuditLog.action).where(AuditLog.entity_id == scheduled["id"])
+                )
+            )
+            self.assertIn("publish.script_attempt_expired", actions)
 
     def test_confirmed_pre_publish_failure_can_switch_to_script(self):
         scheduled = self._schedule()
@@ -394,9 +519,25 @@ class ScriptPublishFlowTest(unittest.TestCase):
         )
         self.assertEqual(evidence.status_code, 201, evidence.text)
 
-        first = self.client.post(
+        requester_confirmation = self.client.post(
             f"/api/v1/publishing/jobs/{scheduled['id']}/script-result",
             headers=self.headers,
+            json={
+                "decision": "confirmed_published",
+                "reason": "The requester must not confirm the same attempt",
+                "external_id": "two-reviewer-post",
+            },
+        )
+        self.assertEqual(
+            requester_confirmation.status_code, 409, requester_confirmation.text
+        )
+        first_headers = self._add_reviewer(
+            "first-reviewer@example.com", "First Reviewer"
+        )
+
+        first = self.client.post(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/script-result",
+            headers=first_headers,
             json={
                 "decision": "confirmed_published",
                 "reason": "First reviewer checked the platform timestamp and title",
@@ -410,7 +551,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
 
         same_reviewer = self.client.post(
             f"/api/v1/publishing/jobs/{scheduled['id']}/script-result",
-            headers=self.headers,
+            headers=first_headers,
             json={
                 "decision": "confirmed_published",
                 "reason": "The same reviewer cannot supply both confirmations",

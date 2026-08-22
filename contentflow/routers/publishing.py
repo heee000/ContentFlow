@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -27,6 +28,7 @@ from ..schemas import (
 )
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/publishing", tags=["publishing"])
 Db = Annotated[Session, Depends(get_db)]
 Reviewer = Annotated[Principal, Depends(require_role("reviewer"))]
@@ -126,6 +128,7 @@ def schedule_publish(
         request_json={
             "content_version": content.version,
             "delivery_mode": delivery_mode,
+            "script_requested_by": principal.user_id,
         },
     )
     session.add(publish_job)
@@ -306,6 +309,7 @@ def create_script_package(
     publish_job_id: str,
     principal: Reviewer,
     session: Db,
+    settings: AppSettings,
 ):
     query = select(PublishJob).where(
         PublishJob.id == publish_job_id,
@@ -317,6 +321,8 @@ def create_script_package(
     if job is None:
         raise HTTPException(status_code=404, detail="发布任务不存在")
     previous_status = job.status
+    response_json = dict(job.response_json or {})
+    expired_attempt = job.script_confirmation_expired
     if previous_status in {"publishing", "submitted", "reconciliation_required"}:
         raise HTTPException(
             status_code=409,
@@ -325,13 +331,22 @@ def create_script_package(
     if previous_status in {
         "published",
         "script_published",
-        "script_confirmation_pending",
         "cancelled",
     }:
         raise HTTPException(status_code=409, detail="当前状态不能切换为脚本发布")
-    if previous_status == "script_ready":
+    if (
+        previous_status in {"script_ready", "script_confirmation_pending"}
+        and not expired_attempt
+    ):
         return job
-    if previous_status not in {"scheduled", "queued", "failed", "exported"}:
+    if previous_status not in {
+        "scheduled",
+        "queued",
+        "failed",
+        "exported",
+        "script_ready",
+        "script_confirmation_pending",
+    }:
         raise HTTPException(status_code=409, detail="当前状态不能生成脚本发布包")
 
     queue_job = get_publish_queue_job_for_update(session, job.id)
@@ -339,12 +354,21 @@ def create_script_package(
         raise HTTPException(
             status_code=409, detail="分发任务正在执行，不能切换发布方式"
         )
+    expired_package_uri = response_json.get("package_uri") if expired_attempt else None
     request_json = dict(job.request_json or {})
     request_json["delivery_mode"] = "script"
     request_json["script_requested_by"] = principal.user_id
     request_json["script_requested_at"] = datetime.now(timezone.utc).isoformat()
+    if expired_attempt:
+        request_json["previous_script_attempt_id"] = response_json.get(
+            "script_attempt_id"
+        )
+        request_json["previous_script_attempt_expired_at"] = response_json.get(
+            "script_confirmation_expires_at"
+        )
     job.request_json = request_json
     job.status = "scheduled"
+    job.response_json = {}
     job.error = None
     job.external_id = None
     job.external_url = None
@@ -365,6 +389,20 @@ def create_script_package(
         queue_job.last_error = None
         queue_job.locked_by = None
         queue_job.locked_at = None
+    if expired_attempt:
+        record_audit(
+            session,
+            action="publish.script_attempt_expired",
+            entity_type="publish_job",
+            entity_id=job.id,
+            workspace_id=principal.workspace_id,
+            actor_user_id=principal.user_id,
+            metadata={
+                "script_attempt_id": response_json.get("script_attempt_id"),
+                "package_sha256": response_json.get("package_sha256"),
+                "expired_at": response_json.get("script_confirmation_expires_at"),
+            },
+        )
     record_audit(
         session,
         action="publish.script_requested",
@@ -372,8 +410,27 @@ def create_script_package(
         entity_id=job.id,
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
-        metadata={"queue_job_id": queue_job.id, "previous_status": previous_status},
+        metadata={
+            "queue_job_id": queue_job.id,
+            "previous_status": previous_status,
+            "expired_attempt_replaced": expired_attempt,
+        },
     )
+    if isinstance(expired_package_uri, str):
+        session.commit()
+        try:
+            build_object_storage(settings).delete(expired_package_uri)
+        except Exception:
+            logger.exception("failed to delete expired script package")
+            record_audit(
+                session,
+                action="publish.script_package_cleanup_failed",
+                entity_type="publish_job",
+                entity_id=job.id,
+                workspace_id=principal.workspace_id,
+                actor_user_id=principal.user_id,
+                metadata={"expired_attempt_replaced": True},
+            )
     return job
 
 
@@ -394,6 +451,11 @@ def download_publish_artifact(
         raise HTTPException(status_code=404, detail="发布任务不存在")
     response_json = dict(job.response_json or {})
     if job.delivery_mode == "script":
+        if job.script_confirmation_expired:
+            raise HTTPException(
+                status_code=409,
+                detail="脚本发布包已过期，请生成新的脚本尝试",
+            )
         artifact_uri = response_json.get("package_uri")
         allowed_statuses = {
             "script_ready",

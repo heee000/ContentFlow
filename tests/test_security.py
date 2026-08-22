@@ -173,6 +173,18 @@ class RuntimeSettingsTest(unittest.TestCase):
         settings = Settings(database_url="sqlite:///contentflow-test.db")
         settings.validate_runtime()
 
+    def test_script_confirmation_ttl_has_safe_bounds(self):
+        self.assertEqual(Settings().script_confirmation_ttl_minutes, 24 * 60)
+        self.assertEqual(
+            Settings(
+                script_confirmation_ttl_minutes=15
+            ).script_confirmation_ttl_minutes,
+            15,
+        )
+        for invalid in (14, 30 * 24 * 60 + 1):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                Settings(script_confirmation_ttl_minutes=invalid)
+
     def test_production_requires_auth_rate_limiting(self):
         settings = production_settings(auth_rate_limit_enabled=False)
         with self.assertRaisesRegex(ValueError, "rate limiting"):

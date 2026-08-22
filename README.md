@@ -177,7 +177,7 @@ runner 会在联网前独占预留新报告文件，并验证正常生成、同�
 - 公众号：需要有对应接口权限的 App ID/Secret。默认只创建草稿；只有渠道配置显式设置 `auto_publish=true` 才提交发布。
 - 小红书：不采集账号密码、不报告虚假发布成功；可使用人工导出，也可选择本机脚本辅助。
 - 本机脚本辅助：生成带 SHA-256 清单、固定 Playwright 版本、审核文案和素材的 ZIP；运行器只打开内置官方入口并尽力填充，使用按平台/渠道隔离的本机浏览器登录目录，不读取平台密码，也不会点击最终发布按钮。完成后必须由 reviewer 在 ContentFlow 登记已发布或未发布。
-- ?????????????????????PNG/JPEG/WebP???? JSON ???????????????????? SHA-256??????? 1 ?? 2 ???????????? reviewer ?????????????????????????????????
+- 脚本结果证据：确认前必须上传规范化 PNG/JPEG/WebP 截图或平台 JSON；证据、任务包和脚本尝试以 SHA-256 绑定。发起人不能确认自己的尝试；渠道可要求一名或两名独立 reviewer，一旦首次确认就冻结当前证据。
 - 安全降级：只有尚未产生平台副作用的 `scheduled/queued/failed/exported` 任务可切脚本；`publishing/submitted/reconciliation_required` 必须先在平台人工对账，避免一篇内容被重复发布。
 
 更详细的权限与验收说明见 [docs/platform_connectors.md](docs/platform_connectors.md)。
@@ -275,6 +275,7 @@ gh attestation verify .\contentflow-source-<commit>.tar.gz --repo heee000/Conten
 - [生产化验收清单](docs/production_requirements.md)
 - [外部服务真实验收记录](docs/external_acceptance.md)
 - [工程变更台账](docs/engineering_change_log.md)
+- [阶段性总结与分层完成度](docs/phase_summary_2026-08-22.md)
 - [软件供应链证据与验签](docs/supply_chain.md)
 - [Git 历史身份重写映射](docs/git_history_rewrite_20260812.md)
 - [企业成熟度持续复审](docs/enterprise_readiness_review.md)

@@ -101,6 +101,9 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /生产初始化顺序/);
   assert.match(app, /prompt-eval/);
   assert.match(app, /人工发布/);
+  assert.match(app, /发起人不能确认自己的脚本尝试/);
+  assert.match(app, /任务包有效期至/);
+  assert.match(app, /该脚本尝试已过期/);
   assert.match(app, /生成记录/);
   assert.match(app, /提示词版本/);
   assert.match(app, /runs\?limit=5/);

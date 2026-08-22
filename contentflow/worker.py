@@ -654,7 +654,13 @@ def handle_publish_dispatch(
 
     storage = build_object_storage(settings)
     if delivery_mode == "script":
+        requested_by = (publish_job.request_json or {}).get("script_requested_by")
+        if not isinstance(requested_by, str) or not requested_by:
+            raise ValueError("脚本发布尝试缺少可审计的发起人")
         script_attempt_id = str(uuid.uuid4())
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            minutes=settings.script_confirmation_ttl_minutes
+        )
         confirmation_required = (
             2
             if (channel.config_json or {}).get("script_confirmation_required") == 2
@@ -666,6 +672,7 @@ def handle_publish_dispatch(
             channel=channel,
             assets=assets,
             script_attempt_id=script_attempt_id,
+            expires_at=expires_at,
             storage=storage,
             max_total_bytes=settings.max_upload_bytes,
         )
@@ -686,6 +693,8 @@ def handle_publish_dispatch(
             "size_bytes": stored.size_bytes,
             "platform": channel.platform,
             "final_submission_requires_human": True,
+            "script_requested_by_user_id": requested_by,
+            "script_confirmation_expires_at": expires_at.isoformat(),
             "script_confirmation_required": confirmation_required,
             "script_confirmation_count": 0,
             "script_confirmation_decision": None,
@@ -705,11 +714,21 @@ def handle_publish_dispatch(
                 "channel_id": channel.id,
                 "package_sha256": stored.checksum,
                 "script_attempt_id": script_attempt_id,
+                "script_requested_by_user_id": requested_by,
+                "script_confirmation_expires_at": expires_at.isoformat(),
                 "script_confirmation_required": confirmation_required,
                 "size_bytes": stored.size_bytes,
             },
         )
-        session.commit()
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            try:
+                storage.delete(stored.uri)
+            except Exception:
+                logger.exception("failed to compensate uncommitted script package")
+            raise
         return {
             "publish_job_id": publish_job.id,
             "status": publish_job.status,

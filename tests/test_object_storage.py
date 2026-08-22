@@ -31,6 +31,7 @@ class LocalObjectStorageTest(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaisesRegex(ValueError, "文件名无效"):
                     safe_filename(invalid)
+
     def test_put_read_and_check(self):
         with tempfile.TemporaryDirectory() as temporary:
             storage = LocalObjectStorage(
@@ -47,6 +48,10 @@ class LocalObjectStorageTest(unittest.TestCase):
             )
             self.assertEqual(stored.size_bytes, 5)
             self.assertEqual(storage.read(stored.uri), b"hello")
+            storage.delete(stored.uri)
+            with self.assertRaises(FileNotFoundError):
+                storage.read(stored.uri)
+            storage.delete(stored.uri)
 
     def test_oversized_upload_is_removed(self):
         with tempfile.TemporaryDirectory() as temporary:

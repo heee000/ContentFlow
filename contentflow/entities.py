@@ -549,6 +549,31 @@ class PublishJob(TimestampMixin, Base):
         return max(0, int(value)) if isinstance(value, int) else 0
 
     @property
+    def script_confirmation_expires_at(self) -> datetime | None:
+        value = (self.response_json or {}).get("script_confirmation_expires_at")
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+
+    @property
+    def script_confirmation_expired(self) -> bool:
+        if self.delivery_mode != "script" or not self.script_package_available:
+            return False
+        expires_at = self.script_confirmation_expires_at
+        return expires_at is None or datetime.now(timezone.utc) >= expires_at
+
+    @property
+    def script_requested_by_user_id(self) -> str | None:
+        value = (self.response_json or {}).get("script_requested_by_user_id")
+        return value if isinstance(value, str) else None
+
+    @property
     def script_package_available(self) -> bool:
         response_json = self.response_json or {}
         package_uri = response_json.get("package_uri")

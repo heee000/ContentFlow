@@ -159,7 +159,9 @@ python -m alembic history
 - `CONTENTFLOW_SECRET_KEY`、当前/历史凭据加密密钥必须单独备份到集中密钥管理系统；丢失后访问令牌和已加密平台凭据无法恢复。
 - 审计日志按合规周期归档，不要和普通应用日志一起随意清理。
 
-脚本发布证据默认单文件上限 10 MiB、图片解码像素上限 4000 万，且证据上限不能超过通用上传上限；通过 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_BYTES` 和 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_PIXELS` 调整。证据对象应纳入与数据库一致的备份、保留和访问审计。当前对象存储写入成功但数据库事务失败时可能留下不可引用孤儿对象，运维需按无数据库引用的 `publish-evidence/` 对象定期清理。
+脚本发布证据默认单文件上限 10 MiB、图片解码像素上限 4000 万，且证据上限不能超过通用上传上限；通过 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_BYTES` 和 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_PIXELS` 调整。任务包确认窗口默认 1440 分钟，可用 `CONTENTFLOW_SCRIPT_CONFIRMATION_TTL_MINUTES` 在 15 至 43200 分钟之间调整；修改只影响之后生成的新尝试。
+
+证据对象应纳入与数据库一致的备份、保留和访问审计。任务包或证据对象写入成功、数据库 flush/commit 失败时，API/Worker 会同步回滚数据库并尽力删除刚写入的对象；过期重建也会在新状态落盘后清理旧包。对象存储删除自身仍可能失败，系统会记录日志/审计但不会把已提交的新任务伪装成失败，因此生产环境仍需按无数据库引用的 `publish-evidence/` 和脚本包对象定期巡检并告警。
 
 ## 监控基线与告警建议
 

@@ -146,6 +146,9 @@ type PublishJob = {
   script_confirmation_count: number;
   script_confirmation_decision: string | null;
   script_evidence_count: number;
+  script_confirmation_expires_at: string | null;
+  script_confirmation_expired: boolean;
+  script_requested_by_user_id: string | null;
   script_package_available: boolean;
 };
 
@@ -2069,7 +2072,10 @@ function PublishingView({
   }
 
   async function requestScriptPackage(job: PublishJob) {
-    if (!window.confirm("改用本机脚本辅助？请先确认平台没有生成草稿或发布结果，以免重复发布。")) return;
+    const prompt = job.script_confirmation_expired
+      ? "当前脚本任务包已过期。重新生成会废止并清理旧包，是否继续？"
+      : "改用本机脚本辅助？请先确认平台没有生成草稿或发布结果，以免重复发布。";
+    if (!window.confirm(prompt)) return;
     setScriptBusy(job.id);
     setError("");
     try {
@@ -2215,6 +2221,11 @@ function PublishingView({
           </form>
         </section>
       ) : null}
+      {evidenceJobId && publishes.find((item) => item.id === evidenceJobId)?.script_confirmation_expired ? (
+        <p className="inline-error">
+          该脚本尝试已过期，只保留证据和确认记录用于审计；请在任务列表重新生成任务包。
+        </p>
+      ) : null}
       {evidenceJobId ? (
         <section className="panel form-panel">
           <div className="panel-heading">
@@ -2225,7 +2236,8 @@ function PublishingView({
             <Button kind="ghost" onClick={() => setEvidenceJobId("")}>Close</Button>
           </div>
           {canSchedule
-            && publishes.find((item) => item.id === evidenceJobId)?.status === "script_ready" ? (
+            && publishes.find((item) => item.id === evidenceJobId)?.status === "script_ready"
+            && !publishes.find((item) => item.id === evidenceJobId)?.script_confirmation_expired ? (
             <form className="stack-form" onSubmit={uploadEvidence}>
               <div className="form-grid">
                 <label>Evidence type
@@ -2294,20 +2306,27 @@ function PublishingView({
             job.attempts,
             <StatusBadge key="status" value={job.status} />,
             <div className="table-actions" key="actions">
-              {job.status === "exported" || job.script_package_available ? (
+              {job.status === "exported" || (job.script_package_available && !job.script_confirmation_expired) ? (
                 <button onClick={() => void download(`/publishing/jobs/${job.id}/artifact`, `contentflow-${job.id}.zip`)}>
-                  <Icon name="download" />{job.status === "script_ready" ? "下载脚本包" : "下载投放包"}
+                  <Icon name="download" />{job.delivery_mode === "script" ? "下载脚本包" : "下载投放包"}
                 </button>
               ) : null}
               {job.script_package_available ? (
-                <button
-                  disabled={evidenceBusy}
-                  onClick={() => void openEvidence(job)}
-                >
-                  Evidence {job.script_evidence_count} · Confirmations {job.script_confirmation_count}/{job.script_confirmation_required}
-                </button>
+                <>
+                  <button
+                    disabled={evidenceBusy}
+                    onClick={() => void openEvidence(job)}
+                  >
+                    Evidence {job.script_evidence_count} · Confirmations {job.script_confirmation_count}/{job.script_confirmation_required}
+                  </button>
+                  <span>
+                    {job.script_confirmation_expired
+                      ? "任务包已过期"
+                      : `任务包有效期至 ${formatDateTime(job.script_confirmation_expires_at || "")}`}
+                  </span>
+                </>
               ) : null}
-              {canSchedule && ["script_ready", "script_confirmation_pending"].includes(job.status) ? (
+              {canSchedule && !job.script_confirmation_expired && ["script_ready", "script_confirmation_pending"].includes(job.status) ? (
                 <>
                   <button
                     disabled={scriptBusy === job.id}
@@ -2350,7 +2369,8 @@ function PublishingView({
                 </button>
               ) : null}
               {canSchedule && (
-                job.status === "failed"
+                (["script_ready", "script_confirmation_pending"].includes(job.status) && job.script_confirmation_expired)
+                || job.status === "failed"
                 || (job.delivery_mode !== "script" && ["scheduled", "queued", "exported"].includes(job.status))
               ) ? (
                 <button
@@ -2566,10 +2586,10 @@ function ChannelsView({
             {connectionMode === "script" ? (
               <label>Result confirmation policy
                 <select name="script_confirmation_required" defaultValue="1">
-                  <option value="1">One reviewer with evidence</option>
-                  <option value="2">Two independent reviewers</option>
+                  <option value="1">One independent reviewer with evidence</option>
+                  <option value="2">Two independent reviewers with evidence</option>
                 </select>
-                <small>Two-person mode requires two reviewer-or-admin users in this workspace.</small>
+                <small>发起人不能确认自己的脚本尝试；单审核人策略至少需要 2 名用户，双审核人策略至少需要 3 名用户。</small>
               </label>
             ) : null}
             {connectionMode === "script" ? <p className="form-note">脚本连接不接收或保存账号密码，使用每个平台账号独立的本机浏览器登录目录，且不会点击最终发布按钮。</p> : null}

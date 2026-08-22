@@ -75,6 +75,11 @@ class Settings(BaseSettings):
         gt=0,
         le=100_000_000,
     )
+    script_confirmation_ttl_minutes: int = Field(
+        default=24 * 60,
+        ge=15,
+        le=30 * 24 * 60,
+    )
     public_base_url: str = "http://localhost:8000"
     s3_endpoint_url: str | None = None
     s3_region: str = "us-east-1"

@@ -5,6 +5,7 @@ import io
 import json
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterable
 
 from .entities import Asset, ChannelConnection, ContentItem, PublishJob
@@ -58,6 +59,7 @@ def _runner_source() -> bytes:
 import argparse
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -123,6 +125,14 @@ def main() -> int:
     args = parser.parse_args()
     verify_package()
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
+    try:
+        expires_at = datetime.fromisoformat(str(manifest.get("expires_at") or ""))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("任务包过期时间无效") from error
+    if expires_at.tzinfo is None:
+        raise RuntimeError("任务包过期时间无效")
+    if datetime.now(timezone.utc) >= expires_at.astimezone(timezone.utc):
+        raise RuntimeError("任务包已过期，请在 ContentFlow 中生成新的脚本尝试")
     content = json.loads((ROOT / "content.json").read_text(encoding="utf-8"))
     platform = str(manifest.get("platform") or "")
     portal_url = EXPECTED_PORTALS.get(platform)
@@ -272,6 +282,7 @@ def build_script_package(
     channel: ChannelConnection,
     assets: list[Asset],
     script_attempt_id: str,
+    expires_at: datetime,
     storage: ObjectStorage,
     max_total_bytes: int,
 ) -> ScriptPackage:
@@ -294,6 +305,8 @@ def build_script_package(
         ):
             raise ScriptPackageError(f"Invalid {label} identifier")
 
+    if expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc):
+        raise ScriptPackageError("脚本发布包必须设置未来的到期时间")
     manifest_assets, files = _read_assets(
         assets,
         storage=storage,
@@ -317,6 +330,7 @@ def build_script_package(
         "platform": channel.platform,
         "portal_url": PLATFORM_PORTALS[channel.platform],
         "scheduled_at": publish_job.scheduled_at.isoformat(),
+        "expires_at": expires_at.astimezone(timezone.utc).isoformat(),
         "delivery_mode": "script",
         "human_approved": True,
         "final_submission_requires_human": True,

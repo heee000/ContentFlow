@@ -70,7 +70,7 @@ flowchart TB
 - 所有关联素材均为 `ready`
 - 渠道平台与内容平台一致
 
-这些检查防止“审核后偷偷修改”或“素材未完成就发布”。发布方式保存在 `PublishJob.request_json.delivery_mode`，以兼容既有数据库而无需新列迁移。`connector` 在远程调用前持久化 `publishing`，不确定结果进入人工对账；`script` 在任何远程平台副作用之前构建带 SHA-256 的 ZIP 并进入 `script_ready`，最终提交始终由人工完成，再登记为 `script_published` 或 `failed`；`manual_export` 保持小红书人工投放。已有小红书队列任务缺少方式字段时由 Worker 一次性归一为 `manual_export`。
+这些检查防止“审核后偷偷修改”或“素材未完成就发布”。发布方式保存在 `PublishJob.request_json.delivery_mode`，以兼容既有数据库而无需新列迁移。`connector` 在远程调用前持久化 `publishing`，不确定结果进入人工对账；`script` 在任何远程平台副作用之前构建带 SHA-256 和过期时间的 ZIP 并进入 `script_ready`，记录发起人并要求其他 reviewer 基于冻结证据确认，最终提交始终由人工完成。运行器、下载、证据上传和确认在过期后失败关闭；显式重建会创建新的尝试并在数据库提交后尽力删除旧包。`manual_export` 保持小红书人工投放。已有小红书队列任务缺少方式字段时由 Worker 一次性归一为 `manual_export`。
 
 ## 5. 任务队列
 

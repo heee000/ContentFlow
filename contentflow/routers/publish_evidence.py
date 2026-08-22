@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -29,6 +30,7 @@ from ..schemas import (
 )
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/publishing", tags=["publishing"])
 Db = Annotated[Session, Depends(get_db)]
 Reviewer = Annotated[Principal, Depends(require_role("reviewer"))]
@@ -141,6 +143,11 @@ async def upload_publish_evidence(
         for_update=True,
     )
     script_attempt_id, package_sha256, response_json = _script_context(job)
+    if job.script_confirmation_expired:
+        raise HTTPException(
+            status_code=409,
+            detail="Script confirmation window expired; create a new script attempt",
+        )
     if job.status != "script_ready" or response_json.get("script_evidence_frozen"):
         raise HTTPException(
             status_code=409,
@@ -172,66 +179,80 @@ async def upload_publish_evidence(
             detail="Equivalent evidence is already attached to this script attempt",
         )
 
+    storage = build_object_storage(settings)
+    stored = None
     try:
-        stored = build_object_storage(settings).put(
+        stored = storage.put(
             workspace_id=principal.workspace_id,
             category=f"publish-evidence/{job.id}/{script_attempt_id}",
             filename=f"evidence-{normalized.object_sha256[:16]}.{normalized.extension}",
             stream=io.BytesIO(normalized.data),
             content_type=normalized.mime_type,
         )
+        if stored.checksum != normalized.object_sha256 or stored.size_bytes != len(
+            normalized.data
+        ):
+            raise ValueError("post-storage integrity verification failed")
     except (OSError, ValueError) as error:
+        if stored is not None:
+            try:
+                storage.delete(stored.uri)
+            except (OSError, ValueError):
+                logger.exception("failed to compensate invalid evidence object")
         raise HTTPException(
             status_code=503, detail="Evidence storage failed"
         ) from error
-    if stored.checksum != normalized.object_sha256 or stored.size_bytes != len(
-        normalized.data
-    ):
-        raise HTTPException(
-            status_code=503,
-            detail="Evidence failed post-storage integrity verification",
-        )
 
-    evidence = PublishEvidence(
-        workspace_id=principal.workspace_id,
-        publish_job_id=job.id,
-        script_attempt_id=script_attempt_id,
-        package_sha256=package_sha256,
-        kind=normalized.kind,
-        original_filename=normalized.original_filename,
-        storage_uri=stored.uri,
-        source_sha256=normalized.source_sha256,
-        object_sha256=normalized.object_sha256,
-        mime_type=normalized.mime_type,
-        size_bytes=len(normalized.data),
-        uploaded_by_user_id=principal.user_id,
-    )
-    session.add(evidence)
-    session.flush()
-    evidence_items = _current_evidence(
-        session,
-        job=job,
-        script_attempt_id=script_attempt_id,
-    )
-    response_json["script_evidence_count"] = len(evidence_items)
-    job.response_json = response_json
-    record_audit(
-        session,
-        action="publish.evidence_uploaded",
-        entity_type="publish_evidence",
-        entity_id=evidence.id,
-        workspace_id=principal.workspace_id,
-        actor_user_id=principal.user_id,
-        metadata={
-            "publish_job_id": job.id,
-            "script_attempt_id": script_attempt_id,
-            "package_sha256": package_sha256,
-            "kind": evidence.kind,
-            "source_sha256": evidence.source_sha256,
-            "object_sha256": evidence.object_sha256,
-            "size_bytes": evidence.size_bytes,
-        },
-    )
+    try:
+        evidence = PublishEvidence(
+            workspace_id=principal.workspace_id,
+            publish_job_id=job.id,
+            script_attempt_id=script_attempt_id,
+            package_sha256=package_sha256,
+            kind=normalized.kind,
+            original_filename=normalized.original_filename,
+            storage_uri=stored.uri,
+            source_sha256=normalized.source_sha256,
+            object_sha256=normalized.object_sha256,
+            mime_type=normalized.mime_type,
+            size_bytes=len(normalized.data),
+            uploaded_by_user_id=principal.user_id,
+        )
+        session.add(evidence)
+        session.flush()
+        evidence_items = _current_evidence(
+            session,
+            job=job,
+            script_attempt_id=script_attempt_id,
+        )
+        response_json["script_evidence_count"] = len(evidence_items)
+        job.response_json = response_json
+        record_audit(
+            session,
+            action="publish.evidence_uploaded",
+            entity_type="publish_evidence",
+            entity_id=evidence.id,
+            workspace_id=principal.workspace_id,
+            actor_user_id=principal.user_id,
+            metadata={
+                "publish_job_id": job.id,
+                "script_attempt_id": script_attempt_id,
+                "package_sha256": package_sha256,
+                "kind": evidence.kind,
+                "source_sha256": evidence.source_sha256,
+                "object_sha256": evidence.object_sha256,
+                "size_bytes": evidence.size_bytes,
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        try:
+            storage.delete(stored.uri)
+        except Exception:
+            logger.exception("failed to compensate uncommitted evidence object")
+        raise
+    session.refresh(evidence)
     return evidence
 
 
@@ -338,6 +359,19 @@ def confirm_script_publish_result(
             detail="Script result cannot be confirmed in the current state",
         )
     script_attempt_id, package_sha256, response_json = _script_context(job)
+    if job.script_confirmation_expired:
+        raise HTTPException(
+            status_code=409,
+            detail="Script confirmation window expired; create a new script attempt",
+        )
+    requested_by = response_json.get("script_requested_by_user_id")
+    if not isinstance(requested_by, str):
+        raise HTTPException(status_code=409, detail="Script requester is missing")
+    if requested_by == actor_user_id:
+        raise HTTPException(
+            status_code=409,
+            detail="The script requester cannot confirm the same attempt",
+        )
     evidence_items = _current_evidence(
         session,
         job=job,

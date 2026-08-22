@@ -33,6 +33,8 @@ class ObjectStorage(Protocol):
 
     def read(self, uri: str, *, max_bytes: int = 100 * 1024 * 1024) -> bytes: ...
 
+    def delete(self, uri: str) -> None: ...
+
     def check(self) -> None: ...
 
 
@@ -98,6 +100,14 @@ class LocalObjectStorage:
         if path.stat().st_size > max_bytes:
             raise ValueError("对象超过读取大小限制")
         return path.read_bytes()
+
+    def delete(self, uri: str) -> None:
+        from .knowledge_service import local_path_from_uri
+
+        path = local_path_from_uri(uri).resolve()
+        if self.root != path and self.root not in path.parents:
+            raise ValueError("对象路径不属于当前存储根目录")
+        path.unlink(missing_ok=True)
 
     def check(self) -> None:
         if not self.root.is_dir():
@@ -201,14 +211,22 @@ class S3ObjectStorage:
             valid_checksum = (
                 len(expected_prefix) == 16
                 and all(
-                    character in "0123456789abcdef"
-                    for character in expected_prefix
+                    character in "0123456789abcdef" for character in expected_prefix
                 )
                 and checksum.startswith(expected_prefix)
             )
         if not valid_checksum:
             raise ValueError("S3 对象完整性校验失败")
         return data
+
+    def delete(self, uri: str) -> None:
+        prefix = f"s3://{self.bucket}/"
+        if not uri.startswith(prefix):
+            raise ValueError("S3 对象不属于当前 bucket")
+        key = uri[len(prefix) :]
+        if not key:
+            raise ValueError("S3 对象键不能为空")
+        self.client.delete_object(Bucket=self.bucket, Key=key)
 
     def check(self) -> None:
         self.client.head_bucket(Bucket=self.bucket)
