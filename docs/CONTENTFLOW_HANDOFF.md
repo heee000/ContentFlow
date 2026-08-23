@@ -1590,12 +1590,12 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 
 - 本地 BGE-M3 固定提交真实中文推理：1024 维、全部有限值、L2 范数 1.0；首次下载/加载/推理 212.43 秒。批量实现后，宿主机缓存冷加载+4 段批量推理 31.4 秒、同进程热查询 0.06 秒；Linux Worker 镜像以非 root、完全禁网、offline cache 完成 2 段 1024 维推理，耗时 15.23 秒。
 - 最终本地门禁：全仓 Ruff/编译通过；后端 `219 passed, 7 skipped, 143 subtests passed`，分支覆盖率 81.67%；前端 ESLint、Sites 两项渲染测试、Next 生产构建和 npm audit 0 漏洞；uv lock、pip check 通过，CPU-wheel-aware Python 审计 0 漏洞，CycloneDX 96 组件。默认/observability Compose 均通过，API/Worker/Web 镜像完成构建。7 个集成跳过项由当前 GitHub PostgreSQL/MinIO CI 签收，不能用本地业务闭环冒充测试项结果。
+- 实现提交 `0282e9bacd6d553553ad0041096a607c5bceb162` 已普通推送到功能分支；[ContentFlow CI #32652773152](https://github.com/heee000/ContentFlow/actions/runs/32652773152) 四个 Job 全部成功。远程真实 PostgreSQL/pgvector、MinIO、后端覆盖率门禁、前端、Python/npm 漏洞审计、96 组件 Python SBOM、可复现源码归档、SLSA 来源证明及双 CycloneDX attestation 均签收；Artifact 为 `contentflow-supply-chain-0282e9bacd6d553553ad0041096a607c5bceb162`（ID `9496650624`，摘要 `sha256:2b9afadcb870ce6be009e6bac980824369112f19ab7ddafc0dcac9c51c853053`）。
 - 隔离 `contentflow-live-test` 生产配置栈已运行：PostgreSQL/MinIO/API/Worker/Web 健康；双管理员职责分离、三阶段真实 DeepSeek Eval passed、Prompt Release active、生成门禁 ready。授权微信公众号凭据已加密保存并复验为 `connected`，`auto_publish=false`；本轮没有创建新的微信素材、草稿或公开发布。
 - 隔离测试副本经 MinIO 存储、离线 BGE 索引为 4 个知识块；受治理 DeepSeek 工作流生成 1 篇公众号内容并停在 `awaiting_review`，创建 1 个 planned 素材任务等待用户审核和上传真实封面。用户提供的未跟踪知识文件仍未读取、修改或暂存。
 
 ### 仍需完成
 
 1. Web 保持在 `http://localhost:3000`；由用户登录主账号，审核当前真实内容并上传实际封面，再创建微信公众号草稿。实际封面视觉质量和本轮草稿结果在完成前保持未签收。
-2. 阶段提交只暂存已知跟踪文件，继续排除未知知识文件、本地 `.env`、模型与账号文件；普通推送后以当前 GitHub Actions 结果回填提交、CI 与供应链证据。
-3. CI 通过后再更新实现 commit、run、artifact 和 attestation；任何失败必须修复并重新签收。
-4. 后续继续补真实异常矩阵、视频内容探测/恶意扫描、浏览器 E2E、公开部署与企业 IAM/SRE/合规门禁。
+2. 继续排除未知知识文件、本地 `.env`、模型与账号文件；本次实现提交和 CI/供应链证据已经回填，后续记录提交也必须普通推送并重新通过自己的 CI。
+3. 后续继续补真实异常矩阵、视频内容探测/恶意扫描、浏览器 E2E、公开部署与企业 IAM/SRE/合规门禁。

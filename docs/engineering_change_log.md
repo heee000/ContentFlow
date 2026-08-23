@@ -395,7 +395,7 @@
 
 ### CF-20260823-01：真实文本 Provider 不提供 Embedding，Hash 不能用于真实检索
 
-- 状态：实现、批量推理、宿主机/离线容器真实推理和完整本地门禁已完成；远程 CI 与阶段提交待回填。
+- 状态：实现、批量推理、宿主机/离线容器真实推理、完整本地门禁和远程 CI 已完成。
 - 问题与影响：当前文本模型 API 可真实生成 JSON，但没有 Embedding 端点；继续使用 Hash 只能保证确定性测试，不能证明中文语义检索可用。
 - 根因：文本与向量能力被误假设为同一 OpenAI-compatible 端点，仓库缺少独立、真实且可本地部署的向量 Provider。
 - 解决方案：新增显式 `bge-m3-local` Provider，固定 BAAI/bge-m3 官方提交 `5617a9f61b028005a4858fdac845db406aefb181`，禁止 remote code，懒加载并在进程内缓存模型；知识分块使用可配置批次的单次模型调用，输出 1024 维归一化 Dense 向量并拒绝空文本、错维度和 NaN/Inf。CPU PyTorch 从官方专用索引锁定，容器使用非 root 可写的持久模型缓存卷。
@@ -405,7 +405,7 @@
 
 ### CF-20260823-02：没有媒体 API 时素材任务会错误排队，人工上传无法填充占位任务
 
-- 状态：实现、定向端到端回归、完整本地门禁和真实运行栈已完成；远程 CI 待回填。
+- 状态：实现、定向端到端回归、完整本地门禁、真实运行栈和远程 CI 已完成。
 - 问题与影响：原审批逻辑总是创建 `asset.generate` Job；用户选择真实人工封面时会调用不存在的 Provider。旧上传接口只新增 ready 资产，原 planned 资产仍会让发布门禁永久失败。
 - 根因：媒体 Provider 只支持 mock/http；上传 API 没有目标 `asset_id`、内容版本和占位任务填充语义。
 - 解决方案：图片/视频新增显式 `manual` Provider。审核后资产进入 `awaiting_upload` 且不创建生成 Job；Worker 对尚未产生外部副作用的旧队列任务安全收敛为待上传。上传可选择具体资产或当前版本唯一占位，要求内容已审核、版本/类型一致；PNG/JPEG/WebP 安全解码、像素/单帧限制并重编码去元数据，JSON 规范化；成功填充同一资产为 `manual-upload/ready`，对象写入后若路由内数据库 flush 或审计失败则尽力补偿删除。前端展示待上传状态和具体任务选择。
@@ -420,9 +420,10 @@
 - 剩余边界：该结果只证明当前 IP 白名单和基础凭据有效，不替代草稿异常矩阵、Token 过期、限流、权限撤销、公开发布或最终 article_id 对账。
 ### CF-20260824-04：官方 CPU PyTorch 本地版本导致 pip-audit/CI 无法查询
 
-- 状态：实现、单元测试和本地真实漏洞审计已完成；远程 CI/SBOM 待本阶段推送后签收。
+- 状态：实现、单元测试、本地真实漏洞审计和远程供应链签收已完成。
 - 问题与影响：官方 CPU 索引安装 `torch 2.13.0+cpu`，pip-audit 直接按该本地版本查询 PyPI 时报告 Dependency not found；新增本地 Embedding extra 后，原 CI 审计和 CycloneDX Job 会稳定失败。
 - 根因：PEP 440 本地版本标识用于区分 CPU wheel，但公开漏洞 advisory 使用基础版本 `2.13.0`；原供应链命令没有这层显式、受约束的身份映射。
 - 解决方案：`scripts/supply_chain.py audit-python` 从锁文件导出 all-extras 完整固定版本，仅允许把完全匹配的官方 `+cpu` pin 在 advisory 查询阶段映射为基础版本；其他本地后缀、缺失或重复 pin 均失败关闭。CycloneDX 输出恢复精确安装版本、记录 advisory 版本并补入本地 ContentFlow 项目身份；CI 的漏洞和 SBOM 两条路径统一调用该命令。
 - 当前验证：新增供应链回归 12 passed；真实审计为 No known vulnerabilities found，规范化 Python CycloneDX 含 96 个组件、精确 `torch 2.13.0+cpu`、当前 ContentFlow 版本且 0 漏洞。
-- 剩余边界：审计使用不带哈希的临时固定版本导出和 `--no-deps`，依赖图完整性由带制品哈希的 `uv.lock` 与 locked sync 保证；仍需 GitHub Linux 环境、远程 SBOM 验证和 attestation 共同签收。
+- 远程验证：实现提交 `0282e9bacd6d553553ad0041096a607c5bceb162` 已普通推送到 `codex/enterprise-media-runtime`；[ContentFlow CI #32652773152](https://github.com/heee000/ContentFlow/actions/runs/32652773152) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 后端门禁、前端 lint/test/build/audit、CPU-wheel-aware Python 漏洞审计、96 组件 CycloneDX、可复现源码归档、SLSA 来源证明和双 CycloneDX attestation 均通过。Artifact `9496650624` 名为 `contentflow-supply-chain-0282e9bacd6d553553ad0041096a607c5bceb162`，摘要为 `sha256:2b9afadcb870ce6be009e6bac980824369112f19ab7ddafc0dcac9c51c853053`。
+- 剩余边界：审计使用不带哈希的临时固定版本导出和 `--no-deps`，依赖图完整性由带制品哈希的 `uv.lock` 与 locked sync 保证；GitHub 的 `setup-uv` 并行缓存保存出现一次同键争用提示，不影响作业、制品或证明结论。

@@ -225,5 +225,5 @@ ContentFlow 已经从早期可演示原型演进为一个有真实业务主链�
 
 - 当前隔离生产配置栈已用 PostgreSQL、MinIO、非 root 离线 BGE-M3、真实 DeepSeek、双人 Prompt/Eval 治理和加密微信公众号连接运行；Mock 全部关闭。
 - 测试副本已索引 4 个知识块，受治理工作流生成 1 篇公众号内容并停在人工审核，1 个素材任务等待用户上传真实封面；没有创建本轮微信草稿或公开发布。
-- 完整本地门禁为 `219 passed, 7 skipped, 143 subtests passed`、分支覆盖率 81.67%；前端双构建、Python/npm 0 已知漏洞、三镜像构建与 Compose 通过。7 个 PostgreSQL/MinIO 测试仍以本次 GitHub Linux CI 为正式签收。
+- 完整本地门禁为 `219 passed, 7 skipped, 143 subtests passed`、分支覆盖率 81.67%；前端双构建、Python/npm 0 已知漏洞、三镜像构建与 Compose 通过。实现提交 `0282e9b` 的 [GitHub CI #32652773152](https://github.com/heee000/ContentFlow/actions/runs/32652773152) 已在 Linux、真实 PostgreSQL/pgvector 与 MinIO 上完成正式签收，供应链 Artifact `9496650624`、SLSA 与双 CycloneDX 证明均成功。
 - 因“真实 Provider + 治理 + 数据库/对象存储 + 用户可接管 Web”已形成闭环，个人本地部署完成度调整为约 85%-90%；个人公开部署、公开 Beta 和企业商业项目仍约 60%-65%、45%-50%、25%-35%，因为 TLS/WAF/Secret Manager、公开账号体系、防滥用、真实多平台异常矩阵、企业 IAM/RLS、HA/PITR/SRE/合规与受保护发布没有随本地闭环自动完成。
