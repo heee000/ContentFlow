@@ -390,3 +390,39 @@
 - 解决方案：通过已登录 GitHub CLI 的 Git Data API 上传本地 commit 的 29 个原始 Git blob；每个 blob SHA、tree SHA 和 commit SHA 都必须与本地逐项一致。更新引用前再次确认功能分支和 main 仍指向预期父提交，两个 PATCH 均使用 `force=false`，更新后再次读取 SHA 验证。
 - 验证：本地/API commit 均为 `c290f6420e30b365a0af4f7540b1d9b86355c1d7`，tree 均为 `3cfd24e814a208fb7e14f4f1033ebf73eb6e1492`；两个远端引用均为该提交。临时 SSH known-hosts 和 API 归档目录已删除，没有修改全局 Git/SSH 配置。
 - 剩余边界：这是本次网络故障的等价传输路径，不替代恢复正常 Git HTTPS/配置正式 SSH key；后续默认仍优先普通 `git push`。
+
+## 2026-08-23 本地 BGE-M3 与人工真实素材阶段
+
+### CF-20260823-01：真实文本 Provider 不提供 Embedding，Hash 不能用于真实检索
+
+- 状态：实现、批量推理、宿主机/离线容器真实推理和完整本地门禁已完成；远程 CI 与阶段提交待回填。
+- 问题与影响：当前文本模型 API 可真实生成 JSON，但没有 Embedding 端点；继续使用 Hash 只能保证确定性测试，不能证明中文语义检索可用。
+- 根因：文本与向量能力被误假设为同一 OpenAI-compatible 端点，仓库缺少独立、真实且可本地部署的向量 Provider。
+- 解决方案：新增显式 `bge-m3-local` Provider，固定 BAAI/bge-m3 官方提交 `5617a9f61b028005a4858fdac845db406aefb181`，禁止 remote code，懒加载并在进程内缓存模型；知识分块使用可配置批次的单次模型调用，输出 1024 维归一化 Dense 向量并拒绝空文本、错维度和 NaN/Inf。CPU PyTorch 从官方专用索引锁定，容器使用非 root 可写的持久模型缓存卷。
+- 涉及文件：`contentflow/embeddings.py`、`contentflow/settings.py`、`pyproject.toml`、`uv.lock`、`Dockerfile`、`docker-compose.yml`、`.env.example`、`tests/test_local_embeddings.py` 及文档。
+- 当前验证：CPU-only 依赖安装成功；固定提交真实中文推理返回 1024 个有限值，L2 范数 1.0，首次下载/加载/推理 212.43 秒。批量改造后缓存冷加载+4 段为 31.4 秒、热查询 0.06 秒；Linux Worker 镜像以非 root、完全禁网、固定缓存完成 2 段推理。单元测试覆盖 revision、remote code、批量单次调用、归一化、错维度/非有限值和生产配置失败关闭。
+- 剩余边界：单次向量正确不等于真实知识集检索质量；仍需热路径延迟、内存、并发、容器离线重启、召回/引用质量与容量门禁。首次下载依赖外网，生产应先预热缓存并设置 offline。
+
+### CF-20260823-02：没有媒体 API 时素材任务会错误排队，人工上传无法填充占位任务
+
+- 状态：实现、定向端到端回归、完整本地门禁和真实运行栈已完成；远程 CI 待回填。
+- 问题与影响：原审批逻辑总是创建 `asset.generate` Job；用户选择真实人工封面时会调用不存在的 Provider。旧上传接口只新增 ready 资产，原 planned 资产仍会让发布门禁永久失败。
+- 根因：媒体 Provider 只支持 mock/http；上传 API 没有目标 `asset_id`、内容版本和占位任务填充语义。
+- 解决方案：图片/视频新增显式 `manual` Provider。审核后资产进入 `awaiting_upload` 且不创建生成 Job；Worker 对尚未产生外部副作用的旧队列任务安全收敛为待上传。上传可选择具体资产或当前版本唯一占位，要求内容已审核、版本/类型一致；PNG/JPEG/WebP 安全解码、像素/单帧限制并重编码去元数据，JSON 规范化；成功填充同一资产为 `manual-upload/ready`，对象写入后若路由内数据库 flush 或审计失败则尽力补偿删除。前端展示待上传状态和具体任务选择。
+- 涉及文件：`contentflow/routers/contents.py`、`contentflow/routers/assets.py`、`contentflow/worker.py`、`contentflow/settings.py`、`web/app/contentflow-app.tsx`、`tests/test_manual_media.py`、`tests/test_worker_v2.py` 及文档。
+- 当前验证：定向测试证明审批后无生成 Job、未审核/旧版本/类型不匹配失败关闭、非法伪 PNG 返回 415 且状态不变、有效真实 PNG 填充同一资产、对象可下载、重复覆盖被 409 阻断；前后端分别区分图片、视频和分镜 JSON。完整后端为 `219 passed, 7 skipped, 143 subtests passed`，发布 Worker 仍要求当前版本全部资产 ready。
+- 剩余边界：普通视频只校验 MIME/大小/文件名，尚未做 ffprobe/恶意文件扫描；用户实际封面及最终公众号草稿视觉质量待体验阶段验收。
+
+### CF-20260823-03：微信公众号白名单更新后的鉴权复验
+
+- 状态：已验证，无写入副作用。
+- 证据：2026-08-23 白名单更新后无副作用 token 复验取得 7200 秒有效期；2026-08-24 在隔离生产栈内将凭据加密写入渠道并由 Worker 复验为 `connected`，强制 `auto_publish=false`。没有输出 App Secret、Access Token 或完整响应，也没有创建新的微信素材/草稿或公开发布。
+- 剩余边界：该结果只证明当前 IP 白名单和基础凭据有效，不替代草稿异常矩阵、Token 过期、限流、权限撤销、公开发布或最终 article_id 对账。
+### CF-20260824-04：官方 CPU PyTorch 本地版本导致 pip-audit/CI 无法查询
+
+- 状态：实现、单元测试和本地真实漏洞审计已完成；远程 CI/SBOM 待本阶段推送后签收。
+- 问题与影响：官方 CPU 索引安装 `torch 2.13.0+cpu`，pip-audit 直接按该本地版本查询 PyPI 时报告 Dependency not found；新增本地 Embedding extra 后，原 CI 审计和 CycloneDX Job 会稳定失败。
+- 根因：PEP 440 本地版本标识用于区分 CPU wheel，但公开漏洞 advisory 使用基础版本 `2.13.0`；原供应链命令没有这层显式、受约束的身份映射。
+- 解决方案：`scripts/supply_chain.py audit-python` 从锁文件导出 all-extras 完整固定版本，仅允许把完全匹配的官方 `+cpu` pin 在 advisory 查询阶段映射为基础版本；其他本地后缀、缺失或重复 pin 均失败关闭。CycloneDX 输出恢复精确安装版本、记录 advisory 版本并补入本地 ContentFlow 项目身份；CI 的漏洞和 SBOM 两条路径统一调用该命令。
+- 当前验证：新增供应链回归 12 passed；真实审计为 No known vulnerabilities found，规范化 Python CycloneDX 含 96 个组件、精确 `torch 2.13.0+cpu`、当前 ContentFlow 版本且 0 漏洞。
+- 剩余边界：审计使用不带哈希的临时固定版本导出和 `--no-deps`，依赖图完整性由带制品哈希的 `uv.lock` 与 locked sync 保证；仍需 GitHub Linux 环境、远程 SBOM 验证和 attestation 共同签收。

@@ -111,7 +111,7 @@ jobs:
           --cov-fail-under=75
 
       - name: Audit Python dependencies
-        run: uv run --locked pip-audit --strict
+        run: uv run --locked python scripts/supply_chain.py audit-python
 
       - name: Stop MinIO
         if: always()
@@ -194,10 +194,7 @@ jobs:
       - name: Generate normalized CycloneDX inventories
         run: |
           mkdir -p dist
-          uv run --locked pip-audit \
-            --local \
-            --strict \
-            --format cyclonedx-json \
+          uv run --locked python scripts/supply_chain.py audit-python \
             --output "${RUNNER_TEMP}/python.raw.cdx.json"
           npm sbom \
             --prefix web \

@@ -45,7 +45,7 @@ $commit = git rev-parse HEAD
 $output = ".contentflow/supply-chain-local"
 New-Item -ItemType Directory -Force $output | Out-Null
 
-uv run --locked pip-audit --local --strict --format cyclonedx-json --output "$output/python.raw.cdx.json"
+uv run --locked python scripts/supply_chain.py audit-python --output "$output/python.raw.cdx.json"
 npm sbom --prefix web --package-lock-only --sbom-format cyclonedx --sbom-type application |
   Set-Content "$output/frontend.raw.cdx.json" -Encoding utf8
 
@@ -55,6 +55,8 @@ uv run --locked python scripts/supply_chain.py build --repository-root . --expec
 uv run --locked python scripts/supply_chain.py manifest --directory $output --file "contentflow-source-$commit.tar.gz" --file python.cdx.json --file frontend.cdx.json --output SHA256SUMS
 uv run --locked python scripts/supply_chain.py verify --repository-root . --expected-commit $commit --archive "$output/contentflow-source-$commit.tar.gz" --python-sbom "$output/python.cdx.json" --frontend-sbom "$output/frontend.cdx.json" --manifest "$output/SHA256SUMS"
 ```
+
+`audit-python` 从 `uv.lock` 导出完整 all-extras 固定版本清单并以 `--no-deps` 审计，避免二次解析依赖；若安装的是 PyTorch 官方 CPU wheel，只在漏洞查询时把 `2.x+cpu` 映射为 PyPI advisory 身份 `2.x`，且要求锁定导出中恰好存在一个完全匹配的 CPU pin。生成 SBOM 时会恢复精确 `+cpu` 安装版本并记录查询版本；其他本地版本或身份不一致会失败关闭。临时审计清单不携带哈希，制品完整性仍由含制品哈希的 `uv.lock`、锁定同步和最终 SHA-256/attestation 门禁承担。
 
 从 GitHub 下载 Artifact 后，应在同一个 commit 的干净 checkout 中运行最后一条 `verify` 命令。签名证明还要绑定仓库、签名工作流和源码 commit：
 

@@ -119,6 +119,7 @@ type Asset = {
   status: string;
   mime_type: string | null;
   size_bytes: number | null;
+  metadata_json: Record<string, unknown>;
   error: string | null;
   created_at: string;
 };
@@ -473,6 +474,7 @@ const STATUS: Record<string, string> = {
   active: "进行中",
   approved: "已通过",
   awaiting_review: "待审核",
+  awaiting_upload: "待上传",
   blocked: "规则拦截",
   cancelled: "已取消",
   connected: "已连接",
@@ -1657,7 +1659,7 @@ function ReviewView({
         method: "POST",
         body: { decision, reason, expected_version: selected.version },
       });
-      flash(decision === "approve" ? "内容已通过，素材任务已创建" : "内容已驳回");
+      flash(decision === "approve" ? "内容已通过，素材已进入准备流程" : "内容已驳回");
       setSelectedId("");
       await onChanged();
     } catch (caught) {
@@ -1845,11 +1847,32 @@ function AssetsView({
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
+  const [uploadTargetId, setUploadTargetId] = useState("");
+  const [uploadKind, setUploadKind] = useState("image");
   const canEdit = roleAtLeast(role, "editor");
   const contentMap = useMemo(
     () => Object.fromEntries(contents.map((item) => [item.id, item.title])),
     [contents],
   );
+  const contentVersionMap = useMemo(
+    () => Object.fromEntries(contents.map((item) => [item.id, item.version])),
+    [contents],
+  );
+  const uploadTargets = useMemo(
+    () => assets.filter((asset) => (
+      ["awaiting_upload", "planned", "failed"].includes(asset.status)
+      && Number(asset.metadata_json.content_version || 1)
+        === contentVersionMap[asset.content_item_id || ""]
+    )),
+    [assets, contentVersionMap],
+  );
+  const uploadTarget = uploadTargets.find((asset) => asset.id === uploadTargetId);
+  const selectedUploadKind = uploadTarget?.kind || uploadKind;
+  const uploadAccept = selectedUploadKind === "image"
+    ? "image/png,image/jpeg,image/webp"
+    : selectedUploadKind === "video_storyboard"
+      ? "application/json,.json"
+      : "video/*";
   async function retry(asset: Asset) {
     try {
       await api(`/assets/${asset.id}/retry`, { method: "POST" });
@@ -1869,7 +1892,9 @@ function AssetsView({
       });
       event.currentTarget.reset();
       setShowUpload(false);
-      flash("人工素材已上传");
+      setUploadTargetId("");
+      setUploadKind("image");
+      flash("真实素材已上传并绑定当前内容版本");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -1883,9 +1908,13 @@ function AssetsView({
       <PageHeading
         eyebrow="Media"
         title="素材中心"
-        description="审核通过后才会生成素材；旧内容版本的素材会保留但不可发布。"
+        description="审核通过后，自动 Provider 会生成素材；人工模式会明确等待上传真实封面。旧版本素材保留但不可发布。"
         action={canEdit ? (
-          <Button onClick={() => setShowUpload((value) => !value)}>
+          <Button onClick={() => {
+            setUploadTargetId("");
+            setUploadKind("image");
+            setShowUpload((value) => !value);
+          }}>
             <Icon name="plus" />上传素材
           </Button>
         ) : undefined}
@@ -1894,22 +1923,39 @@ function AssetsView({
       {!canEdit ? <p className="permission-note">当前为只读权限，可查看和下载已就绪素材。</p> : null}
       {showUpload && canEdit ? (
         <section className="panel form-panel">
-          <div className="panel-heading"><div><p className="eyebrow">Upload</p><h2>添加人工或外部 AIGC 素材</h2></div></div>
+          <div className="panel-heading"><div><p className="eyebrow">Upload</p><h2>上传真实素材</h2></div></div>
           <form className="stack-form" onSubmit={uploadAsset}>
-            <label>关联内容
-              <select name="content_item_id" required defaultValue="">
-                <option value="" disabled>选择内容版本</option>
-                {contents.map((item) => <option key={item.id} value={item.id}>{PLATFORM[item.platform]} · v{item.version} · {item.title}</option>)}
+            <label>待上传任务
+              <select name="asset_id" value={uploadTargetId} onChange={(event) => setUploadTargetId(event.target.value)}>
+                <option value="">作为当前版本的额外素材上传</option>
+                {uploadTargets.map((asset) => (
+                  <option key={asset.id} value={asset.id}>
+                    {asset.kind === "image" ? "封面图片" : asset.kind === "video" ? "视频" : "视频分镜 JSON"} · {contentMap[asset.content_item_id || ""] || "未关联"} · {STATUS[asset.status] || asset.status}
+                  </option>
+                ))}
               </select>
             </label>
-            <label>素材类型
-              <select name="kind" defaultValue="image">
-                <option value="image">图片</option>
-                <option value="video_storyboard">视频 / 分镜</option>
-              </select>
-            </label>
-            <label>文件<input name="file" type="file" accept="image/*,video/*,.json" required /></label>
-            <div className="form-actions"><Button type="submit" busy={uploading}>上传素材</Button><Button type="button" kind="ghost" onClick={() => setShowUpload(false)}>取消</Button></div>
+            {!uploadTarget ? (
+              <>
+                <label>关联内容
+                  <select name="content_item_id" required defaultValue="">
+                    <option value="" disabled>选择已审核内容版本</option>
+                    {contents.filter((item) => item.status === "approved").map((item) => <option key={item.id} value={item.id}>{PLATFORM[item.platform]} · v{item.version} · {item.title}</option>)}
+                  </select>
+                </label>
+                <label>素材类型
+                  <select name="kind" value={uploadKind} onChange={(event) => setUploadKind(event.target.value)}>
+                    <option value="image">封面图片</option>
+                    <option value="video">视频</option>
+                    <option value="video_storyboard">视频分镜 JSON</option>
+                  </select>
+                </label>
+              </>
+            ) : (
+              <p className="form-note">将填充选中的当前版本素材任务；上传成功后才允许发布。</p>
+            )}
+            <label>文件<input name="file" type="file" accept={uploadAccept} required /></label>
+            <div className="form-actions"><Button type="submit" busy={uploading}>上传并绑定</Button><Button type="button" kind="ghost" onClick={() => { setShowUpload(false); setUploadTargetId(""); }}>取消</Button></div>
           </form>
         </section>
       ) : null}
@@ -1917,9 +1963,9 @@ function AssetsView({
         <DataTable
           headers={["素材", "关联内容", "生成方式", "大小", "状态", "操作"]}
           rows={assets.map((asset) => [
-            asset.kind === "image" ? "营销图片" : "视频 / 分镜",
+            asset.kind === "image" ? "营销图片" : asset.kind === "video" ? "视频" : "视频分镜 JSON",
             contentMap[asset.content_item_id || ""] || "未关联",
-            asset.provider,
+            ["manual", "manual-upload"].includes(asset.provider) ? "人工上传" : asset.provider,
             formatBytes(asset.size_bytes),
             <StatusBadge key="status" value={asset.status} />,
             <div className="table-actions" key="actions">
@@ -1928,7 +1974,10 @@ function AssetsView({
                   <Icon name="download" />下载
                 </button>
               ) : null}
-              {canEdit && ["failed", "planned", "stale"].includes(asset.status) ? (
+              {canEdit && asset.status === "awaiting_upload" ? (
+                <button onClick={() => { setUploadTargetId(asset.id); setShowUpload(true); }}>上传真实素材</button>
+              ) : null}
+              {canEdit && !["manual", "manual-upload"].includes(asset.provider) && ["failed", "planned", "stale"].includes(asset.status) ? (
                 <button onClick={() => void retry(asset)}>重新生成</button>
               ) : null}
             </div>,

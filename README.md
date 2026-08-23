@@ -27,13 +27,13 @@ flowchart LR
 - PBKDF2 密码哈希、HMAC 签名访问令牌、Fernet 平台凭据加密
 - 活动 Brief、运行批次、内容版本、平台结构化排版/分镜、素材、渠道、发布、指标和审计持久化
 - Markdown/TXT/CSV/JSON 知识导入、切块、引用追踪
-- 离线 Hash Embedding；生产环境支持显式配置的 OpenAI-compatible Embedding
+- 离线 Hash Embedding；生产可显式选择 OpenAI-compatible Embedding 或固定版本的本地 BGE-M3（1024 维归一化 Dense 向量）
 - PostgreSQL + pgvector 1024 维向量列和 HNSW 余弦索引
 - Mock/OpenAI-compatible 文本生成
 - 每次文本生成记录 Provider、模型、Prompt 来源/发布版本、Prompt/输入/输出摘要、分阶段时延和 Provider 返回的 Token 用量；不在运行追溯中复制原始 Prompt，也不虚构 Token 或成本
 - 工作区 Prompt Registry：不可变草稿、另一名管理员审批/拒绝、激活与历史回滚；激活和运行前校验正文 SHA-256，审计只保存版本与哈希
 - 版本化 Prompt Eval：不可变确定性用例、双人激活、异步 Worker 执行、Prompt/套件/目标 Provider 与模型绑定；当前套件未通过时审批、激活、回滚和每次实际生成均失败关闭
-- Mock/中立 HTTP 图片与异步视频生成，生成结果写入本地存储或 S3/MinIO
+- Mock/中立 HTTP 图片与异步视频生成，以及人工上传真实素材模式；结果写入本地存储或 S3/MinIO
 - 人工审核门禁、内容版本校验、旧素材失效
 - 小红书卡片结构、抖音逐镜头脚本和公众号章节结构随版本保存并进入投放链路
 - 抖音视频上传/创建/数据回收适配器
@@ -136,7 +136,7 @@ docker compose --profile observability up --build -d
 
 ## 配置真实 AI Provider
 
-文本与 Embedding 使用显式配置的 OpenAI-compatible 端点，不预设云厂商或模型：
+文本与 Embedding 可以使用显式配置的 OpenAI-compatible 端点，不预设云厂商或模型：
 
 ```dotenv
 CONTENTFLOW_TEXT_PROVIDER=openai-compatible
@@ -147,7 +147,25 @@ CONTENTFLOW_TEXT_MODEL=configured-text-model
 CONTENTFLOW_EMBEDDING_MODEL=configured-embedding-model
 ```
 
-图片与视频使用 ContentFlow 定义的中立 HTTP 媒体契约；部署方可以连接内部模型网关或独立适配服务：
+Embedding 也可独立使用本地 BGE-M3。模型提交必须固定，默认在 Worker 首次检索/索引时懒加载，知识分块按可配置批次推理，后续由进程缓存复用；容器使用 CPU-only PyTorch 和持久模型缓存卷：
+
+```dotenv
+CONTENTFLOW_EMBEDDING_PROVIDER=bge-m3-local
+CONTENTFLOW_LOCAL_EMBEDDING_MODEL=BAAI/bge-m3
+CONTENTFLOW_LOCAL_EMBEDDING_REVISION=5617a9f61b028005a4858fdac845db406aefb181
+CONTENTFLOW_LOCAL_EMBEDDING_DEVICE=cpu
+CONTENTFLOW_LOCAL_EMBEDDING_OFFLINE=false
+CONTENTFLOW_LOCAL_EMBEDDING_BATCH_SIZE=8
+```
+
+没有可验收的媒体生成服务时，可以显式使用人工真实素材模式。审核通过后素材进入 `awaiting_upload`，上传并绑定当前内容版本且安全解码成功后才变为 `ready`；发布门禁不会把“等待人工封面”误报为生成成功：
+
+```dotenv
+CONTENTFLOW_IMAGE_PROVIDER=manual
+CONTENTFLOW_VIDEO_PROVIDER=manual
+```
+
+图片与视频也可使用 ContentFlow 定义的中立 HTTP 媒体契约；部署方可以连接内部模型网关或独立适配服务：
 
 ```dotenv
 CONTENTFLOW_IMAGE_PROVIDER=http
@@ -191,7 +209,7 @@ uv sync --all-extras --locked --python 3.12
 uv run --locked ruff check .
 uv run --locked pytest -q --cov=contentflow --cov-branch --cov-fail-under=75
 $env:PYTHONUTF8="1"
-uv run --locked pip-audit --strict
+uv run --locked python scripts/supply_chain.py audit-python
 ```
 
 不使用 uv 时仍可在现有虚拟环境中运行：

@@ -386,6 +386,26 @@ def handle_asset_generate(
         raise ValueError("素材任务不存在")
     if asset.status == "ready":
         return {"asset_id": asset.id, "status": asset.status}
+    configured_provider = (
+        settings.image_provider if asset.kind == "image" else settings.video_provider
+    )
+    if asset.provider in {"manual", "manual-upload"} or configured_provider == "manual":
+        asset.provider = "manual"
+        asset.status = "awaiting_upload"
+        asset.error = None
+        asset.metadata_json = {
+            **(asset.metadata_json or {}),
+            "manual_upload_required": True,
+        }
+        record_audit(
+            session,
+            action="asset.awaiting_upload",
+            entity_type="asset",
+            entity_id=asset.id,
+            workspace_id=asset.workspace_id,
+            actor_user_id=None,
+        )
+        return {"asset_id": asset.id, "status": asset.status}
     asset.status = "generating"
     provider = build_media_provider(settings, asset.kind)
     provider_profile = media_provider_profile_fingerprint(settings, asset.kind)

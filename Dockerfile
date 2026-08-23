@@ -15,15 +15,15 @@ RUN useradd --create-home --uid 10001 contentflow
 
 COPY pyproject.toml uv.lock ./
 RUN pip install --upgrade pip "uv==${UV_VERSION}" \
-    && uv sync --locked --no-dev --extra s3 --no-install-project
+    && uv sync --locked --no-dev --extra s3 --extra local-embeddings --no-install-project
 
 COPY contentflow ./contentflow
 COPY alembic.ini ./
 COPY migrations ./migrations
-RUN uv sync --locked --no-dev --extra s3 --no-editable
+RUN uv sync --locked --no-dev --extra s3 --extra local-embeddings --no-editable
 
-RUN mkdir -p /app/.contentflow/storage \
-    && chown -R contentflow:contentflow /app
+RUN mkdir -p /app/.contentflow/storage /home/contentflow/.cache/huggingface \
+    && chown -R contentflow:contentflow /app/.contentflow /home/contentflow/.cache
 
 USER contentflow
 

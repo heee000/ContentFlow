@@ -75,17 +75,25 @@ def index_document(
         raise ValueError("文档没有可索引文本")
 
     embedder = embedder or HashEmbedding()
+    encode_many = getattr(embedder, "encode_many", None)
+    embeddings = (
+        encode_many(chunks)
+        if callable(encode_many)
+        else [embedder.encode(chunk) for chunk in chunks]
+    )
+    if len(embeddings) != len(chunks):
+        raise RuntimeError("Embedding provider 返回的向量数量与知识分块不一致")
     session.execute(
         delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
     )
-    for index, chunk in enumerate(chunks):
+    for index, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=True)):
         session.add(
             KnowledgeChunk(
                 workspace_id=document.workspace_id,
                 document_id=document.id,
                 chunk_index=index,
                 text=chunk,
-                embedding=embedder.encode(chunk),
+                embedding=embedding,
                 embedding_model=getattr(
                     embedder,
                     "model_name",
@@ -97,13 +105,11 @@ def index_document(
     session.flush()
     if session.bind and session.bind.dialect.name == "postgresql":
         for chunk in session.scalars(
-            select(KnowledgeChunk).where(
-                KnowledgeChunk.document_id == document.id
-            )
+            select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
         ):
-            vector_literal = "[" + ",".join(
-                f"{value:.9g}" for value in chunk.embedding
-            ) + "]"
+            vector_literal = (
+                "[" + ",".join(f"{value:.9g}" for value in chunk.embedding) + "]"
+            )
             session.execute(
                 text(
                     """
@@ -135,9 +141,7 @@ def search_workspace_knowledge(
     embedder = embedder or HashEmbedding()
     query_vector = embedder.encode(query)
     if session.bind and session.bind.dialect.name == "postgresql":
-        vector_literal = "[" + ",".join(
-            f"{value:.9g}" for value in query_vector
-        ) + "]"
+        vector_literal = "[" + ",".join(f"{value:.9g}" for value in query_vector) + "]"
         rows = session.execute(
             text(
                 """
@@ -164,8 +168,7 @@ def search_workspace_knowledge(
             RetrievedChunk(
                 chunk_id=row["id"],
                 source=str(
-                    (row["metadata_json"] or {}).get("source")
-                    or row["document_id"]
+                    (row["metadata_json"] or {}).get("source") or row["document_id"]
                 ),
                 text=row["text"],
                 score=float(row["score"]),
@@ -174,9 +177,7 @@ def search_workspace_knowledge(
         ]
     chunks = list(
         session.scalars(
-            select(KnowledgeChunk).where(
-                KnowledgeChunk.workspace_id == workspace_id
-            )
+            select(KnowledgeChunk).where(KnowledgeChunk.workspace_id == workspace_id)
         )
     )
     scored = [

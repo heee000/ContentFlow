@@ -251,7 +251,7 @@ uv lock --check
 uv run --locked ruff check .
 uv run --locked pytest -q --cov=contentflow --cov-branch --cov-fail-under=75
 $env:PYTHONUTF8="1"
-uv run --locked pip-audit --strict
+uv run --locked python scripts/supply_chain.py audit-python
 
 Set-Location web
 npm ci

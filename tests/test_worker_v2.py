@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlalchemy import select
 
 from contentflow import db
@@ -717,6 +718,11 @@ class WorkerIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(asset_download.status_code, 200, asset_download.text)
         self.assertTrue(asset_download.content.startswith(b"\x89PNG"))
+        manual_cover = BytesIO()
+        Image.new("RGB", (16, 10), color=(24, 86, 140)).save(
+            manual_cover,
+            format="PNG",
+        )
         uploaded_asset = self.client.post(
             "/api/v1/assets/upload",
             headers=self.headers,
@@ -727,13 +733,13 @@ class WorkerIntegrationTest(unittest.TestCase):
             files={
                 "file": (
                     "manual-cover.png",
-                    b"\x89PNG\r\nmanual",
+                    manual_cover.getvalue(),
                     "image/png",
                 )
             },
         )
         self.assertEqual(uploaded_asset.status_code, 201, uploaded_asset.text)
-        self.assertEqual(uploaded_asset.json()["provider"], "upload")
+        self.assertEqual(uploaded_asset.json()["provider"], "manual-upload")
         self.assertEqual(uploaded_asset.json()["status"], "ready")
 
         channel = self.client.post(
@@ -747,7 +753,9 @@ class WorkerIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(channel.status_code, 201, channel.text)
-        self.assertEqual(channel.json()["config_json"]["connection_mode"], "manual_export")
+        self.assertEqual(
+            channel.json()["config_json"]["connection_mode"], "manual_export"
+        )
         cancellable = self.client.post(
             "/api/v1/publishing/jobs",
             headers=self.headers,

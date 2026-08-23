@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
@@ -96,6 +97,12 @@ class Settings(BaseSettings):
     text_model: str | None = None
     embedding_model: str | None = None
     embedding_dimensions: int = 1024
+    local_embedding_model: str = "BAAI/bge-m3"
+    local_embedding_revision: str = "5617a9f61b028005a4858fdac845db406aefb181"
+    local_embedding_device: str = "cpu"
+    local_embedding_cache_dir: Path = Path(".contentflow/models")
+    local_embedding_offline: bool = False
+    local_embedding_batch_size: int = Field(default=8, ge=1, le=128)
 
     media_api_base: str | None = None
     media_api_key: str | None = None
@@ -225,11 +232,11 @@ class Settings(BaseSettings):
         supported_providers = {
             "text": ({"mock", "openai-compatible"}, self.text_provider),
             "embedding": (
-                {"hash", "openai-compatible"},
+                {"hash", "openai-compatible", "bge-m3-local"},
                 self.embedding_provider,
             ),
-            "image": ({"mock", "http"}, self.image_provider),
-            "video": ({"mock", "http"}, self.video_provider),
+            "image": ({"mock", "http", "manual"}, self.image_provider),
+            "video": ({"mock", "http", "manual"}, self.video_provider),
         }
         invalid = [
             f"{kind}={provider}"
@@ -252,6 +259,24 @@ class Settings(BaseSettings):
                 "Production mock/hash providers require "
                 "CONTENTFLOW_ALLOW_MOCK_PROVIDERS=true: " + ", ".join(enabled_offline)
             )
+        if self.embedding_provider == "bge-m3-local":
+            if self.embedding_dimensions != 1024:
+                raise ValueError("BGE-M3 local embedding requires 1024 dimensions")
+            if self.local_embedding_model != "BAAI/bge-m3":
+                raise ValueError("BGE-M3 local embedding requires model BAAI/bge-m3")
+            if not re.fullmatch(r"[0-9a-f]{40}", self.local_embedding_revision):
+                raise ValueError(
+                    "CONTENTFLOW_LOCAL_EMBEDDING_REVISION must be a 40-character "
+                    "commit hash"
+                )
+            if not re.fullmatch(
+                r"(?:auto|cpu|mps|cuda(?::[0-9]+)?)",
+                self.local_embedding_device,
+            ):
+                raise ValueError(
+                    "CONTENTFLOW_LOCAL_EMBEDDING_DEVICE must be auto, cpu, mps, "
+                    "cuda, or cuda:<index>"
+                )
         uses_openai_compatible = (
             self.text_provider == "openai-compatible"
             or self.embedding_provider == "openai-compatible"

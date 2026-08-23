@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..db import get_db
-from ..dependencies import CurrentPrincipal, Principal, require_role
+from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
 from ..entities import Asset, ContentItem, ContentRevision
 from ..job_queue import enqueue_job
 from ..schemas import (
@@ -191,6 +191,7 @@ def review_content(
     payload: ReviewDecision,
     principal: Reviewer,
     session: Db,
+    settings: AppSettings,
 ):
     item = get_content_for_update_or_409(
         session,
@@ -223,15 +224,27 @@ def review_content(
             )
         )
         for asset in assets:
+            provider = (
+                settings.image_provider
+                if asset.kind == "image"
+                else settings.video_provider
+            )
+            asset.provider = provider
+            asset.error = None
+            if provider == "manual":
+                asset.status = "awaiting_upload"
+                asset.metadata_json = {
+                    **(asset.metadata_json or {}),
+                    "manual_upload_required": True,
+                }
+                continue
             asset.status = "queued"
             enqueue_job(
                 session,
                 job_type="asset.generate",
                 payload={"asset_id": asset.id},
                 workspace_id=principal.workspace_id,
-                idempotency_key=(
-                    f"asset.generate:{asset.id}:content-v{item.version}"
-                ),
+                idempotency_key=(f"asset.generate:{asset.id}:content-v{item.version}"),
             )
     else:
         item.status = "rejected"

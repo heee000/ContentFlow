@@ -43,7 +43,7 @@ flowchart TB
 
 - SQLite/离线验收：向量保存在 JSON 字段，应用内计算余弦相似度。
 - PostgreSQL：初始迁移创建 `vector(1024)` 的 `knowledge_vectors` 表和 HNSW 余弦索引；查询使用 `<=>` 完成近邻检索。
-- Provider：Hash Embedding 用于可复现测试；OpenAI-compatible 文本/Embedding 与中立 HTTP 媒体 Provider 用于生产。
+- Provider：Hash Embedding 用于可复现测试；生产可选择 OpenAI-compatible Embedding，或使用固定提交、禁用远程代码、进程级懒加载缓存并对知识分块批量推理的本地 BGE-M3；媒体可选择中立 HTTP 契约或人工真实素材。
 
 生成结果保存引用的 `source_chunk_ids`，让审核人员能够追踪内容使用了哪些知识块。
 
@@ -63,7 +63,7 @@ flowchart TB
 
 每次文本模型调用由工作流级追溯器记录到 `WorkflowRun.result_json.ai_provenance`：Provider/模型、Prompt 来源、工作区发布 ID/版本和模板哈希、调用阶段与平台、输入输出 SHA-256/字节数、时延、响应模型以及 Provider 原样返回的 Token 用量。工作流在第一次模型调用前解析当前工作区唯一的 `active` Prompt Release；没有自定义发布时使用内置安全基线。工作区 Release 的正文会在激活和运行前重新计算 SHA-256，记录值不一致时失败关闭，不会静默回退。候选 Release 必须先由 `prompt_eval.execute` Worker 使用当前活动 Eval 套件和当前配置的目标 Provider/模型运行；只有 Prompt 哈希、Suite 哈希、Suite 版本、实际 Provider 与模型都匹配的 `passed` 证据才能用于审批、激活或回滚。切换活动套件或目标模型会立即使旧证据失效。评测结果只保存输出哈希、字节数、确定性断言失败项与 AI provenance，不保存模型正文。追溯记录同样不复制原始 Prompt、知识文本或模型正文；失败时保留已完成调用和脱敏错误类型。Mock Provider 明确标记为离线确定性模型，Token 来源标记为未上报。
 
-审核通过后才会为 `Asset` 入队；编辑内容会增加版本号、清空批准人、把旧素材标记为 `stale` 并创建新素材计划。发布 Worker 再检查：
+审核通过后，自动媒体 `Asset` 才会入队；`manual` 媒体资产进入 `awaiting_upload` 且不创建生成 Job。人工上传按素材 ID 或当前版本唯一占位任务填充原 `Asset`，校验已审核内容版本并把安全规范化后的对象置为 `ready`。编辑内容会增加版本号、清空批准人、把旧素材标记为 `stale` 并创建新素材计划。发布 Worker 再检查：
 
 - 内容仍是 `approved`
 - 内容版本等于排期时版本

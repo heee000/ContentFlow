@@ -19,8 +19,11 @@ assert SPEC is not None and SPEC.loader is not None
 SUPPLY_CHAIN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SUPPLY_CHAIN)
 SupplyChainError = SUPPLY_CHAIN.SupplyChainError
+add_python_project_to_sbom = SUPPLY_CHAIN.add_python_project_to_sbom
 build_source_archive = SUPPLY_CHAIN.build_source_archive
 normalize_cyclonedx = SUPPLY_CHAIN.normalize_cyclonedx
+normalize_python_audit_requirements = SUPPLY_CHAIN.normalize_python_audit_requirements
+restore_python_sbom_local_version = SUPPLY_CHAIN.restore_python_sbom_local_version
 repository_commit = SUPPLY_CHAIN.repository_commit
 validate_source_archive = SUPPLY_CHAIN.validate_source_archive
 validate_cyclonedx = SUPPLY_CHAIN.validate_cyclonedx
@@ -80,10 +83,72 @@ def _cyclonedx_document() -> dict:
     }
 
 
-def test_normalize_cyclonedx_deduplicates_npm_install_paths():
-    normalized = normalize_cyclonedx(
-        _cyclonedx_document(), root_name="contentflow-web"
+def test_cpu_torch_audit_uses_public_advisory_version_only_for_lookup():
+    requirements = (
+        "torch==2.13.0 ; sys_platform == 'darwin'\n"
+        "torch==2.13.0+cpu ; sys_platform != 'darwin'\n"
     )
+    normalized, advisory_version = normalize_python_audit_requirements(
+        requirements,
+        "2.13.0+cpu",
+    )
+
+    assert advisory_version == "2.13.0"
+    assert "torch==2.13.0+cpu" not in normalized
+    assert normalized.count("torch==2.13.0") == 2
+    with pytest.raises(SupplyChainError, match="exactly one"):
+        normalize_python_audit_requirements("torch==2.13.0\n", "2.13.0+cpu")
+    with pytest.raises(SupplyChainError, match="unsupported local"):
+        normalize_python_audit_requirements(requirements, "2.13.0+vendor")
+
+
+def test_python_sbom_restores_exact_cpu_wheel_and_project_identity():
+    document = {
+        "bomFormat": "CycloneDX",
+        "components": [
+            {
+                "bom-ref": "torch==2.13.0",
+                "type": "library",
+                "name": "torch",
+                "version": "2.13.0",
+                "purl": "pkg:pypi/torch@2.13.0",
+            },
+            {
+                "bom-ref": "numpy==2.5.2",
+                "type": "library",
+                "name": "numpy",
+                "version": "2.5.2",
+                "purl": "pkg:pypi/numpy@2.5.2",
+            },
+        ],
+        "dependencies": [],
+    }
+    restored = restore_python_sbom_local_version(
+        document,
+        advisory_version="2.13.0",
+        installed_version="2.13.0+cpu",
+    )
+    torch_component = restored["components"][0]
+    assert torch_component["version"] == "2.13.0+cpu"
+    assert torch_component["purl"] == "pkg:pypi/torch@2.13.0%2Bcpu"
+    assert torch_component["properties"] == [
+        {
+            "name": "contentflow:audit:advisory-version",
+            "value": "2.13.0",
+        }
+    ]
+
+    enriched = add_python_project_to_sbom(restored, project_version="0.1.0")
+    assert enriched["components"][-1]["name"] == "contentflow"
+    assert enriched["components"][-1]["version"] == "0.1.0"
+    assert enriched["dependencies"][-1]["dependsOn"] == [
+        "numpy==2.5.2",
+        "torch==2.13.0",
+    ]
+
+
+def test_normalize_cyclonedx_deduplicates_npm_install_paths():
+    normalized = normalize_cyclonedx(_cyclonedx_document(), root_name="contentflow-web")
 
     assert normalized["metadata"]["component"]["name"] == "contentflow-web"
     assert len(normalized["components"]) == 1
@@ -93,8 +158,7 @@ def test_normalize_cyclonedx_deduplicates_npm_install_paths():
         {
             "name": "contentflow:npm:package:paths",
             "value": (
-                '["node_modules/example",'
-                '"node_modules/parent/node_modules/example"]'
+                '["node_modules/example","node_modules/parent/node_modules/example"]'
             ),
         }
     ]
@@ -137,9 +201,7 @@ def test_read_document_reports_invalid_json_as_supply_chain_error(tmp_path: Path
 
 
 def test_validate_cyclonedx_rejects_workspace_path_and_unknown_dependency():
-    document = normalize_cyclonedx(
-        _cyclonedx_document(), root_name="contentflow-web"
-    )
+    document = normalize_cyclonedx(_cyclonedx_document(), root_name="contentflow-web")
     validate_cyclonedx(
         document,
         required_name="contentflow-web",
@@ -276,9 +338,7 @@ def test_ci_isolates_attestation_permissions_and_pins_actions():
     supply_chain = jobs["supply-chain"]
     attest = jobs["attest-supply-chain"]
 
-    assert supply_chain.get("permissions", {"contents": "read"}) == {
-        "contents": "read"
-    }
+    assert supply_chain.get("permissions", {"contents": "read"}) == {"contents": "read"}
     assert attest["if"] == "github.event_name != 'pull_request'"
     assert attest["permissions"] == {
         "contents": "read",
@@ -294,11 +354,15 @@ def test_ci_isolates_attestation_permissions_and_pins_actions():
         for step in job.get("steps", [])
         if "uses" in step
     ]
-    assert all("@" in item and len(item.rsplit("@", 1)[1].split()[0]) == 40 for item in uses)
-    assert workflow_text.count(
-        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
-    ) == 3
+    assert all(
+        "@" in item and len(item.rsplit("@", 1)[1].split()[0]) == 40 for item in uses
+    )
+    assert (
+        workflow_text.count("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6")
+        == 3
+    )
     assert "persist-credentials: false" in workflow_text
+    assert workflow_text.count("scripts/supply_chain.py audit-python") == 2
     assert "gh attestation verify" in workflow_text
     assert "--predicate-type https://cyclonedx.org/bom" in workflow_text
     assert 'sbom_count="$(gh attestation verify' in workflow_text

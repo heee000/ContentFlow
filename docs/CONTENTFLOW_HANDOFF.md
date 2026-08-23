@@ -1574,3 +1574,28 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 ### 阶段完成度
 
 综合成熟度为 L2+：个人本地部署约 80%-85%，个人公开部署约 60%-65%，公开 Beta 约 45%-50%，企业完整商业项目约 25%-35%。这些比例是目标门禁完成度估计，不是测试覆盖率或工期承诺；详细依据和完成判据见 [2026-08-22 阶段性总结](phase_summary_2026-08-22.md)。
+
+## 21.30 本地 BGE-M3、人工真实素材与白名单复验
+
+### 本轮已实现
+
+1. 新增显式 `bge-m3-local` Embedding Provider：固定 BAAI/bge-m3 官方提交，禁用 remote code，1024 维归一化 Dense 向量，懒加载、进程缓存、知识分块批量推理、线程串行调用和错维度/非有限值失败关闭。
+2. 本地推理依赖作为 `local-embeddings` 可选组锁定；PyTorch 明确来自官方 CPU 索引，避免 Linux 容器安装 CUDA 依赖。Docker 镜像安装该 extra，Worker 使用非 root 可写的持久 Hugging Face 缓存卷；供应链审计把官方 `+cpu` 本地版本仅在漏洞查询时映射到公开 advisory 版本，SBOM 恢复精确安装版本。
+3. 图片/视频 Provider 新增 `manual`。内容审核通过后资产进入 `awaiting_upload`，不创建 `asset.generate`；未发生外部副作用的遗留生成任务也会安全收敛为待上传。
+4. 素材上传支持按 `asset_id` 填充当前版本原占位任务；内容必须已审核，任务/版本/类型必须一致。封面 PNG/JPEG/WebP 经安全解码、像素和单帧限制、重编码去元数据后写入对象存储；成功后同一资产变为 `manual-upload/ready`，避免新增 ready 素材但旧 planned 资产仍阻塞发布。
+5. 素材工作台展示“待上传”、目标任务选择和人工上传操作；发布门禁继续要求当前内容版本全部素材 ready。
+6. 已忽略的本地 `.env` 切换为真实文本 Provider、固定 BGE-M3 和人工图片/视频，不再保留媒体 Provider 占位配置；未输出任何密钥。
+
+### 当前证据
+
+- 本地 BGE-M3 固定提交真实中文推理：1024 维、全部有限值、L2 范数 1.0；首次下载/加载/推理 212.43 秒。批量实现后，宿主机缓存冷加载+4 段批量推理 31.4 秒、同进程热查询 0.06 秒；Linux Worker 镜像以非 root、完全禁网、offline cache 完成 2 段 1024 维推理，耗时 15.23 秒。
+- 最终本地门禁：全仓 Ruff/编译通过；后端 `219 passed, 7 skipped, 143 subtests passed`，分支覆盖率 81.67%；前端 ESLint、Sites 两项渲染测试、Next 生产构建和 npm audit 0 漏洞；uv lock、pip check 通过，CPU-wheel-aware Python 审计 0 漏洞，CycloneDX 96 组件。默认/observability Compose 均通过，API/Worker/Web 镜像完成构建。7 个集成跳过项由当前 GitHub PostgreSQL/MinIO CI 签收，不能用本地业务闭环冒充测试项结果。
+- 隔离 `contentflow-live-test` 生产配置栈已运行：PostgreSQL/MinIO/API/Worker/Web 健康；双管理员职责分离、三阶段真实 DeepSeek Eval passed、Prompt Release active、生成门禁 ready。授权微信公众号凭据已加密保存并复验为 `connected`，`auto_publish=false`；本轮没有创建新的微信素材、草稿或公开发布。
+- 隔离测试副本经 MinIO 存储、离线 BGE 索引为 4 个知识块；受治理 DeepSeek 工作流生成 1 篇公众号内容并停在 `awaiting_review`，创建 1 个 planned 素材任务等待用户审核和上传真实封面。用户提供的未跟踪知识文件仍未读取、修改或暂存。
+
+### 仍需完成
+
+1. Web 保持在 `http://localhost:3000`；由用户登录主账号，审核当前真实内容并上传实际封面，再创建微信公众号草稿。实际封面视觉质量和本轮草稿结果在完成前保持未签收。
+2. 阶段提交只暂存已知跟踪文件，继续排除未知知识文件、本地 `.env`、模型与账号文件；普通推送后以当前 GitHub Actions 结果回填提交、CI 与供应链证据。
+3. CI 通过后再更新实现 commit、run、artifact 和 attestation；任何失败必须修复并重新签收。
+4. 后续继续补真实异常矩阵、视频内容探测/恶意扫描、浏览器 E2E、公开部署与企业 IAM/SRE/合规门禁。
