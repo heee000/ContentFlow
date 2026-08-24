@@ -50,6 +50,11 @@ def retry_job(job_id: str, principal: Editor, session: Db):
                 status_code=409,
                 detail="发布结果不确定，请先在发布管理中完成人工对账",
             )
+        if publish_job and publish_job.retry_safe:
+            raise HTTPException(
+                status_code=409,
+                detail="请在发布管理中复测渠道并使用安全重试",
+            )
 
     job.status = "retry"
     job.attempts = 0

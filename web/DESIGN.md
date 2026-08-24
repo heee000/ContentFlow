@@ -19,9 +19,26 @@ ContentFlow uses a restrained enterprise application system inspired by IBM Carb
 - Every async action has busy, success and error feedback. Destructive or irreversible actions are never the default button.
 - Status labels remain compact, but interactive controls retain a minimum 44px target.
 
+## Product information architecture
+
+- The default navigation exposes one operating path: workspace → create → review → prepare assets → publish.
+- Knowledge, channels, analytics, queues and administration remain available under a clearly named secondary group; they do not compete with the primary workflow.
+- The dashboard computes one evidence-based next action from real workflow state. It never claims completion from fake or inferred platform success.
+- Forms reveal common choices first. Scheduling, script fallback and manual export are progressive options, while safety warnings remain visible at the decision point.
+- On phones, the four workflow stages remain directly reachable and secondary tools move into one native “more” selector.
+
+## Motion and interaction
+
+- Motion communicates input, navigation or state change only: 80–180ms button press, view entrance and toast arrival.
+- Pressed controls move by at most 1px; selection uses borders and surface changes, never glow or ornamental bounce.
+- Loading state stays explicit and disables duplicate submission. Success, failure, retry-safe and reconciliation-required remain text-labelled.
+- `prefers-reduced-motion` reduces animations and transitions to effectively zero.
+
 ## Anti-patterns
 
 - No gradients, glass, glow, oversized rounded cards or ornamental illustrations.
 - No fake analytics or fake platform publish success.
 - No color-only state: every status includes a text label.
 - No action hidden only on hover; touch and keyboard users must see the same controls.
+- No flat list of every professional module in the primary navigation; advanced capabilities use progressive disclosure.
+- No animation that delays work, implies false progress or ignores reduced-motion.

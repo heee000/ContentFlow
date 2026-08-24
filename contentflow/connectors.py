@@ -22,6 +22,23 @@ class ConnectorResult:
     response: dict[str, Any] = field(default_factory=dict)
 
 
+class ConnectorPublishError(RuntimeError):
+    """A connector failure with an explicit external side-effect boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str,
+        retry_safe: bool,
+        invalidate_channel: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.retry_safe = retry_safe
+        self.invalidate_channel = invalidate_channel
+
+
 class ChannelConnector(Protocol):
     reconciliation_supported: bool
 
@@ -292,19 +309,34 @@ class WechatConnector:
         ).rstrip("/")
 
     def _access_token(self) -> str:
-        response = self.client.get(
-            f"{self.base_url}/cgi-bin/token",
-            params={
-                "grant_type": "client_credential",
-                "appid": self.credentials.get("app_id"),
-                "secret": self.credentials.get("app_secret"),
-            },
-        )
-        response.raise_for_status()
-        body = response.json()
+        try:
+            response = self.client.get(
+                f"{self.base_url}/cgi-bin/token",
+                params={
+                    "grant_type": "client_credential",
+                    "appid": self.credentials.get("app_id"),
+                    "secret": self.credentials.get("app_secret"),
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError) as error:
+            raise ConnectorPublishError(
+                "公众号鉴权请求失败，尚未执行任何平台写入",
+                stage="authenticate",
+                retry_safe=True,
+                invalidate_channel=True,
+            ) from error
         token = body.get("access_token")
         if not token:
-            raise RuntimeError(f"公众号鉴权失败: {body}")
+            errcode = body.get("errcode", "unknown")
+            errmsg = body.get("errmsg", "unknown error")
+            raise ConnectorPublishError(
+                f"公众号鉴权失败（{errcode}）：{errmsg}",
+                stage="authenticate",
+                retry_safe=True,
+                invalidate_channel=True,
+            )
         return str(token)
 
     def test(self) -> ConnectorResult:
@@ -330,9 +362,20 @@ class WechatConnector:
             None,
         )
         if cover is None:
-            raise ValueError("公众号草稿需要一张已生成封面图")
+            raise ConnectorPublishError(
+                "公众号草稿需要一张已就绪封面图",
+                stage="validate_assets",
+                retry_safe=True,
+            )
         filename = _object_name(cover.storage_uri or "")
-        data = self.storage.read(cover.storage_uri or "")
+        try:
+            data = self.storage.read(cover.storage_uri or "")
+        except Exception as error:
+            raise ConnectorPublishError(
+                "读取公众号封面失败，尚未执行任何平台写入",
+                stage="read_assets",
+                retry_safe=True,
+            ) from error
         uploaded = self.client.post(
             f"{self.base_url}/cgi-bin/material/add_material",
             params={"access_token": token, "type": "image"},

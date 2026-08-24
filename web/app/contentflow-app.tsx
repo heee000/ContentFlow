@@ -140,6 +140,9 @@ type PublishJob = {
   status: string;
   scheduled_at: string;
   delivery_mode: string;
+  publish_timing: "immediate" | "scheduled";
+  retry_safe: boolean;
+  failure_stage: string | null;
   attempts: number;
   error: string | null;
   external_id: string | null;
@@ -484,7 +487,7 @@ const STATUS: Record<string, string> = {
   export_only: "导出模式",
   script_only: "脚本模式",
   script_ready: "脚本包就绪",
-  script_confirmation_pending: "Second confirmation pending",
+  script_confirmation_pending: "等待第二人确认",
   script_published: "脚本确认发布",
   error: "执行错误",
   failed: "失败",
@@ -517,17 +520,31 @@ const DELIVERY_MODE: Record<string, string> = {
   manual_export: "人工导出",
 };
 
+const PUBLISH_FAILURE_STAGE: Record<string, string> = {
+  authenticate: "渠道鉴权",
+  validate_assets: "素材检查",
+  read_assets: "素材读取",
+};
+
 const NAV: Array<{ id: View; label: string; icon: IconName }> = [
-  { id: "dashboard", label: "总览", icon: "grid" },
-  { id: "campaigns", label: "营销活动", icon: "campaign" },
-  { id: "review", label: "内容审核", icon: "review" },
-  { id: "assets", label: "素材中心", icon: "image" },
-  { id: "publishing", label: "发布管理", icon: "send" },
+  { id: "dashboard", label: "工作台", icon: "grid" },
+  { id: "campaigns", label: "1 创建内容", icon: "campaign" },
+  { id: "review", label: "2 审核内容", icon: "review" },
+  { id: "assets", label: "3 准备素材", icon: "image" },
+  { id: "publishing", label: "4 发布", icon: "send" },
   { id: "knowledge", label: "知识库", icon: "book" },
   { id: "channels", label: "平台连接", icon: "link" },
   { id: "metrics", label: "数据复盘", icon: "chart" },
   { id: "jobs", label: "任务队列", icon: "queue" },
   { id: "admin", label: "团队与审计", icon: "settings" },
+];
+
+const PRIMARY_NAV_IDS: View[] = [
+  "dashboard",
+  "campaigns",
+  "review",
+  "assets",
+  "publishing",
 ];
 
 type IconName =
@@ -778,6 +795,7 @@ function AuthScreen({
 export function ContentFlowApp() {
   const [session, setSession] = useState<Session | null>(null);
   const [view, setView] = useState<View>("dashboard");
+  const [advancedNavOpen, setAdvancedNavOpen] = useState(false);
   const [data, setData] = useState<DataState>(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -941,6 +959,28 @@ export function ContentFlowApp() {
     (item) => item.id !== "admin" || session.role === "admin",
   );
   const viewLabel = visibleNav.find((item) => item.id === view)?.label || "";
+  const primaryNav = visibleNav.filter((item) =>
+    PRIMARY_NAV_IDS.includes(item.id),
+  );
+  const advancedNav = visibleNav.filter(
+    (item) => !PRIMARY_NAV_IDS.includes(item.id),
+  );
+  const advancedActive = advancedNav.some((item) => item.id === view);
+  const renderSidebarItem = (item: (typeof NAV)[number]) => (
+    <button
+      key={item.id}
+      className={view === item.id ? "active" : ""}
+      onClick={() => setView(item.id)}
+      aria-current={view === item.id ? "page" : undefined}
+      title={item.label}
+    >
+      <Icon name={item.icon} />
+      <span>{item.label}</span>
+      {item.id === "review" && data.dashboard.contents_needing_review ? (
+        <b>{data.dashboard.contents_needing_review}</b>
+      ) : null}
+    </button>
+  );
 
   return (
     <div className="app-shell">
@@ -950,21 +990,23 @@ export function ContentFlowApp() {
           <span className="brand-name">ContentFlow</span>
         </div>
         <nav aria-label="工作台导航">
-          {visibleNav.map((item) => (
-            <button
-              key={item.id}
-              className={view === item.id ? "active" : ""}
-              onClick={() => setView(item.id)}
-              aria-current={view === item.id ? "page" : undefined}
-              title={item.label}
+          <p className="nav-group-label">核心流程</p>
+          {primaryNav.map(renderSidebarItem)}
+          {advancedNav.length ? (
+            <details
+              className="nav-more"
+              open={advancedNavOpen || advancedActive}
+              onToggle={(event) =>
+                setAdvancedNavOpen(event.currentTarget.open)
+              }
             >
-              <Icon name={item.icon} />
-              <span>{item.label}</span>
-              {item.id === "review" && data.dashboard.contents_needing_review ? (
-                <b>{data.dashboard.contents_needing_review}</b>
-              ) : null}
-            </button>
-          ))}
+              <summary>
+                <span>资源与系统</span>
+                <span aria-hidden="true">＋</span>
+              </summary>
+              <div>{advancedNav.map(renderSidebarItem)}</div>
+            </details>
+          ) : null}
         </nav>
         <div className="sidebar-footer">
           <span className="avatar">{session.user.display_name.slice(0, 1)}</span>
@@ -1015,7 +1057,7 @@ export function ContentFlowApp() {
           </button>
         </header>
         <div className="mobile-nav">
-          {visibleNav.map((item) => (
+          {primaryNav.map((item) => (
             <button
               key={item.id}
               className={view === item.id ? "active" : ""}
@@ -1024,11 +1066,30 @@ export function ContentFlowApp() {
               {item.label}
             </button>
           ))}
+          {advancedNav.length ? (
+            <select
+              className="mobile-more-nav"
+              aria-label="更多功能"
+              value={advancedActive ? view : ""}
+              onChange={(event) => {
+                if (event.target.value) setView(event.target.value as View);
+              }}
+            >
+              <option value="">更多</option>
+              {advancedNav.map((item) => (
+                <option key={item.id} value={item.id}>{item.label}</option>
+              ))}
+            </select>
+          ) : null}
         </div>
         <main className="workspace">
-          {notice ? <div className="toast toast-success">{notice}</div> : null}
+          {notice ? (
+            <div className="toast toast-success" role="status" aria-live="polite">
+              {notice}
+            </div>
+          ) : null}
           {error ? (
-            <div className="toast toast-error">
+            <div className="toast toast-error" role="alert">
               <span>{error}</span>
               <button onClick={() => setError("")}>关闭</button>
             </div>
@@ -1067,6 +1128,7 @@ export function ContentFlowApp() {
               contents={data.contents}
               channels={data.channels}
               role={session.role}
+              onNavigate={setView}
               onChanged={() => loadData()}
               flash={flash}
             />
@@ -1102,6 +1164,7 @@ export function ContentFlowApp() {
             <JobsView
               jobs={data.jobs}
               role={session.role}
+              onNavigate={setView}
               onChanged={() => loadData()}
               flash={flash}
             />
@@ -1161,15 +1224,77 @@ function DashboardView({
     ["素材处理中", data.dashboard.assets_processing, "assets" as View],
     ["已安排发布", data.dashboard.publishes_scheduled, "publishing" as View],
   ] as const;
+  const hasCampaign = data.campaigns.length > 0;
+  const hasContent = data.contents.length > 0;
+  const hasApproved = data.contents.some((item) => item.status === "approved");
+  const hasReadyAsset = data.assets.some((item) => item.status === "ready");
+  const needsAssetAttention = data.assets.some((item) =>
+    ["planned", "processing", "awaiting_upload", "failed"].includes(item.status),
+  );
+  const hasDelivered = data.publishes.some((item) =>
+    [
+      "draft_created",
+      "submitted",
+      "published",
+      "exported",
+      "script_published",
+    ].includes(item.status),
+  );
+  const nextAction = !hasCampaign
+    ? { view: "campaigns" as View, label: "创建第一个内容活动", copy: "先说明产品、受众和平台，系统会据此生成内容。" }
+    : data.dashboard.contents_needing_review > 0
+      ? { view: "review" as View, label: "审核待处理内容", copy: `有 ${data.dashboard.contents_needing_review} 篇内容等待你确认事实、语气和风险。` }
+      : hasApproved && (!hasReadyAsset || needsAssetAttention)
+        ? { view: "assets" as View, label: "准备发布素材", copy: "内容已通过审核，补齐真实封面后才能进入发布。" }
+        : hasApproved
+          ? { view: "publishing" as View, label: "立即发布或设置时间", copy: "内容与素材已就绪，可以选择立即执行或定时发布。" }
+          : { view: "campaigns" as View, label: "继续生成内容", copy: "活动已经建立，开始一次新的内容生成。" };
+  const workflowSteps = [
+    { label: "创建内容", detail: "活动与生成", done: hasCampaign && hasContent, view: "campaigns" as View },
+    { label: "审核内容", detail: "人工确认", done: hasApproved, view: "review" as View },
+    { label: "准备素材", detail: "封面与视频", done: hasReadyAsset, view: "assets" as View },
+    { label: "发布", detail: "立即或定时", done: hasDelivered, view: "publishing" as View },
+  ];
 
   return (
     <>
       <PageHeading
         eyebrow="运营总览"
-        title="内容工作流状态"
-        description="查看从生成、审核到分发的关键阻塞点。数据每 15 秒自动更新。"
+        title="今天从哪里继续？"
+        description="按照创建、审核、素材、发布四步完成内容投放；高级配置已收纳到资源与系统。"
       />
-      <section className="metric-grid" aria-label="关键指标">
+      <section className="workflow-guide" aria-label="内容发布主流程">
+        <div className="workflow-next">
+          <p className="eyebrow">建议下一步</p>
+          <h2>{nextAction.label}</h2>
+          <p>{nextAction.copy}</p>
+          <Button onClick={() => onNavigate(nextAction.view)}>
+            继续处理 <span aria-hidden="true">→</span>
+          </Button>
+        </div>
+        <ol>
+          {workflowSteps.map((step, index) => (
+            <li
+              key={step.view}
+              className={
+                step.done
+                  ? "complete"
+                  : step.view === nextAction.view
+                    ? "current"
+                    : "upcoming"
+              }
+              aria-current={step.view === nextAction.view ? "step" : undefined}
+            >
+              <button onClick={() => onNavigate(step.view)}>
+                <span>{step.done ? "✓" : String(index + 1).padStart(2, "0")}</span>
+                <strong>{step.label}</strong>
+                <small>{step.done ? "已完成" : step.detail}</small>
+              </button>
+            </li>
+          ))}
+        </ol>
+      </section>
+      <section className="metric-grid compact-metrics" aria-label="关键指标">
         {metrics.map(([label, value, target], index) => (
           <button key={label} onClick={() => onNavigate(target)}>
             <span>0{index + 1}</span>
@@ -1994,6 +2119,7 @@ function PublishingView({
   contents,
   channels,
   role,
+  onNavigate,
   onChanged,
   flash,
 }: {
@@ -2001,6 +2127,7 @@ function PublishingView({
   contents: Content[];
   channels: Channel[];
   role: string;
+  onNavigate: (view: View) => void;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
 }) {
@@ -2011,6 +2138,15 @@ function PublishingView({
   const [cancelling, setCancelling] = useState("");
   const [reconciling, setReconciling] = useState("");
   const [scriptBusy, setScriptBusy] = useState("");
+  const [retrying, setRetrying] = useState("");
+  const [publishTiming, setPublishTiming] = useState<"immediate" | "scheduled">(
+    "immediate",
+  );
+  const [selectedContentId, setSelectedContentId] = useState("");
+  const [selectedChannelId, setSelectedChannelId] = useState("");
+  const [publishRequestId, setPublishRequestId] = useState(() =>
+    crypto.randomUUID(),
+  );
   const [error, setError] = useState("");
   const [evidenceJobId, setEvidenceJobId] = useState("");
   const [evidence, setEvidence] = useState<PublishEvidence[]>([]);
@@ -2028,10 +2164,18 @@ function PublishingView({
     () => Object.fromEntries(channels.map((item) => [item.id, item])),
     [channels],
   );
-  async function schedule(event: FormEvent<HTMLFormElement>) {
+  const selectedContent = contentMap[selectedContentId];
+  const matchingChannels = selectedContent
+    ? channels.filter((item) => item.platform === selectedContent.platform)
+    : [];
+  const selectedChannel = channelMap[selectedChannelId];
+
+  async function createPublish(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
+    setError("");
     const form = new FormData(event.currentTarget);
+    const publishNow = publishTiming === "immediate";
     try {
       await api("/publishing/jobs", {
         method: "POST",
@@ -2039,11 +2183,22 @@ function PublishingView({
           content_item_id: form.get("content_item_id"),
           channel_id: form.get("channel_id"),
           delivery_mode: form.get("delivery_mode"),
-          scheduled_at: new Date(String(form.get("scheduled_at"))).toISOString(),
+          publish_now: publishNow,
+          request_id: publishRequestId,
+          ...(publishNow
+            ? {}
+            : {
+                scheduled_at: new Date(
+                  String(form.get("scheduled_at")),
+                ).toISOString(),
+              }),
         },
       });
       setCreating(false);
-      flash("发布任务已排期");
+      setSelectedContentId("");
+      setSelectedChannelId("");
+      setPublishRequestId(crypto.randomUUID());
+      flash(publishNow ? "发布任务已立即进入队列" : "发布任务已按时间排期");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -2051,6 +2206,21 @@ function PublishingView({
       setBusy(false);
     }
   }
+
+  async function retrySafely(job: PublishJob) {
+    setRetrying(job.id);
+    setError("");
+    try {
+      await api(`/publishing/jobs/${job.id}/retry`, { method: "POST" });
+      flash("已确认在平台写入前失败，任务正在安全重试");
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setRetrying("");
+    }
+  }
+
   async function pullMetrics(job: PublishJob) {
     setPulling(job.id);
     try {
@@ -2064,12 +2234,15 @@ function PublishingView({
     }
   }
   async function cancel(job: PublishJob) {
-    if (!window.confirm("取消这条发布排期？取消后不会自动分发。")) return;
+    const prompt = job.publish_timing === "immediate"
+      ? "取消这条尚未执行的立即发布任务？取消后不会自动分发。"
+      : "取消这条发布排期？取消后不会自动分发。";
+    if (!window.confirm(prompt)) return;
     setCancelling(job.id);
     setError("");
     try {
       await api(`/publishing/jobs/${job.id}/cancel`, { method: "POST" });
-      flash("发布排期已取消");
+      flash(job.publish_timing === "immediate" ? "立即发布任务已取消" : "发布排期已取消");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -2171,7 +2344,7 @@ function PublishingView({
       const job = publishes.find((item) => item.id === evidenceJobId);
       if (job) await openEvidence(job);
       await onChanged();
-      flash("Evidence verified and bound to the current script package");
+      flash("证据已校验并绑定到当前脚本任务包");
     } catch (caught) {
       setError(messageOf(caught));
     } finally {
@@ -2227,46 +2400,133 @@ function PublishingView({
   return (
     <>
       <PageHeading
-        eyebrow="Distribution"
-        title="发布管理"
-        description="审核通过后可选择官方 API、脚本辅助或人工导出；平台结果不确定时必须先对账，禁止直接切换以免重复发布。"
-        action={canSchedule ? <Button onClick={() => setCreating((value) => !value)}><Icon name="plus" />安排发布</Button> : undefined}
+        eyebrow="4 · 发布"
+        title="把已审核内容交付到平台"
+        description="默认立即执行；需要预约时再切换为定时发布。公众号连接关闭自动发布时，只会创建草稿。"
+        action={
+          canSchedule ? (
+            <Button
+              onClick={() => {
+                setCreating((value) => !value);
+                setPublishRequestId(crypto.randomUUID());
+              }}
+            >
+              <Icon name="plus" />新建发布
+            </Button>
+          ) : undefined
+        }
       />
-      {error ? <p className="inline-error">{error}</p> : null}
-      {!canSchedule ? <p className="permission-note">当前可查看发布状态与下载投放包；安排分发需要审核人员权限。</p> : null}
+      <section className="publish-quick-guide" aria-label="发布前检查">
+        <span><b>1</b> 内容已审核</span>
+        <span><b>2</b> 素材已就绪</span>
+        <span><b>3</b> 渠道已连接</span>
+        <span><b>4</b> 立即或定时执行</span>
+      </section>
+      {error ? <p className="inline-error" role="alert">{error}</p> : null}
+      {!canSchedule ? <p className="permission-note">当前可查看发布状态与下载投放包；执行发布需要审核人员权限。</p> : null}
       {creating && canSchedule ? (
-        <section className="panel form-panel">
-          <div className="panel-heading"><div><p className="eyebrow">Schedule</p><h2>创建发布任务</h2></div></div>
-          <form className="stack-form" onSubmit={schedule}>
-            <label>已审核内容
-              <select name="content_item_id" required defaultValue="">
-                <option value="" disabled>选择内容</option>
-                {approved.map((item) => <option key={item.id} value={item.id}>{PLATFORM[item.platform]} · {item.title}</option>)}
-              </select>
-            </label>
-            <label>平台连接
-              <select name="channel_id" required defaultValue="">
-                <option value="" disabled>选择连接器</option>
-                {channels.map((item) => <option key={item.id} value={item.id}>{PLATFORM[item.platform]} · {item.display_name}</option>)}
-              </select>
-            </label>
-            <label>发布方式
-              <select name="delivery_mode" required defaultValue="connector">
-                <option value="connector">官方 API</option>
-                <option value="script">本机脚本辅助（最终点击由人工完成）</option>
-                <option value="manual_export">人工导出（仅小红书）</option>
-              </select>
-              <small>若 API 结果不确定，系统会要求先人工对账，不会静默降级到脚本。</small>
-            </label>
-            <label>发布时间
-              <input
-                name="scheduled_at"
-                type="datetime-local"
-                required
-                defaultValue={defaultSchedule}
-              />
-            </label>
-            <div className="form-actions"><Button type="submit" busy={busy}>确认排期</Button><Button type="button" kind="ghost" onClick={() => setCreating(false)}>取消</Button></div>
+        <section className="panel form-panel publish-composer">
+          <div className="panel-heading">
+            <div><p className="eyebrow">创建发布任务</p><h2>什么时候执行？</h2></div>
+            <Button kind="ghost" type="button" onClick={() => setCreating(false)}>关闭</Button>
+          </div>
+          <form className="stack-form" onSubmit={createPublish}>
+            <div className="timing-switch" role="group" aria-label="发布时间选择">
+              <button
+                type="button"
+                className={publishTiming === "immediate" ? "active" : ""}
+                aria-pressed={publishTiming === "immediate"}
+                onClick={() => setPublishTiming("immediate")}
+              >
+                <strong>立即执行</strong>
+                <small>保存后马上进入可靠队列</small>
+              </button>
+              <button
+                type="button"
+                className={publishTiming === "scheduled" ? "active" : ""}
+                aria-pressed={publishTiming === "scheduled"}
+                onClick={() => setPublishTiming("scheduled")}
+              >
+                <strong>定时发布</strong>
+                <small>到指定时间再进入分发</small>
+              </button>
+            </div>
+            <div className="form-grid">
+              <label>已审核内容
+                <select
+                  name="content_item_id"
+                  required
+                  value={selectedContentId}
+                  onChange={(event) => {
+                    setSelectedContentId(event.target.value);
+                    setSelectedChannelId("");
+                  }}
+                >
+                  <option value="" disabled>选择要发布的内容</option>
+                  {approved.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {PLATFORM[item.platform]} · {item.title}
+                    </option>
+                  ))}
+                </select>
+                {!approved.length ? <small>还没有已审核内容，请先完成第 2 步。</small> : null}
+              </label>
+              <label>平台连接
+                <select
+                  name="channel_id"
+                  required
+                  value={selectedChannelId}
+                  disabled={!selectedContentId}
+                  onChange={(event) => setSelectedChannelId(event.target.value)}
+                >
+                  <option value="" disabled>
+                    {selectedContentId ? "选择匹配的平台连接" : "先选择内容"}
+                  </option>
+                  {matchingChannels.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.display_name} · {STATUS[item.status] || item.status}
+                    </option>
+                  ))}
+                </select>
+                {selectedContentId && !matchingChannels.length ? (
+                  <small>没有匹配连接，请先到“平台连接”完成配置。</small>
+                ) : null}
+              </label>
+            </div>
+            {selectedChannel?.platform === "wechat"
+              && selectedChannel.config_json.auto_publish !== true ? (
+              <p className="safe-notice">
+                当前公众号连接为安全模式：执行后只创建草稿，不会公开发布。
+              </p>
+            ) : null}
+            {publishTiming === "scheduled" ? (
+              <label>计划执行时间
+                <input
+                  name="scheduled_at"
+                  type="datetime-local"
+                  required
+                  defaultValue={defaultSchedule}
+                />
+                <small>时间使用当前设备时区，保存后可在执行前取消。</small>
+              </label>
+            ) : null}
+            <details className="advanced-options">
+              <summary>高级发布方式</summary>
+              <label>发布方式
+                <select name="delivery_mode" required defaultValue="connector">
+                  <option value="connector">官方 API（推荐）</option>
+                  <option value="script">本机脚本辅助（人工最终点击）</option>
+                  <option value="manual_export">人工导出（仅小红书）</option>
+                </select>
+                <small>API 结果不确定时必须先对账，系统不会静默切换发布方式。</small>
+              </label>
+            </details>
+            <div className="form-actions">
+              <Button type="submit" busy={busy}>
+                {publishTiming === "immediate" ? "立即执行" : "确认定时发布"}
+              </Button>
+              <Button type="button" kind="ghost" onClick={() => setCreating(false)}>取消</Button>
+            </div>
           </form>
         </section>
       ) : null}
@@ -2279,23 +2539,23 @@ function PublishingView({
         <section className="panel form-panel">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">Publication evidence</p>
-              <h2>Script publication evidence and confirmations</h2>
+              <p className="eyebrow">发布证据</p>
+              <h2>脚本发布证据与确认</h2>
             </div>
-            <Button kind="ghost" onClick={() => setEvidenceJobId("")}>Close</Button>
+            <Button kind="ghost" onClick={() => setEvidenceJobId("")}>关闭</Button>
           </div>
           {canSchedule
             && publishes.find((item) => item.id === evidenceJobId)?.status === "script_ready"
             && !publishes.find((item) => item.id === evidenceJobId)?.script_confirmation_expired ? (
             <form className="stack-form" onSubmit={uploadEvidence}>
               <div className="form-grid">
-                <label>Evidence type
+                <label>证据类型
                   <select name="kind" defaultValue="screenshot">
-                    <option value="screenshot">Platform screenshot (PNG/JPEG/WebP)</option>
-                    <option value="platform_export">Platform export (JSON)</option>
+                    <option value="screenshot">平台截图（PNG/JPEG/WebP）</option>
+                    <option value="platform_export">平台导出（JSON）</option>
                   </select>
                 </label>
-                <label>Evidence file
+                <label>证据文件
                   <input
                     name="file"
                     type="file"
@@ -2304,8 +2564,8 @@ function PublishingView({
                   />
                 </label>
               </div>
-              <small>The server decodes, normalizes, and hashes every file. Evidence freezes after the first confirmation.</small>
-              <Button type="submit" busy={evidenceBusy}>Upload and verify</Button>
+              <small>服务端会解码、规范化并计算哈希；首次确认后证据将被冻结。</small>
+              <Button type="submit" busy={evidenceBusy}>上传并校验</Button>
             </form>
           ) : null}
           <div className="record-list">
@@ -2320,11 +2580,11 @@ function PublishingView({
                   `/publishing/jobs/${item.publish_job_id}/evidence/${item.id}/download`,
                   `evidence-${item.id}`,
                 )}>
-                  <Icon name="download" />Download
+                  <Icon name="download" />下载
                 </button>
               </div>
             ))}
-            {!evidence.length ? <p className="form-note">Upload at least one evidence file before confirming the result.</p> : null}
+            {!evidence.length ? <p className="form-note">确认结果前至少上传一份证据文件。</p> : null}
           </div>
           {confirmations.length ? (
             <div className="record-list">
@@ -2332,9 +2592,9 @@ function PublishingView({
                 <div className="record-row" key={item.id}>
                   <div className="document-icon">{index + 1}</div>
                   <div className="record-main">
-                    <strong>{item.decision === "confirmed_published" ? "Confirmed published" : "Confirmed not published"}</strong>
+                    <strong>{item.decision === "confirmed_published" ? "确认已发布" : "确认未发布"}</strong>
                     <small>
-                      Reviewer {item.confirmed_by_user_id.slice(0, 8)} · Manifest {item.evidence_manifest_sha256.slice(0, 16)}…
+                      审核人 {item.confirmed_by_user_id.slice(0, 8)} · 清单 {item.evidence_manifest_sha256.slice(0, 16)}…
                     </small>
                   </div>
                   <span>{formatDateTime(item.created_at)}</span>
@@ -2346,15 +2606,40 @@ function PublishingView({
       ) : null}
       <section className="panel">
         <DataTable
-          headers={["内容", "平台连接", "发布方式", "计划时间", "尝试", "状态", "结果"]}
+          headers={["内容", "平台", "方式", "执行时间", "尝试", "状态", "下一步"]}
           rows={publishes.map((job) => [
             contentMap[job.content_item_id]?.title || job.content_item_id,
             channelMap[job.channel_id]?.display_name || job.channel_id,
             DELIVERY_MODE[job.delivery_mode] || job.delivery_mode,
-            formatDateTime(job.scheduled_at),
+            <div className="timing-cell" key="timing">
+              <strong>{job.publish_timing === "immediate" ? "立即" : "定时"}</strong>
+              <small>{formatDateTime(job.scheduled_at)}</small>
+            </div>,
             job.attempts,
-            <StatusBadge key="status" value={job.status} />,
+            <div className="status-stack" key="status">
+              <StatusBadge value={job.status} />
+              {job.retry_safe ? (
+                <small>
+                  可安全重试 · {PUBLISH_FAILURE_STAGE[job.failure_stage || ""] || job.failure_stage}
+                </small>
+              ) : null}
+            </div>,
             <div className="table-actions" key="actions">
+              {job.error ? <span className="publish-error">{job.error}</span> : null}
+              {canSchedule && job.retry_safe ? (
+                channelMap[job.channel_id]?.status === "connected" ? (
+                  <button
+                    disabled={retrying === job.id}
+                    onClick={() => void retrySafely(job)}
+                  >
+                    安全重试
+                  </button>
+                ) : (
+                  <button onClick={() => onNavigate("channels")}>
+                    先复测渠道
+                  </button>
+                )
+              ) : null}
               {job.status === "exported" || (job.script_package_available && !job.script_confirmation_expired) ? (
                 <button onClick={() => void download(`/publishing/jobs/${job.id}/artifact`, `contentflow-${job.id}.zip`)}>
                   <Icon name="download" />{job.delivery_mode === "script" ? "下载脚本包" : "下载投放包"}
@@ -2366,7 +2651,7 @@ function PublishingView({
                     disabled={evidenceBusy}
                     onClick={() => void openEvidence(job)}
                   >
-                    Evidence {job.script_evidence_count} · Confirmations {job.script_confirmation_count}/{job.script_confirmation_required}
+                    证据 {job.script_evidence_count} · 确认 {job.script_confirmation_count}/{job.script_confirmation_required}
                   </button>
                   <span>
                     {job.script_confirmation_expired
@@ -2419,7 +2704,7 @@ function PublishingView({
               ) : null}
               {canSchedule && (
                 (["script_ready", "script_confirmation_pending"].includes(job.status) && job.script_confirmation_expired)
-                || job.status === "failed"
+                || (job.status === "failed" && !job.retry_safe)
                 || (job.delivery_mode !== "script" && ["scheduled", "queued", "exported"].includes(job.status))
               ) ? (
                 <button
@@ -2435,13 +2720,13 @@ function PublishingView({
                   disabled={cancelling === job.id}
                   onClick={() => void cancel(job)}
                 >
-                  取消排期
+                  {job.publish_timing === "immediate" ? "取消执行" : "取消排期"}
                 </button>
               ) : null}
               {!["scheduled", "queued", "exported", "script_ready"].includes(job.status) && job.external_id ? (
                 <span>ID {job.external_id}</span>
               ) : null}
-              {!job.external_id && !["scheduled", "queued", "reconciliation_required", "script_ready"].includes(job.status) ? <span>—</span> : null}
+              {!job.external_id && !job.error && !["scheduled", "queued", "reconciliation_required", "script_ready"].includes(job.status) ? <span>—</span> : null}
             </div>,
           ])}
           empty="还没有发布任务"
@@ -3537,11 +3822,13 @@ function AdministrationView({
 function JobsView({
   jobs,
   role,
+  onNavigate,
   onChanged,
   flash,
 }: {
   jobs: QueueJob[];
   role: string;
+  onNavigate: (view: View) => void;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
 }) {
@@ -3575,7 +3862,15 @@ function JobsView({
             `${job.attempts} / ${job.max_attempts}`,
             <StatusBadge key="status" value={job.status} />,
             job.last_error || "—",
-            canRetry && job.status === "failed" ? <button className="table-link" key="retry" onClick={() => void retry(job)}>重试</button> : "—",
+            canRetry && job.status === "failed" ? (
+              job.job_type === "publish.dispatch" ? (
+                <button className="table-link" key="publish" onClick={() => onNavigate("publishing")}>
+                  到发布页处理
+                </button>
+              ) : (
+                <button className="table-link" key="retry" onClick={() => void retry(job)}>重试</button>
+              )
+            ) : "—",
           ])}
           empty="任务队列为空"
         />

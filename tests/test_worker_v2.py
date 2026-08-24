@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from contentflow import db
 from contentflow.api import create_app
-from contentflow.connectors import ConnectorResult
+from contentflow.connectors import ConnectorPublishError, ConnectorResult
 from contentflow.entities import (
     Asset,
     AuditLog,
@@ -158,6 +158,214 @@ class WorkerIntegrationTest(unittest.TestCase):
                 "channel_id": channel.id,
                 "content_id": content.id,
             }
+
+    def test_immediate_publish_enqueues_now_and_is_idempotent(self):
+        fixture = self._create_publish_fixture(status="scheduled")
+        payload = {
+            "content_item_id": fixture["content_id"],
+            "channel_id": fixture["channel_id"],
+            "publish_now": True,
+            "request_id": "immediate-request-001",
+        }
+        before = datetime.now(timezone.utc)
+        response = self.client.post(
+            "/api/v1/publishing/jobs",
+            headers=self.headers,
+            json=payload,
+        )
+        after = datetime.now(timezone.utc)
+        self.assertEqual(response.status_code, 202, response.text)
+        scheduled = response.json()
+        self.assertEqual(scheduled["status"], "queued")
+        self.assertEqual(scheduled["publish_timing"], "immediate")
+        scheduled_at = datetime.fromisoformat(scheduled["scheduled_at"])
+        self.assertGreaterEqual(scheduled_at, before)
+        self.assertLessEqual(scheduled_at, after)
+        repeated = self.client.post(
+            "/api/v1/publishing/jobs",
+            headers=self.headers,
+            json=payload,
+        )
+        self.assertEqual(repeated.status_code, 202, repeated.text)
+        self.assertEqual(repeated.json()["id"], scheduled["id"])
+
+        with db.SessionLocal() as session:
+            queue_job = session.scalar(
+                select(Job).where(
+                    Job.idempotency_key
+                    == f"publish.dispatch:{scheduled['id']}"
+                )
+            )
+            self.assertIsNotNone(queue_job)
+            self.assertLessEqual(
+                queue_job.run_at.replace(tzinfo=timezone.utc),
+                after,
+            )
+        conflicting = self.client.post(
+            "/api/v1/publishing/jobs",
+            headers=self.headers,
+            json={
+                **payload,
+                "request_id": "immediate-request-002",
+                "scheduled_at": (after + timedelta(minutes=5)).isoformat(),
+            },
+        )
+        self.assertEqual(conflicting.status_code, 422, conflicting.text)
+
+        with db.SessionLocal() as session:
+            channel = session.get(ChannelConnection, fixture["channel_id"])
+            channel.status = "invalid"
+            session.commit()
+        disconnected = self.client.post(
+            "/api/v1/publishing/jobs",
+            headers=self.headers,
+            json={
+                **payload,
+                "request_id": "immediate-request-003",
+            },
+        )
+        self.assertEqual(disconnected.status_code, 409, disconnected.text)
+        self.assertIn("连接测试", disconnected.json()["error"]["message"])
+
+    def test_running_immediate_publish_cannot_be_cancelled(self):
+        fixture = self._create_publish_fixture(status="queued")
+        with db.SessionLocal() as session:
+            queue_job = Job(
+                workspace_id=self.workspace_id,
+                job_type="publish.dispatch",
+                status="running",
+                payload_json={"publish_job_id": fixture["publish_job_id"]},
+                attempts=1,
+                max_attempts=4,
+                run_at=datetime.now(timezone.utc),
+                locked_by="worker-in-flight",
+                locked_at=datetime.now(timezone.utc),
+                idempotency_key=(
+                    f"publish.dispatch:{fixture['publish_job_id']}"
+                ),
+            )
+            session.add(queue_job)
+            session.commit()
+            queue_job_id = queue_job.id
+
+        cancelled = self.client.post(
+            f"/api/v1/publishing/jobs/{fixture['publish_job_id']}/cancel",
+            headers=self.headers,
+        )
+        self.assertEqual(cancelled.status_code, 409, cancelled.text)
+        self.assertIn("已开始执行", cancelled.json()["error"]["message"])
+        with db.SessionLocal() as session:
+            publish_job = session.get(PublishJob, fixture["publish_job_id"])
+            queue_job = session.get(Job, queue_job_id)
+            self.assertEqual(publish_job.status, "queued")
+            self.assertEqual(queue_job.status, "running")
+
+    def test_pre_write_failure_can_retry_only_after_channel_retest(self):
+        fixture = self._create_publish_fixture(status="scheduled")
+        with db.SessionLocal() as session:
+            queue_job = Job(
+                workspace_id=self.workspace_id,
+                job_type="publish.dispatch",
+                status="queued",
+                payload_json={"publish_job_id": fixture["publish_job_id"]},
+                max_attempts=4,
+                run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                idempotency_key=(
+                    f"publish.dispatch:{fixture['publish_job_id']}"
+                ),
+            )
+            session.add(queue_job)
+            session.commit()
+            queue_job_id = queue_job.id
+
+        class AuthenticationFailureConnector:
+            reconciliation_supported = True
+
+            def publish(self, **_kwargs):
+                raise ConnectorPublishError(
+                    "公众号鉴权失败（40164）：invalid ip",
+                    stage="authenticate",
+                    retry_safe=True,
+                    invalidate_channel=True,
+                )
+
+        with patch(
+            "contentflow.worker.build_connector",
+            return_value=AuthenticationFailureConnector(),
+        ):
+            self.assertTrue(self.worker.run_once())
+
+        with db.SessionLocal() as session:
+            publish_job = session.get(PublishJob, fixture["publish_job_id"])
+            channel = session.get(ChannelConnection, fixture["channel_id"])
+            queue_job = session.get(Job, queue_job_id)
+            self.assertEqual(publish_job.status, "failed")
+            self.assertTrue(publish_job.retry_safe)
+            self.assertEqual(publish_job.failure_stage, "authenticate")
+            self.assertEqual(channel.status, "invalid")
+            self.assertEqual(queue_job.status, "failed")
+            self.assertEqual(queue_job.attempts, 1)
+            actions = list(
+                session.scalars(
+                    select(AuditLog.action).where(
+                        AuditLog.entity_id == publish_job.id
+                    )
+                )
+            )
+            self.assertIn("publish.dispatch_failed_retry_safe", actions)
+
+        generic_retry = self.client.post(
+            f"/api/v1/jobs/{queue_job_id}/retry",
+            headers=self.headers,
+        )
+        self.assertEqual(generic_retry.status_code, 409, generic_retry.text)
+        self.assertIn("安全重试", generic_retry.json()["error"]["message"])
+
+        blocked = self.client.post(
+            f"/api/v1/publishing/jobs/{fixture['publish_job_id']}/retry",
+            headers=self.headers,
+        )
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertIn("重新测试平台连接", blocked.json()["error"]["message"])
+
+        with db.SessionLocal() as session:
+            channel = session.get(ChannelConnection, fixture["channel_id"])
+            channel.status = "connected"
+            session.commit()
+        retried = self.client.post(
+            f"/api/v1/publishing/jobs/{fixture['publish_job_id']}/retry",
+            headers=self.headers,
+        )
+        self.assertEqual(retried.status_code, 202, retried.text)
+        self.assertEqual(retried.json()["status"], "queued")
+        self.assertEqual(retried.json()["publish_timing"], "immediate")
+        self.assertFalse(retried.json()["retry_safe"])
+
+        class DraftCreatedConnector:
+            reconciliation_supported = True
+
+            def publish(self, **_kwargs):
+                return ConnectorResult(
+                    status="draft_created",
+                    external_id="draft-after-safe-retry",
+                )
+
+        with patch(
+            "contentflow.worker.build_connector",
+            return_value=DraftCreatedConnector(),
+        ):
+            self.assertTrue(self.worker.run_once())
+        with db.SessionLocal() as session:
+            publish_job = session.get(PublishJob, fixture["publish_job_id"])
+            queue_job = session.get(Job, queue_job_id)
+            self.assertEqual(publish_job.status, "draft_created")
+            self.assertEqual(
+                publish_job.external_id,
+                "draft-after-safe-retry",
+            )
+            self.assertEqual(publish_job.attempts, 2)
+            self.assertEqual(queue_job.status, "succeeded")
+
 
     def test_dispatch_persists_submitted_result_before_queue_completion(self):
         fixture = self._create_publish_fixture(status="scheduled")

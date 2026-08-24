@@ -1599,3 +1599,27 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 1. Web 保持在 `http://localhost:3000`；由用户登录主账号，审核当前真实内容并上传实际封面，再创建微信公众号草稿。实际封面视觉质量和本轮草稿结果在完成前保持未签收。
 2. 继续排除未知知识文件、本地 `.env`、模型与账号文件；本次实现提交和 CI/供应链证据已经回填，后续记录提交也必须普通推送并重新通过自己的 CI。
 3. 后续继续补真实异常矩阵、视频内容探测/恶意扫描、浏览器 E2E、公开部署与企业 IAM/SRE/合规门禁。
+## 21.31 立即发布、可证明安全重试与主流程界面
+
+### 本轮已实现
+
+1. 发布 API 支持 `publish_now=true` 立即进入可靠队列，也保留必须填写未来带时区时间的定时模式；客户端 `request_id` 与业务身份组成幂等键。官方 API 新任务要求渠道已经通过连接测试。
+2. 新增连接器副作用边界错误：公众号鉴权、封面检查和本地素材读取失败明确标记为外部写入前；Worker 保存阶段、失败历史和审计，鉴权错误使渠道失效，并停止盲目自动退避。
+3. reviewer 专用 `POST /publishing/jobs/{id}/retry` 只接受 `retry_safe` 失败，在行锁下复核内容版本、渠道状态和队列租约，再清除旧分发标记并立即入队。通用 Job retry 不能绕过；平台写入可能已经开始的异常仍必须人工对账。
+4. 取消接口拒绝已经 running 的分发任务，避免界面取消与 Worker 执行并发。任务队列中的发布失败引导到发布页，不再展示误导性的通用重试。
+5. 主导航收敛为工作台与创建→审核→素材→发布四步，其他模块收入“资源与系统”；总览根据真实状态给出一个建议下一步。发布页默认立即执行，定时和高级交付方式渐进展开，明确区分公众号草稿与公开发布。
+6. 加入统一 80–180ms 点击、视图与 Toast 反馈、1px 按压、键盘焦点和 reduced-motion；响应式导航和发布表单在平板/手机重排。设计规则已写入 `web/DESIGN.md`。
+
+### 状态机与接手规则
+
+- 只有 `dispatch_failure.retry_safe=true` 才能“安全重试”。若渠道为 invalid，先到平台连接页复测恢复 connected；缺素材则先补齐素材。安全重试会保留旧失败历史。
+- `publishing`、`submitted`、`reconciliation_required` 或任何平台写入开始后的错误一律不得安全重试。旧任务不会因新版本上线而追溯改变分类。
+- 当前数据库有 4 条旧版本公众号任务处于 `reconciliation_required`；它们均记录 40164 且无 external ID。用户关闭代理后先复测现有微信渠道；这 4 条旧任务仍需在公众号后台确认无草稿后分别登记“确认未发布”，再创建新的立即任务，不要直接重试旧队列 Job。
+- 微信渠道继续保持 `auto_publish=false`。本阶段没有执行新的真实平台调用、创建永久素材/草稿或公开发布。
+
+### 本地验证与剩余边界
+
+- 隔离测试配置下全仓 Ruff 通过；后端 `223 passed, 7 skipped, 143 subtests passed`。直接加载本地真实 `.env` 的首轮测试曾因生产 Prompt 门禁、S3、CORS 和 Provider 配置污染出现 17 项失败；不修改 `.env`，用仅进程有效的开发默认覆盖后，受影响 62 项与全量测试均通过，证明不是产品回归。
+- 前端 ESLint、2 项渲染契约、vinext Sites 构建和 Next.js/TypeScript 生产构建通过。
+- Codex 内置浏览器因本机 Windows sandbox `helper_unknown_error: setup refresh had errors` 无法启动，未完成自动截图/点击视觉验收；用户需要刷新本地 Web 完成主观验收。
+- 隔离 `contentflow-live-test` 已无数据清理地重建 API/Worker/Web；PostgreSQL 与 MinIO 保留，API `/health/ready` 返回 database/storage ok，Web 200，Worker 新实例在线。提交与 GitHub CI 证据将在本阶段推送后回填。未读取、修改或暂存 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。

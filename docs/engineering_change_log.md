@@ -427,3 +427,23 @@
 - 当前验证：新增供应链回归 12 passed；真实审计为 No known vulnerabilities found，规范化 Python CycloneDX 含 96 个组件、精确 `torch 2.13.0+cpu`、当前 ContentFlow 版本且 0 漏洞。
 - 远程验证：实现提交 `0282e9bacd6d553553ad0041096a607c5bceb162` 已普通推送到 `codex/enterprise-media-runtime`；[ContentFlow CI #32652773152](https://github.com/heee000/ContentFlow/actions/runs/32652773152) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 后端门禁、前端 lint/test/build/audit、CPU-wheel-aware Python 漏洞审计、96 组件 CycloneDX、可复现源码归档、SLSA 来源证明和双 CycloneDX attestation 均通过。Artifact `9496650624` 名为 `contentflow-supply-chain-0282e9bacd6d553553ad0041096a607c5bceb162`，摘要为 `sha256:2b9afadcb870ce6be009e6bac980824369112f19ab7ddafc0dcac9c51c853053`。
 - 剩余边界：审计使用不带哈希的临时固定版本导出和 `--no-deps`，依赖图完整性由带制品哈希的 `uv.lock` 与 locked sync 保证；GitHub 的 `setup-uv` 并行缓存保存出现一次同键争用提示，不影响作业、制品或证明结论。
+## 2026-08-24 发布可靠性与操作体验阶段
+
+### CF-20260824-05：外部写入前失败与结果不确定使用同一重试语义
+
+- 状态：已实现并通过本地完整回归；远程 CI 待本阶段提交后回填。
+- 问题与影响：公众号因出口 IP 白名单在获取 Token 时失败，旧 Worker 仍把所有连接器异常视为可能已经写入平台，要求人工对账。这样虽然保守，但用户无法在明确无副作用时修复后安全重试；另一方面通用 Job 重试又可能绕过发布专用门禁。
+- 根因：连接器错误没有显式记录发生阶段、是否跨过外部写入边界和是否应使渠道失效；PublishJob API 也没有专用安全重试状态与端点。
+- 解决方案：新增 `ConnectorPublishError(stage, retry_safe, invalidate_channel)`；公众号 Token 请求/响应错误、封面缺失和本地素材读取失败声明为写入前安全失败。Worker 持久化失败阶段、脱敏消息、时间、渠道失效标记和有界历史，终止自动退避；鉴权失败把渠道置为 `invalid`。专用 retry 在 PostgreSQL 锁下重新验证工作区、当前审核版本、渠道 connected 和队列非 running，清除分发令牌后立即入队并审计；通用 Job retry 显式拒绝安全发布失败和待对账发布。任何永久素材、草稿或公开发布调用开始后的异常仍保留 `reconciliation_required`，不自动重发。
+- 验证：连接器契约断言 40164 后只访问 Token 端点；端到端断言失败阶段、渠道失效、通用重试阻断、复测前阻断、复测后安全重试和最终草稿结果；运行中取消竞态与异常渠道新建任务也有回归。全仓后端 `223 passed, 7 skipped, 143 subtests passed`。
+- 边界：旧版本已经进入 `reconciliation_required` 的任务不追溯重分类；平台调用跨过首次写入后的超时仍需人工对账。安全重试不是“所有失败都能重试”，也不替代稳定 NAT/固定出口。
+
+### CF-20260824-06：只有排期入口且工作台信息架构过载
+
+- 状态：已实现并通过静态、渲染与生产构建验证；真实浏览器主观验收待用户执行。
+- 问题与影响：用户只想马上交付内容时仍必须理解并填写排期；十个同级导航和发布表单的所有高级能力同时出现，使第一次使用者难以判断主流程。操作缺少统一的点击和视图反馈。
+- 根因：发布请求强制 `scheduled_at`，领域模型没有显式立即/定时语义；前端按模块平铺而不是按运营任务分层，也没有把脚本/人工导出作为渐进选项。
+- 解决方案：`publish_now` 立即入队，定时模式继续要求未来带时区时间；请求 ID 支持网络幂等，响应显示执行时机。工作台收敛为创建→审核→素材→发布四步，根据真实数据计算一个下一步；高级资源折叠收纳，移动端使用原生更多选择器。发布页默认立即、匹配同平台渠道、显式提示公众号只建草稿，脚本/人工导出放入高级方式；列表展示执行时机、失败阶段、安全重试和下一步。加入 80–180ms 按压/视图/Toast 动效、键盘焦点和 `prefers-reduced-motion`。
+- 设计依据：沿用仓库 IBM Carbon 风格的单一蓝色、高密度、直角与边框层级；在 `web/DESIGN.md` 固化信息架构、渐进披露和动效纪律，没有引入渐变、发光、浮夸弹跳或假进度。
+- 验证：ESLint、2 项服务器渲染/源契约测试、vinext Sites 构建和 Next.js 生产构建全部通过；TypeScript 通过。Codex 内置浏览器在本机因 Windows sandbox `helper_unknown_error` 无法启动，未用非授权的替代浏览器冒充视觉签收。
+- 边界：下一步推荐是基于当前聚合状态的保守规则，不是个性化推荐；复杂历史/多活动并行仍需更细的任务分组。视觉与文案的最终主观验收需真实用户在本地页面完成。

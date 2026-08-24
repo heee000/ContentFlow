@@ -8,6 +8,7 @@ import zipfile
 import httpx
 
 from contentflow.connectors import (
+    ConnectorPublishError,
     DouyinConnector,
     WechatConnector,
     XiaohongshuExportConnector,
@@ -230,6 +231,62 @@ class ConnectorContractTest(unittest.TestCase):
         )
         self.assertEqual(result.status, "draft_created")
         self.assertEqual(result.external_id, "draft-media")
+
+
+    def test_wechat_auth_failure_is_retry_safe_before_platform_writes(self):
+        storage = MemoryStorage()
+        storage.objects["memory://asset/cover.png"] = b"image"
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request.url.path)
+            if request.url.path == "/cgi-bin/token":
+                return httpx.Response(
+                    200,
+                    json={
+                        "errcode": 40164,
+                        "errmsg": "invalid ip 203.0.113.10, not in whitelist",
+                    },
+                )
+            return httpx.Response(500)
+
+        channel = ChannelConnection(
+            id="channel-wechat-auth-failure",
+            workspace_id="workspace-1",
+            platform="wechat",
+            display_name="公众号",
+            config_json={"api_base": "https://wechat.test"},
+        )
+        connector = WechatConnector(
+            channel=channel,
+            credentials={"app_id": "app", "app_secret": "secret"},
+            storage=storage,
+            client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        item = content()
+        item.platform = "wechat"
+
+        with self.assertRaises(ConnectorPublishError) as captured:
+            connector.publish(
+                publish_job=publish_job(channel.id),
+                content=item,
+                assets=[
+                    Asset(
+                        id="cover",
+                        workspace_id="workspace-1",
+                        content_item_id=item.id,
+                        kind="image",
+                        status="ready",
+                        storage_uri="memory://asset/cover.png",
+                        mime_type="image/png",
+                    )
+                ],
+            )
+
+        self.assertTrue(captured.exception.retry_safe)
+        self.assertTrue(captured.exception.invalidate_channel)
+        self.assertEqual(captured.exception.stage, "authenticate")
+        self.assertEqual(requests, ["/cgi-bin/token"])
 
 
     def test_wechat_reconciliation_waits_for_article_id(self):

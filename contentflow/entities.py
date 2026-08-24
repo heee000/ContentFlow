@@ -529,6 +529,28 @@ class PublishJob(TimestampMixin, Base):
         return "connector"
 
     @property
+    def publish_timing(self) -> str:
+        timing = (self.request_json or {}).get("publish_timing")
+        return "immediate" if timing == "immediate" else "scheduled"
+
+    @property
+    def retry_safe(self) -> bool:
+        failure = (self.response_json or {}).get("dispatch_failure")
+        return (
+            self.status == "failed"
+            and isinstance(failure, dict)
+            and failure.get("retry_safe") is True
+        )
+
+    @property
+    def failure_stage(self) -> str | None:
+        failure = (self.response_json or {}).get("dispatch_failure")
+        if not isinstance(failure, dict):
+            return None
+        stage = failure.get("stage")
+        return stage if isinstance(stage, str) else None
+
+    @property
     def script_confirmation_required(self) -> int:
         value = (self.response_json or {}).get("script_confirmation_required")
         return 2 if value == 2 else 1

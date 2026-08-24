@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from . import db
 from .audit import record_audit
-from .connectors import build_connector
+from .connectors import ConnectorPublishError, build_connector
 from .entities import (
     Asset,
     ChannelConnection,
@@ -71,6 +71,10 @@ class JobNotReady(RuntimeError):
 
 class PublishReconciliationRequired(RuntimeError):
     """The remote outcome is uncertain and requires reconciliation before retry."""
+
+
+class PublishRetrySafeFailure(RuntimeError):
+    """The dispatch stopped before any external platform write was attempted."""
 
 
 class LeaseHeartbeat:
@@ -790,6 +794,53 @@ def handle_publish_dispatch(
             content=content,
             assets=assets,
         )
+    except ConnectorPublishError as error:
+        if not error.retry_safe:
+            raise
+        publish_job = session.get(PublishJob, publish_job.id)
+        if publish_job is not None:
+            response_json = dict(publish_job.response_json or {})
+            previous_failure = response_json.get("dispatch_failure")
+            history = list(response_json.get("dispatch_failure_history") or [])
+            if isinstance(previous_failure, dict):
+                history.append(previous_failure)
+            if history:
+                response_json["dispatch_failure_history"] = history[-20:]
+            response_json["dispatch_failure"] = {
+                "retry_safe": True,
+                "stage": error.stage,
+                "message": str(error)[:2000],
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+                "channel_invalidated": error.invalidate_channel,
+            }
+            publish_job.response_json = response_json
+            publish_job.status = "failed"
+            publish_job.error = (
+                "外部平台写入前失败，可在修复原因后安全重试："
+                f"{str(error)}"
+            )[:8000]
+            publish_job.external_id = None
+            publish_job.external_url = None
+            publish_job.published_at = None
+            if error.invalidate_channel:
+                channel.status = "invalid"
+            record_audit(
+                session,
+                action="publish.dispatch_failed_retry_safe",
+                entity_type="publish_job",
+                entity_id=publish_job.id,
+                workspace_id=publish_job.workspace_id,
+                actor_user_id=None,
+                metadata={
+                    "channel_id": channel.id,
+                    "stage": error.stage,
+                    "channel_invalidated": error.invalidate_channel,
+                },
+            )
+            session.commit()
+        raise PublishRetrySafeFailure(
+            "发布在外部写入前失败，可在修复原因后安全重试"
+        ) from error
     except Exception as error:
         publish_job = session.get(PublishJob, publish_job.id)
         if publish_job is not None:
@@ -1396,7 +1447,10 @@ class Worker:
                             attempt=attempt,
                             force_terminal=isinstance(
                                 error,
-                                PublishReconciliationRequired,
+                                (
+                                    PublishReconciliationRequired,
+                                    PublishRetrySafeFailure,
+                                ),
                             )
                             or (
                                 isinstance(error, MediaProviderError)

@@ -77,7 +77,7 @@ test("keeps production copy and design tokens in source", async () => {
 
   assert.match(page, /<ContentFlowApp \/>/);
   assert.match(app, /内容审核/);
-  assert.match(app, /发布管理/);
+  assert.match(app, /4 发布/);
   assert.match(app, /任务队列/);
   assert.match(app, /团队与审计/);
   assert.match(app, /切换工作区/);
@@ -88,6 +88,13 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /查看全部内容/);
   assert.match(app, /录入人工指标/);
   assert.match(app, /取消排期/);
+  assert.match(app, /建议下一步/);
+  assert.match(app, /资源与系统/);
+  assert.match(app, /立即执行/);
+  assert.match(app, /定时发布/);
+  assert.match(app, /安全重试/);
+  assert.match(app, /publishTiming/);
+  assert.match(app, /publishing\/jobs\/\$\{job\.id\}\/retry/);
   assert.match(app, /最近 .* 条审计记录/);
   assert.match(app, /Prompt 审批、发布与回滚/);
   assert.match(app, /创建者不能自行审批/);
@@ -109,7 +116,10 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /runs\?limit=5/);
   assert.match(css, /--blue:\s*#0f62fe/);
   assert.match(css, /prefers-reduced-motion/);
+  assert.match(css, /transition-duration:\s*0\.01ms/);
+  assert.match(css, /content-enter/);
   assert.match(design, /No fake analytics or fake platform publish success/);
+  assert.match(design, /progressive disclosure/);
   assert.match(app, /生产环境 API 地址由构建配置固定/);
   assert.match(apiClient, /RUNTIME_API_BASE_CONFIGURABLE/);
   assert.doesNotMatch(apiClient, /localStorage\.setItem\("contentflow_token"/);

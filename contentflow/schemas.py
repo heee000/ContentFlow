@@ -378,7 +378,14 @@ class ChannelResponse(ORMModel):
 class PublishScheduleRequest(BaseModel):
     content_item_id: str
     channel_id: str
-    scheduled_at: datetime
+    scheduled_at: datetime | None = None
+    publish_now: bool = False
+    request_id: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
     delivery_mode: Literal["connector", "script", "manual_export"] = "connector"
 
 
@@ -403,6 +410,9 @@ class PublishJobResponse(ORMModel):
     status: str
     scheduled_at: datetime
     delivery_mode: str
+    publish_timing: str
+    retry_safe: bool
+    failure_stage: str | None
     external_id: str | None
     external_url: str | None
     script_confirmation_required: int

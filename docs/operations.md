@@ -206,10 +206,18 @@ HTTP Counter/Histogram 来自各 API 进程，应按实例聚合。队列、Work
 - 内容未生成：查看 `workflow.execute` Job 和关联 `WorkflowRun.error`
 - 文档未索引：确认对象可读、编码与 `knowledge.index` 错误
 - 素材长期 processing：查看 `asset.poll` 重试次数和外部 task ID
-- 发布失败：确认内容版本、素材状态、渠道 scope 与外部响应
-- 取消发布返回 409：Worker 已先锁定任务并进入 publishing，不能再保证取消；等待发布结果，不要把 409 当成取消成功
-- 渠道 invalid：重新授权或更新凭据后执行连接测试
-- Job 最终 failed：修复根因后在任务队列点击“重试”
+- 发布失败：先看发布页是否标记“可安全重试”及失败阶段，再确认内容版本、素材状态、渠道 scope 与外部响应
+- 取消发布返回 409：Worker 已先锁定任务并开始分发，不能再保证取消；等待发布结果，不要把 409 当成取消成功
+- 渠道 invalid：重新授权、修复白名单或更新凭据后执行连接测试
+- 非发布 Job 最终 failed：修复根因后在任务队列点击“重试”；发布 Job 必须回到发布页按副作用边界处理
+
+## 发布安全重试
+
+1. 只有 `PublishJob.response_json.dispatch_failure.retry_safe=true` 的失败才允许调用 `POST /api/v1/publishing/jobs/{publish_job_id}/retry`。当前安全阶段包括公众号鉴权、素材前置检查和本地素材读取；这些失败发生在任何平台写入前。
+2. 鉴权失败会把渠道置为 `invalid`。先修复出口 IP 白名单、凭据或网络，并通过渠道测试恢复 `connected`；随后由 reviewer 在发布页点击“安全重试”。
+3. 专用重试会锁定发布任务，重新验证内容仍为已审核的相同版本，拒绝正在运行的队列任务，归档旧失败证据，清除旧分发令牌并立即重新入队，同时记录 `publish.retry_safe` 审计。
+4. 通用 `POST /jobs/{id}/retry` 明确拒绝安全发布失败与待对账发布，防止绕过渠道复测或副作用判断。
+5. 旧版本已经记录为 `reconciliation_required` 的任务不会被追溯重分类。即使后来确认错误发生在 token 阶段，也应先按现有人工对账流程确认平台没有作品，再创建新任务。
 
 ## 发布自动对账与人工处置
 
