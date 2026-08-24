@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     model_api_base: str | None = None
     model_api_key: str | None = None
     text_model: str | None = None
+    model_request_timeout_seconds: int = Field(default=120, ge=10, le=300)
     embedding_model: str | None = None
     embedding_dimensions: int = 1024
     local_embedding_model: str = "BAAI/bge-m3"
@@ -115,6 +116,13 @@ class Settings(BaseSettings):
     image_model: str | None = None
     video_model: str | None = None
 
+    image_search_provider: str = "openverse"
+    openverse_api_base: str = "https://api.openverse.org/v1"
+    image_search_result_limit: int = Field(default=6, ge=1, le=12)
+    image_search_download_allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["upload.wikimedia.org"]
+    )
+
     worker_poll_seconds: float = Field(default=1.0, gt=0, le=60)
     worker_lease_seconds: int = Field(default=300, ge=3, le=86_400)
     worker_max_attempts: int = Field(default=4, ge=1, le=100)
@@ -124,7 +132,12 @@ class Settings(BaseSettings):
     publish_reconciliation_initial_delay_seconds: int = Field(default=15, ge=1, le=3600)
     publish_reconciliation_max_attempts: int = Field(default=20, ge=1, le=100)
 
-    @field_validator("cors_origins", "media_download_allowed_hosts", mode="before")
+    @field_validator(
+        "cors_origins",
+        "media_download_allowed_hosts",
+        "image_search_download_allowed_hosts",
+        mode="before",
+    )
     @classmethod
     def split_origins(cls, value):
         if isinstance(value, str):
@@ -150,6 +163,7 @@ class Settings(BaseSettings):
         "embedding_provider",
         "image_provider",
         "video_provider",
+        "image_search_provider",
     )
     @classmethod
     def normalize_choice(cls, value: str) -> str:
@@ -237,6 +251,10 @@ class Settings(BaseSettings):
             ),
             "image": ({"mock", "http", "manual"}, self.image_provider),
             "video": ({"mock", "http", "manual"}, self.video_provider),
+            "image_search": (
+                {"openverse", "disabled"},
+                self.image_search_provider,
+            ),
         }
         invalid = [
             f"{kind}={provider}"
@@ -245,6 +263,21 @@ class Settings(BaseSettings):
         ]
         if invalid:
             raise ValueError(f"Unsupported providers: {', '.join(invalid)}")
+        if self.image_search_provider == "openverse":
+            self._validate_external_api_base(
+                self.openverse_api_base,
+                setting_name="CONTENTFLOW_OPENVERSE_API_BASE",
+            )
+            invalid_search_hosts = [
+                host
+                for host in self.image_search_download_allowed_hosts
+                if not self._is_exact_hostname(host)
+            ]
+            if not self.image_search_download_allowed_hosts or invalid_search_hosts:
+                raise ValueError(
+                    "CONTENTFLOW_IMAGE_SEARCH_DOWNLOAD_ALLOWED_HOSTS must contain "
+                    "one or more exact hostnames"
+                )
         offline_providers = {
             "text": self.text_provider == "mock",
             "embedding": self.embedding_provider == "hash",

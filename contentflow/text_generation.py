@@ -19,6 +19,7 @@ def build_text_provider(settings: Settings, override: str | None = None) -> Prov
             api_base=settings.model_api_base,
             api_key=settings.model_api_key,
             model=settings.text_model,
+            timeout_seconds=settings.model_request_timeout_seconds,
             provider_name=provider,
         )
     raise ValueError(f"不支持的文本模型 Provider: {provider}")

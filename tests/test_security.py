@@ -185,6 +185,16 @@ class RuntimeSettingsTest(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 Settings(script_confirmation_ttl_minutes=invalid)
 
+    def test_model_request_timeout_has_safe_bounds(self):
+        self.assertEqual(Settings().model_request_timeout_seconds, 120)
+        self.assertEqual(
+            Settings(model_request_timeout_seconds=180).model_request_timeout_seconds,
+            180,
+        )
+        for invalid in (9, 301):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                Settings(model_request_timeout_seconds=invalid)
+
     def test_production_requires_auth_rate_limiting(self):
         settings = production_settings(auth_rate_limit_enabled=False)
         with self.assertRaisesRegex(ValueError, "rate limiting"):

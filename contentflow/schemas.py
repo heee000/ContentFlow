@@ -133,6 +133,7 @@ class ActivePromptSetResponse(BaseModel):
 
 class PromptGovernanceResponse(BaseModel):
     active: ActivePromptSetResponse
+    builtin: ActivePromptSetResponse
     governance_required: bool
     ready_for_generation: bool
     generation_block_reason: str | None
@@ -223,6 +224,11 @@ class CampaignCreate(BaseModel):
     forbidden_phrases: list[str] = Field(default_factory=list)
     call_to_action: str = Field(default="", max_length=500)
     product_facts: list[str] = Field(default_factory=list)
+    style_skill_id: str = Field(default="builtin:editorial", max_length=80)
+    style_notes: str = Field(default="", max_length=2000)
+    quality_profile: Literal["standard", "deep"] = "deep"
+    image_source: Literal["manual", "generate", "search", "hybrid"] = "manual"
+    image_search_query: str = Field(default="", max_length=500)
 
 
 class CampaignUpdate(BaseModel):
@@ -237,6 +243,11 @@ class CampaignUpdate(BaseModel):
     forbidden_phrases: list[str] | None = None
     call_to_action: str | None = Field(default=None, max_length=500)
     product_facts: list[str] | None = None
+    style_skill_id: str | None = Field(default=None, max_length=80)
+    style_notes: str | None = Field(default=None, max_length=2000)
+    quality_profile: Literal["standard", "deep"] | None = None
+    image_source: Literal["manual", "generate", "search", "hybrid"] | None = None
+    image_search_query: str | None = Field(default=None, max_length=500)
     status: Literal["draft", "active", "archived"] | None = None
 
 
@@ -253,6 +264,24 @@ class CampaignResponse(ORMModel):
     brief: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+
+class StyleSkillInstall(BaseModel):
+    manifest: dict[str, Any]
+
+
+class StyleSkillStatusUpdate(BaseModel):
+    status: Literal["enabled", "disabled"]
+
+
+class StyleSkillResponse(BaseModel):
+    id: str
+    source: Literal["builtin", "workspace"]
+    status: Literal["enabled", "disabled"]
+    manifest: dict[str, Any]
+    manifest_sha256: str
+    created_at: datetime | None
+    updated_at: datetime | None
 
 
 class WorkflowRunRequest(BaseModel):
@@ -291,6 +320,7 @@ class ContentResponse(ORMModel):
     version: int
     source_chunk_ids: list[str]
     review_json: dict[str, Any]
+    generation_json: dict[str, Any]
     approved_by: str | None
     approved_at: datetime | None
     created_at: datetime
@@ -315,6 +345,7 @@ class ContentRevisionResponse(ORMModel):
     hashtags: list[str]
     call_to_action: str
     layout_json: dict[str, Any]
+    generation_json: dict[str, Any]
     changed_by: str | None
     change_reason: str
     created_at: datetime
@@ -324,6 +355,11 @@ class ReviewDecision(BaseModel):
     expected_version: int = Field(ge=1)
     decision: Literal["approve", "reject"]
     reason: str = Field(default="", max_length=2000)
+
+
+class AssetSelectionRequest(BaseModel):
+    candidate_id: str | None = Field(default=None, min_length=1, max_length=64)
+    acknowledge_license_check: bool = False
 
 
 class AssetResponse(ORMModel):

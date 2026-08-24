@@ -33,6 +33,7 @@ from .routers import (
     publishing,
     publish_evidence,
     runs,
+    style_skills,
 )
 from .settings import Settings, get_settings
 
@@ -207,6 +208,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(admin.router, prefix=prefix)
     application.include_router(campaigns.router, prefix=prefix)
     application.include_router(runs.router, prefix=prefix)
+    application.include_router(style_skills.router, prefix=prefix)
     application.include_router(knowledge.router, prefix=prefix)
     application.include_router(contents.router, prefix=prefix)
     application.include_router(assets.router, prefix=prefix)

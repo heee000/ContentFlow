@@ -46,3 +46,10 @@
 3. 日志和文档只保存摘要、计数变化、平台错误码类别和追踪哈希，不保存秘密值或完整内容。
 4. 公开发布、删除线上素材、改变账号配置等高风险动作必须再次取得明确授权。
 5. 媒体 conformance 会产生真实图片/视频并可能计费；只有在目标 Base、Key、模型名和下载域名明确后运行。报告只保留脱敏指纹；自动通过不能替代账单核对、人工质量抽检和故障注入矩阵。
+
+## 2026-08-25 内容 Agent 与开放图库外部验收
+
+- Openverse/Wikimedia：一次无副作用搜索返回 2 个 BY-SA 候选，download host 均为 upload.wikimedia.org，landing host 均为 commons.wikimedia.org；没有下载、选中或发布图片。该结果证明当前搜索 API 与安全过滤可用，不证明每条许可元数据准确，使用者仍需打开原始页面人工核验。
+- 文本模型治理：workspace-r2 使用最新 2026-08-25.1 Agent Prompt，eval-v3 在 openai-compatible/deepseek-v4-flash 的 Plan/公众号 Generate/九维 Review 三个正向契约用例上 passed；不同管理员完成套件激活、Prompt 审批与激活，generation_ready=true。
+- 真实深度内容运行：CityWalk 活动完成 Plan、初稿、首次评审和定向修订，最终复评返回不可解析 JSON，运行失败且没有内容/素材/平台副作用。代码随后改为最终复评 RuntimeError/TimeoutError 时保留已评审原稿并拒绝未复评修订稿，单元回归通过；为控制真实 API Token 消耗，修复后未自动再跑第二条真实内容。
+- 本阶段没有调用微信公众号素材、草稿或发布接口；既有微信渠道与历史发布状态未改写。真实 AI 图片生成仍缺可验收媒体 Provider，保持未签收。

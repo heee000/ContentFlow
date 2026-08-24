@@ -13,7 +13,7 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "e28a6b9c4f10"
+HEAD_REVISION = "1a2b3c4d5e6f"
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
 LAYOUT_REVISION = "8b6c1f3a9d21"
@@ -31,6 +31,8 @@ PROMPT_RELEASE_REVISION = "b84e0d3f7c92"
 PROMPT_EVAL_SUITE_TABLE = "prompt_eval_suites"
 PROMPT_EVAL_RUN_TABLE = "prompt_eval_runs"
 PROMPT_EVAL_REVISION = "c95f1e4a8d73"
+STYLE_SKILL_TABLE = "style_skills"
+STYLE_SKILL_REVISION = "1a2b3c4d5e6f"
 
 
 def _alembic_config(connection: Connection) -> Config:
@@ -69,6 +71,7 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         PROMPT_EVAL_RUN_TABLE,
         PUBLISH_EVIDENCE_TABLE,
         PUBLISH_CONFIRMATION_TABLE,
+        STYLE_SKILL_TABLE,
     }
     expected_tables = set(db.Base.metadata.tables)
     missing_tables = (expected_tables - incrementally_added) - tables
@@ -106,6 +109,7 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
     publish_confirmation_exists = PUBLISH_CONFIRMATION_TABLE in tables
     prompt_eval_suite_exists = PROMPT_EVAL_SUITE_TABLE in tables
     prompt_eval_run_exists = PROMPT_EVAL_RUN_TABLE in tables
+    style_skill_exists = STYLE_SKILL_TABLE in tables
     if worker_node_exists and not all(layout_state.values()):
         raise RuntimeError(
             "The worker_nodes table exists without the preceding layout migration. "
@@ -156,7 +160,15 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             "schema before continuing."
         )
 
-    if publish_evidence_exists:
+    if style_skill_exists and not publish_evidence_exists:
+        raise RuntimeError(
+            "The style_skills table exists without the publication evidence "
+            "migration. Back up the database and repair the schema before continuing."
+        )
+
+    if style_skill_exists:
+        revision = STYLE_SKILL_REVISION
+    elif publish_evidence_exists:
         revision = PUBLISH_EVIDENCE_REVISION
     elif prompt_eval_suite_exists:
         revision = PROMPT_EVAL_REVISION

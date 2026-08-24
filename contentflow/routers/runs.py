@@ -15,6 +15,8 @@ from ..job_queue import enqueue_job
 from ..prompt_eval import EvalIntegrityError, require_current_passed_eval
 from ..prompt_governance import PromptIntegrityError, resolve_active_prompt_set
 from ..schemas import WorkflowRunRequest, WorkflowRunResponse
+from ..style_skills import resolve_style_skill
+from ..workflow_service import campaign_generation_preferences, campaign_to_brief
 from .campaigns import get_campaign_or_404
 
 
@@ -89,6 +91,21 @@ def create_run(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
         ) from error
+    generation_preferences = campaign_generation_preferences(campaign)
+    try:
+        style_skill_snapshot = resolve_style_skill(
+            session,
+            principal.workspace_id,
+            generation_preferences["style_skill_id"],
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    run_request = {
+        **payload.model_dump(),
+        "campaign_brief_snapshot": campaign_to_brief(campaign),
+        "generation_preferences": generation_preferences,
+        "style_skill_snapshot": style_skill_snapshot,
+    }
     run = WorkflowRun(
         workspace_id=principal.workspace_id,
         campaign_id=campaign.id,
@@ -96,7 +113,7 @@ def create_run(
         current_stage="queued",
         provider=payload.provider or "configured",
         trace_id=uuid.uuid4().hex,
-        request_json=payload.model_dump(),
+        request_json=run_request,
     )
     session.add(run)
     session.flush()
@@ -114,7 +131,13 @@ def create_run(
         entity_id=run.id,
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
-        metadata={"campaign_id": campaign.id},
+        metadata={
+            "campaign_id": campaign.id,
+            "style_skill_id": style_skill_snapshot["id"],
+            "style_manifest_sha256": style_skill_snapshot["manifest_sha256"],
+            "quality_profile": generation_preferences["quality_profile"],
+            "image_source": generation_preferences["image_source"],
+        },
     )
     return run
 

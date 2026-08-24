@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -21,9 +22,10 @@ from ..entities import Asset, ContentItem
 from ..filenames import safe_filename
 from ..job_queue import enqueue_job
 from ..knowledge_service import local_path_from_uri
+from ..media_providers import MediaGeneration, MediaProviderError, download_generated_media
 from ..object_storage import build_object_storage
 from ..publish_evidence import PublishEvidenceError, normalize_publish_evidence
-from ..schemas import AssetResponse, JobResponse
+from ..schemas import AssetResponse, AssetSelectionRequest, JobResponse
 
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -112,6 +114,171 @@ def download_asset(
     )
 
 
+@router.post("/{asset_id}/select", response_model=AssetResponse)
+def select_asset_candidate(
+    asset_id: str,
+    payload: AssetSelectionRequest,
+    principal: Editor,
+    session: Db,
+    settings: AppSettings,
+):
+    asset = get_asset(
+        session,
+        principal.workspace_id,
+        asset_id,
+        for_update=True,
+    )
+    if asset.content_item_id is None:
+        raise HTTPException(status_code=409, detail="素材未关联内容")
+    content = session.scalar(
+        select(ContentItem)
+        .where(
+            ContentItem.id == asset.content_item_id,
+            ContentItem.workspace_id == principal.workspace_id,
+        )
+        .with_for_update()
+    )
+    if content is None or content.status != "approved":
+        raise HTTPException(status_code=409, detail="内容必须保持审核通过状态")
+    if asset_content_version(asset) != content.version:
+        raise HTTPException(status_code=409, detail="不能选择旧内容版本的素材")
+    metadata = dict(asset.metadata_json or {})
+    selected_storage = None
+    selected_storage_uri = None
+
+    if asset.provider == "openverse" and asset.status == "awaiting_selection":
+        if not payload.candidate_id:
+            raise HTTPException(status_code=422, detail="请选择搜索结果")
+        if not payload.acknowledge_license_check:
+            raise HTTPException(
+                status_code=422,
+                detail="使用开放图库前必须核验原始落地页并确认许可",
+            )
+        candidates = metadata.get("search_candidates")
+        if not isinstance(candidates, list):
+            raise HTTPException(status_code=409, detail="图片搜索候选元数据无效")
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if isinstance(candidate, dict)
+                and candidate.get("id") == payload.candidate_id
+            ),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(status_code=404, detail="图片搜索候选不存在")
+        generation = MediaGeneration(
+            status="ready",
+            download_url=str(selected.get("download_url") or ""),
+            mime_type="image/jpeg",
+            filename="searched-image.jpg",
+        )
+        try:
+            raw = download_generated_media(
+                generation,
+                max_bytes=settings.max_upload_bytes,
+                allowed_hosts=tuple(
+                    settings.image_search_download_allowed_hosts
+                ),
+                require_https=True,
+            )
+            normalized = normalize_publish_evidence(
+                raw,
+                filename="searched-image.jpg",
+                kind="screenshot",
+                max_bytes=settings.max_upload_bytes,
+                max_pixels=settings.publish_evidence_max_pixels,
+            )
+        except (MediaProviderError, PublishEvidenceError, ValueError) as error:
+            raise HTTPException(
+                status_code=422,
+                detail="所选图片无法通过安全下载或图片规范校验",
+            ) from error
+        storage = build_object_storage(settings)
+        stored = storage.put(
+            workspace_id=principal.workspace_id,
+            category="assets",
+            filename=f"openverse-cover.{normalized.extension}",
+            stream=io.BytesIO(normalized.data),
+            content_type=normalized.mime_type,
+        )
+        selected_storage = storage
+        selected_storage_uri = stored.uri
+        asset.status = "ready"
+        asset.storage_uri = stored.uri
+        asset.mime_type = stored.mime_type
+        asset.size_bytes = stored.size_bytes
+        asset.error = None
+        metadata = {
+            **metadata,
+            "selected": True,
+            "selected_candidate": {
+                key: value
+                for key, value in selected.items()
+                if key != "download_url"
+            },
+            "license_checked_by_user_id": principal.user_id,
+            "license_checked_at": datetime.now(timezone.utc).isoformat(),
+            "checksum": stored.checksum,
+            "source_checksum": normalized.source_sha256,
+        }
+        asset.metadata_json = metadata
+    elif asset.status == "ready":
+        if payload.candidate_id:
+            raise HTTPException(
+                status_code=422,
+                detail="已生成素材不接受搜索候选 ID",
+            )
+        metadata["selected"] = True
+        asset.metadata_json = metadata
+    else:
+        raise HTTPException(status_code=409, detail="当前素材还不能被选用")
+
+    candidate_group = metadata.get("candidate_group")
+    if candidate_group:
+        siblings = list(
+            session.scalars(
+                select(Asset).where(
+                    Asset.content_item_id == content.id,
+                    Asset.workspace_id == principal.workspace_id,
+                    Asset.id != asset.id,
+                )
+            )
+        )
+        for sibling in siblings:
+            sibling_metadata = dict(sibling.metadata_json or {})
+            if (
+                asset_content_version(sibling) == content.version
+                and sibling_metadata.get("candidate_group") == candidate_group
+            ):
+                sibling_metadata["selected"] = False
+                sibling.metadata_json = sibling_metadata
+    record_audit(
+        session,
+        action="asset.select",
+        entity_type="asset",
+        entity_id=asset.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "content_item_id": content.id,
+            "candidate_group": candidate_group,
+            "provider": asset.provider,
+        },
+    )
+    try:
+        session.flush()
+    except Exception:
+        if selected_storage is not None and selected_storage_uri is not None:
+            try:
+                selected_storage.delete(selected_storage_uri)
+            except Exception:
+                pass
+        raise
+    return asset
+
+
 @router.post(
     "/{asset_id}/retry",
     response_model=JobResponse,
@@ -124,24 +291,40 @@ def retry_asset(
     settings: AppSettings,
 ):
     asset = get_asset(session, principal.workspace_id, asset_id)
-    configured_provider = (
-        settings.image_provider if asset.kind == "image" else settings.video_provider
-    )
-    if asset.provider in {"manual", "manual-upload"} or configured_provider == "manual":
-        raise HTTPException(
-            status_code=409,
-            detail="该素材使用人工上传模式，请上传真实素材而不是重新生成",
-        )
     if asset.status not in {"failed", "planned", "stale"}:
-        raise HTTPException(status_code=409, detail="当前素材状态不能重新生成")
+        raise HTTPException(status_code=409, detail="当前素材状态不能重新执行")
+    if asset.provider == "openverse":
+        job_type = "asset.search"
+    else:
+        configured_provider = (
+            settings.image_provider
+            if asset.kind == "image"
+            else settings.video_provider
+        )
+        if asset.provider == "configured-image-generation":
+            configured_provider = settings.image_provider
+        elif asset.provider == "configured-video-generation":
+            configured_provider = settings.video_provider
+        if asset.provider in {"manual", "manual-upload"}:
+            raise HTTPException(
+                status_code=409,
+                detail="该素材使用人工上传模式，请上传真实素材而不是重新生成",
+            )
+        if configured_provider == "manual":
+            raise HTTPException(
+                status_code=409,
+                detail="活动要求 AI 生成素材，但当前环境仍未配置对应 Provider",
+            )
+        asset.provider = configured_provider
+        job_type = "asset.generate"
     asset.status = "queued"
     asset.error = None
     job = enqueue_job(
         session,
-        job_type="asset.generate",
+        job_type=job_type,
         payload={"asset_id": asset.id},
         workspace_id=principal.workspace_id,
-        idempotency_key=f"asset.generate:{asset.id}:retry",
+        idempotency_key=f"{job_type}:{asset.id}:retry",
     )
     record_audit(
         session,

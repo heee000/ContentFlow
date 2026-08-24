@@ -11,6 +11,7 @@ from ..db import get_db
 from ..dependencies import CurrentPrincipal, Principal, require_role
 from ..entities import Campaign
 from ..schemas import CampaignCreate, CampaignResponse, CampaignUpdate
+from ..style_skills import resolve_style_skill
 
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
@@ -50,6 +51,10 @@ def list_campaigns(principal: CurrentPrincipal, session: Db):
 )
 def create_campaign(payload: CampaignCreate, principal: Editor, session: Db):
     brief = payload.model_dump()
+    try:
+        resolve_style_skill(session, principal.workspace_id, payload.style_skill_id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     campaign = Campaign(
         workspace_id=principal.workspace_id,
         created_by=principal.user_id,
@@ -101,7 +106,19 @@ def update_campaign(
         "forbidden_phrases",
         "call_to_action",
         "product_facts",
+        "style_skill_id",
+        "style_notes",
+        "quality_profile",
+        "image_source",
+        "image_search_query",
     }
+    selected_style = updates.get(
+        "style_skill_id", (campaign.brief or {}).get("style_skill_id")
+    )
+    try:
+        resolve_style_skill(session, principal.workspace_id, selected_style)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     for field, value in updates.items():
         if field in {
             "name",

@@ -50,6 +50,11 @@ type Campaign = {
     forbidden_phrases?: string[];
     call_to_action?: string;
     product_facts?: string[];
+    style_skill_id?: string;
+    style_notes?: string;
+    quality_profile?: "standard" | "deep";
+    image_source?: "manual" | "generate" | "search" | "hybrid";
+    image_search_query?: string;
   };
   updated_at: string;
 };
@@ -94,6 +99,7 @@ type Content = {
   status: string;
   version: number;
   review_json: Record<string, unknown>;
+  generation_json: Record<string, unknown>;
   updated_at: string;
 };
 
@@ -106,6 +112,7 @@ type ContentRevision = {
   hashtags: string[];
   call_to_action: string;
   layout_json: Record<string, unknown>;
+  generation_json: Record<string, unknown>;
   changed_by: string | null;
   change_reason: string;
   created_at: string;
@@ -122,6 +129,29 @@ type Asset = {
   metadata_json: Record<string, unknown>;
   error: string | null;
   created_at: string;
+};
+
+type StyleSkill = {
+  id: string;
+  source: "builtin" | "workspace";
+  status: "enabled" | "disabled";
+  manifest: {
+    name: string;
+    slug: string;
+    version: string;
+    description: string;
+  };
+  manifest_sha256: string;
+};
+
+type ImageSearchCandidate = {
+  id: string;
+  title: string;
+  creator: string;
+  license: string;
+  license_version: string;
+  landing_url: string;
+  thumbnail_url: string;
 };
 
 type Channel = {
@@ -286,6 +316,13 @@ type PromptGovernance = {
     prompts: Record<PromptStage, string>;
     prompt_hashes: Record<PromptStage, string>;
   };
+  builtin: {
+    source: "builtin";
+    version: string;
+    release_id: null;
+    prompts: Record<PromptStage, string>;
+    prompt_hashes: Record<PromptStage, string>;
+  };
   governance_required: boolean;
   ready_for_generation: boolean;
   generation_block_reason: string | null;
@@ -354,13 +391,23 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
       brief: {
         product_name: "ContentFlow",
         city: "北京",
+        goal: "帮助内容团队建立可审核的生产流程",
+        audience: "需要稳定生产公众号内容的运营人员",
+        platforms: ["wechat"],
         must_include: ["人工复核"],
         product_facts: ["整理内容工作流"],
         call_to_action: "查看完整方案",
       },
       knowledge: [],
     },
-    required_paths: ["content_angle", "key_message", "posting_window"],
+    required_paths: [
+      "angle_candidates",
+      "selected_angle",
+      "content_thesis",
+      "evidence_ledger",
+      "platform_strategies.wechat",
+      "image_search_query",
+    ],
   },
   {
     name: "wechat-generation-contract",
@@ -369,6 +416,9 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
       brief: {
         product_name: "ContentFlow",
         city: "北京",
+        goal: "帮助内容团队建立可审核的生产流程",
+        audience: "需要稳定生产公众号内容的运营人员",
+        platforms: ["wechat"],
         must_include: ["人工复核"],
         product_facts: ["整理内容工作流"],
         call_to_action: "查看完整方案",
@@ -377,7 +427,14 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
       plan: {},
       knowledge: [],
     },
-    required_paths: ["title", "body", "layout"],
+    required_paths: [
+      "title",
+      "alternate_titles",
+      "body",
+      "layout.sections",
+      "evidence_usage",
+      "media_brief.generation_prompt",
+    ],
     required_substrings: ["ContentFlow"],
   },
   {
@@ -387,15 +444,38 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
       brief: {
         product_name: "ContentFlow",
         city: "北京",
+        goal: "帮助内容团队建立可审核的生产流程",
+        audience: "需要稳定生产公众号内容的运营人员",
+        platforms: ["wechat"],
         must_include: ["人工复核"],
         product_facts: ["整理内容工作流"],
         call_to_action: "查看完整方案",
       },
       platform: "wechat",
-      content: { title: "测试标题", body: "测试正文" },
+      content: {
+        title: "ContentFlow 内容工作流：发布前人工复核清单",
+        body: (
+          "ContentFlow 用于整理内容工作流。运营人员应先核对资料来源和产品事实，"
+          + "再检查标题、正文、图片许可与平台要求；模型建议不能替代人工判断。"
+          + "完成修订后由审核人员人工复核，通过后再查看完整方案。"
+        ),
+      },
       knowledge: [],
     },
-    required_paths: ["risk_level"],
+    required_paths: [
+      "risk_level",
+      "quality_score",
+      "scores.hook",
+      "scores.specificity",
+      "scores.evidence",
+      "scores.platform_native",
+      "scores.structure",
+      "scores.usefulness",
+      "scores.voice",
+      "scores.originality",
+      "scores.cta",
+      "revision_instructions",
+    ],
     expected_values: { passed: true },
   },
 ];
@@ -403,6 +483,7 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
 type DataState = {
   dashboard: DashboardSummary;
   campaigns: Campaign[];
+  styleSkills: StyleSkill[];
   contents: Content[];
   assets: Asset[];
   channels: Channel[];
@@ -427,6 +508,7 @@ const EMPTY_DATA: DataState = {
     jobs_failed: 0,
   },
   campaigns: [],
+  styleSkills: [],
   contents: [],
   assets: [],
   channels: [],
@@ -455,6 +537,24 @@ const PLATFORM: Record<string, string> = {
   wechat: "公众号",
 };
 
+const STYLE_SKILL_EXAMPLE = {
+  manifest_version: 1,
+  slug: "warm-editor",
+  name: "温暖生活方式编辑",
+  version: "1.0.0",
+  description: "用克制、具体、有生活感的语言讲清产品价值。",
+  instructions: [
+    "从具体生活场景进入，不先写产品口号",
+    "每段保留一个能被读者带走的动作或判断",
+  ],
+  forbidden_patterns: ["夸张承诺", "虚构个人经历"],
+  platform_instructions: {
+    xiaohongshu: ["像有经验的朋友分享，保留可收藏清单"],
+    wechat: ["导语有观点，正文充分展开并说明边界"],
+  },
+  examples: [],
+};
+
 const ROLE_LABEL: Record<string, string> = {
   viewer: "只读成员",
   editor: "内容编辑",
@@ -478,6 +578,7 @@ const STATUS: Record<string, string> = {
   approved: "已通过",
   awaiting_review: "待审核",
   awaiting_upload: "待上传",
+  awaiting_selection: "待选择",
   blocked: "规则拦截",
   cancelled: "已取消",
   connected: "已连接",
@@ -808,6 +909,7 @@ export function ContentFlowApp() {
       const [
         dashboard,
         campaigns,
+        styleSkills,
         contents,
         assets,
         channels,
@@ -823,6 +925,7 @@ export function ContentFlowApp() {
       ] = await Promise.all([
         api<DashboardSummary>("/dashboard/summary"),
         api<Campaign[]>("/campaigns"),
+        api<StyleSkill[]>("/style-skills"),
         api<Content[]>("/contents"),
         api<Asset[]>("/assets"),
         api<Channel[]>("/channels"),
@@ -847,6 +950,7 @@ export function ContentFlowApp() {
       setData({
         dashboard,
         campaigns,
+        styleSkills,
         contents,
         assets,
         channels,
@@ -1100,6 +1204,7 @@ export function ContentFlowApp() {
           {view === "campaigns" ? (
             <CampaignsView
               campaigns={data.campaigns}
+              styleSkills={data.styleSkills}
               role={session.role}
               onChanged={() => loadData()}
               flash={flash}
@@ -1412,17 +1517,20 @@ function RunEvidence({ run }: { run: WorkflowRun }) {
 
 function CampaignsView({
   campaigns,
+  styleSkills,
   role,
   onChanged,
   flash,
 }: {
   campaigns: Campaign[];
+  styleSkills: StyleSkill[];
   role: string;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
 }) {
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [showSkillInstaller, setShowSkillInstaller] = useState(false);
   const [busyId, setBusyId] = useState("");
   const [error, setError] = useState("");
   const [expandedCampaignId, setExpandedCampaignId] = useState("");
@@ -1470,6 +1578,11 @@ function CampaignsView({
         .split(/[，,\n]/)
         .map((item) => item.trim())
         .filter(Boolean),
+      style_skill_id: form.get("style_skill_id"),
+      style_notes: form.get("style_notes"),
+      quality_profile: form.get("quality_profile"),
+      image_source: form.get("image_source"),
+      image_search_query: form.get("image_search_query"),
     };
     try {
       await api(
@@ -1484,6 +1597,31 @@ function CampaignsView({
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function installStyleSkill(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusyId("install-skill");
+    setError("");
+    const form = new FormData(event.currentTarget);
+    try {
+      const manifest = JSON.parse(String(form.get("manifest") || ""));
+      await api("/style-skills", {
+        method: "POST",
+        body: { manifest },
+      });
+      flash("风格 Skill 已安装并完成完整性哈希记录");
+      setShowSkillInstaller(false);
+      await onChanged();
+    } catch (caught) {
+      setError(
+        caught instanceof SyntaxError
+          ? "Manifest 不是有效 JSON"
+          : messageOf(caught),
+      );
     } finally {
       setBusyId("");
     }
@@ -1565,15 +1703,59 @@ function CampaignsView({
         title="营销活动"
         description="用结构化 Brief 管理目标、人群、平台约束与生成批次。"
         action={canEdit ? (
-          <Button onClick={showForm ? closeForm : openCreate}>
-            <Icon name="plus" />
-            {showForm ? "收起表单" : "新建活动"}
-          </Button>
+          <div className="page-action-group">
+            <Button
+              kind="ghost"
+              onClick={() => setShowSkillInstaller((value) => !value)}
+            >
+              {showSkillInstaller ? "收起 Skill" : "安装风格 Skill"}
+            </Button>
+            <Button onClick={showForm ? closeForm : openCreate}>
+              <Icon name="plus" />
+              {showForm ? "收起表单" : "新建活动"}
+            </Button>
+          </div>
         ) : undefined}
       />
       {error ? <p className="inline-error">{error}</p> : null}
       {!canEdit ? (
         <p className="permission-note">当前为只读权限，可查看活动与生成状态。</p>
+      ) : null}
+      {showSkillInstaller && canEdit ? (
+        <section className="panel form-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Declarative Style Skill</p>
+              <h2>安装纯声明式风格包</h2>
+            </div>
+          </div>
+          <form className="stack-form" onSubmit={installStyleSkill}>
+            <p className="form-note">
+              风格包只保存写作规则、平台差异和示例，不执行代码或访问外部工具。
+              slug 与版本组合不可覆盖；更新风格请安装新版本。
+            </p>
+            <label>Manifest JSON
+              <textarea
+                name="manifest"
+                className="skill-manifest"
+                required
+                defaultValue={JSON.stringify(STYLE_SKILL_EXAMPLE, null, 2)}
+              />
+            </label>
+            <div className="form-actions">
+              <Button type="submit" busy={busyId === "install-skill"}>
+                校验并安装
+              </Button>
+              <Button
+                type="button"
+                kind="ghost"
+                onClick={() => setShowSkillInstaller(false)}
+              >
+                取消
+              </Button>
+            </div>
+          </form>
+        </section>
       ) : null}
       {showForm ? (
         <section className="panel form-panel">
@@ -1618,6 +1800,63 @@ function CampaignsView({
               <label>内容语气<input name="tone" defaultValue={editingCampaign?.brief.tone || "清晰、可信、不夸大承诺"} /></label>
               <label>主要城市<input name="city" defaultValue={editingCampaign?.brief.city || "北京"} /></label>
             </div>
+            <div className="form-grid">
+              <label>写作风格 Skill
+                <select
+                  name="style_skill_id"
+                  defaultValue={editingCampaign?.brief.style_skill_id || "builtin:editorial"}
+                >
+                  {styleSkills.map((skill) => (
+                    <option
+                      key={skill.id}
+                      value={skill.id}
+                      disabled={skill.status !== "enabled"}
+                    >
+                      {skill.manifest.name} · v{skill.manifest.version}
+                      {skill.source === "workspace" ? " · 已安装" : ""}
+                    </option>
+                  ))}
+                </select>
+                <small>运行时会冻结版本与 SHA-256，不受之后修改影响</small>
+              </label>
+              <label>生成深度
+                <select
+                  name="quality_profile"
+                  defaultValue={editingCampaign?.brief.quality_profile || "deep"}
+                >
+                  <option value="deep">深度创作 · 审核不达标自动改写一次</option>
+                  <option value="standard">标准创作 · 生成后只评审不改写</option>
+                </select>
+              </label>
+            </div>
+            <label>本次风格补充
+              <textarea
+                name="style_notes"
+                defaultValue={editingCampaign?.brief.style_notes || ""}
+                placeholder="例如：像长期居住在北京的编辑，克制、有细节，不使用网络热梗"
+              />
+              <small>这是本活动补充规则，不会修改已安装 Skill</small>
+            </label>
+            <div className="form-grid">
+              <label>封面来源
+                <select
+                  name="image_source"
+                  defaultValue={editingCampaign?.brief.image_source || "manual"}
+                >
+                  <option value="manual">人工上传真实封面</option>
+                  <option value="generate">AI 生成图片</option>
+                  <option value="search">开放授权图库搜索</option>
+                  <option value="hybrid">搜索 + AI 生成，之后人工选择</option>
+                </select>
+              </label>
+              <label>图片搜索词（可选）
+                <input
+                  name="image_search_query"
+                  defaultValue={editingCampaign?.brief.image_search_query || ""}
+                  placeholder="留空则由内容 Agent 生成搜索词"
+                />
+              </label>
+            </div>
             <label>产品事实<input name="product_facts" defaultValue={editingCampaign?.brief.product_facts?.join("，")} placeholder="已确认的功能、服务范围或业务事实" /><small>使用逗号分隔，生成和审核只以这些事实为依据</small></label>
             <div className="form-grid">
               <label>必含信息<input name="must_include" defaultValue={editingCampaign?.brief.must_include?.join("，")} placeholder="路线确认，候选地点" /><small>使用逗号分隔</small></label>
@@ -1648,6 +1887,12 @@ function CampaignsView({
                   <div className="meta-row">
                     <span>{campaign.product_name}</span>
                     <span>{campaign.platforms.map((item) => PLATFORM[item]).join(" / ")}</span>
+                    <span>
+                      {styleSkills.find((skill) => (
+                        skill.id === (campaign.brief.style_skill_id || "builtin:editorial")
+                      ))?.manifest.name || "专业社媒编辑"}
+                    </span>
+                    <span>{campaign.brief.quality_profile === "standard" ? "标准创作" : "深度创作"}</span>
                     <span>{formatDate(campaign.updated_at)}</span>
                   </div>
                   {expandedCampaignId === campaign.id ? (
@@ -1749,6 +1994,18 @@ function ReviewView({
   const revisions =
     revisionState.key === revisionKey ? revisionState.items : [];
   const revisionsLoading = Boolean(revisionKey && revisionState.key !== revisionKey);
+  const modelReview = selected?.review_json.model_review
+    && typeof selected.review_json.model_review === "object"
+    ? selected.review_json.model_review as Record<string, unknown>
+    : {};
+  const qualityScores = modelReview.scores
+    && typeof modelReview.scores === "object"
+    ? Object.entries(modelReview.scores as Record<string, unknown>)
+    : [];
+  const styleEvidence = selected?.generation_json.style_skill
+    && typeof selected.generation_json.style_skill === "object"
+    ? selected.generation_json.style_skill as Record<string, unknown>
+    : {};
 
   useEffect(() => {
     if (!selected?.id) return;
@@ -1899,9 +2156,36 @@ function ReviewView({
                 />
                 <small>结构会随内容版本保存，并用于短视频分镜或人工投放包。</small>
               </label>
-              <div className="review-summary">
-                <strong>自动校验记录</strong>
-                <pre>{JSON.stringify(selected.review_json, null, 2)}</pre>
+              <div className="review-summary quality-summary">
+                <div className="quality-heading">
+                  <div>
+                    <strong>内容 Agent 质量评审</strong>
+                    <span>
+                      风格 {String(styleEvidence.slug || "editorial")} ·
+                      {Number(selected.generation_json.revision_count || 0)} 次定向改写
+                    </span>
+                  </div>
+                  <b>{Number(selected.review_json.quality_score || 0).toFixed(1)} / 10</b>
+                </div>
+                <div className="quality-score-grid">
+                  {qualityScores.map(([name, value]) => (
+                    <span key={name}>
+                      <small>{name}</small>
+                      <strong>{Number(value || 0).toFixed(1)}</strong>
+                    </span>
+                  ))}
+                </div>
+                {Array.isArray(modelReview.issues) && modelReview.issues.length ? (
+                  <ul>
+                    {modelReview.issues.map((issue) => (
+                      <li key={String(issue)}>{String(issue)}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                <details>
+                  <summary>查看完整自动校验 JSON</summary>
+                  <pre>{JSON.stringify(selected.review_json, null, 2)}</pre>
+                </details>
               </div>
               <section className="revision-history" aria-label="内容版本历史">
                 <div className="revision-heading">
@@ -2007,6 +2291,34 @@ function AssetsView({
       setError(messageOf(caught));
     }
   }
+  async function selectCandidate(
+    asset: Asset,
+    candidate?: ImageSearchCandidate,
+  ) {
+    const needsLicenseCheck = asset.provider === "openverse";
+    if (
+      needsLicenseCheck
+      && !window.confirm(
+        "请先打开原始落地页核验作者、许可和署名要求。确认已核验并选用这张图片？",
+      )
+    ) {
+      return;
+    }
+    try {
+      await api(`/assets/${asset.id}/select`, {
+        method: "POST",
+        body: {
+          candidate_id: candidate?.id || null,
+          acknowledge_license_check: needsLicenseCheck,
+        },
+      });
+      flash("图片已选用并绑定当前内容版本");
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    }
+  }
+
   async function uploadAsset(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setUploading(true);
@@ -2033,7 +2345,7 @@ function AssetsView({
       <PageHeading
         eyebrow="Media"
         title="素材中心"
-        description="审核通过后，自动 Provider 会生成素材；人工模式会明确等待上传真实封面。旧版本素材保留但不可发布。"
+        description="封面可人工上传、AI 生成或从开放授权图库检索；搜索与混合模式必须人工核验许可并明确选图。"
         action={canEdit ? (
           <Button onClick={() => {
             setUploadTargetId("");
@@ -2084,13 +2396,74 @@ function AssetsView({
           </form>
         </section>
       ) : null}
+      {assets
+        .filter((asset) => asset.status === "awaiting_selection")
+        .map((asset) => {
+          const candidates = Array.isArray(asset.metadata_json.search_candidates)
+            ? asset.metadata_json.search_candidates as ImageSearchCandidate[]
+            : [];
+          return (
+            <section className="panel media-candidate-panel" key={asset.id}>
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Open-licensed candidates</p>
+                  <h2>{contentMap[asset.content_item_id || ""] || "图片候选"}</h2>
+                  <p>
+                    搜索词：{String(asset.metadata_json.search_query || "未记录")}。
+                    Openverse 许可元数据仅作线索，选用前必须打开原始页面核验。
+                  </p>
+                </div>
+              </div>
+              <div className="media-candidate-grid">
+                {candidates.map((candidate) => (
+                  <article className="media-candidate-card" key={candidate.id}>
+                    {candidate.thumbnail_url ? (
+                      <>
+                        {/* The API restricts remote thumbnails to an exact host. */}
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={candidate.thumbnail_url}
+                          alt={candidate.title}
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                        />
+                      </>
+                    ) : (
+                      <div className="media-candidate-placeholder">无缩略图</div>
+                    )}
+                    <div>
+                      <strong>{candidate.title}</strong>
+                      <p>{candidate.creator} · {candidate.license.toUpperCase()} {candidate.license_version}</p>
+                      <div className="candidate-actions">
+                        {candidate.landing_url ? (
+                          <a href={candidate.landing_url} target="_blank" rel="noreferrer">
+                            核验原始页面
+                          </a>
+                        ) : null}
+                        {canEdit ? (
+                          <button onClick={() => void selectCandidate(asset, candidate)}>
+                            核验后选用
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          );
+        })}
       <section className="panel">
         <DataTable
           headers={["素材", "关联内容", "生成方式", "大小", "状态", "操作"]}
           rows={assets.map((asset) => [
             asset.kind === "image" ? "营销图片" : asset.kind === "video" ? "视频" : "视频分镜 JSON",
             contentMap[asset.content_item_id || ""] || "未关联",
-            ["manual", "manual-upload"].includes(asset.provider) ? "人工上传" : asset.provider,
+            ["manual", "manual-upload"].includes(asset.provider)
+              ? "人工上传"
+              : asset.provider === "openverse"
+                ? "开放授权图库"
+                : "AI 生成",
             formatBytes(asset.size_bytes),
             <StatusBadge key="status" value={asset.status} />,
             <div className="table-actions" key="actions">
@@ -2099,11 +2472,23 @@ function AssetsView({
                   <Icon name="download" />下载
                 </button>
               ) : null}
+              {canEdit
+              && asset.status === "ready"
+              && Boolean(asset.metadata_json.candidate_optional)
+              && !Boolean(asset.metadata_json.selected) ? (
+                <button onClick={() => void selectCandidate(asset)}>选用此素材</button>
+              ) : null}
+              {Boolean(asset.metadata_json.candidate_optional)
+              && Boolean(asset.metadata_json.selected) ? (
+                <span className="selected-candidate">已选用</span>
+              ) : null}
               {canEdit && asset.status === "awaiting_upload" ? (
                 <button onClick={() => { setUploadTargetId(asset.id); setShowUpload(true); }}>上传真实素材</button>
               ) : null}
               {canEdit && !["manual", "manual-upload"].includes(asset.provider) && ["failed", "planned", "stale"].includes(asset.status) ? (
-                <button onClick={() => void retry(asset)}>重新生成</button>
+                <button onClick={() => void retry(asset)}>
+                  {asset.provider === "openverse" ? "重新搜索" : "重新生成"}
+                </button>
               ) : null}
             </div>,
           ])}
@@ -3129,6 +3514,12 @@ function AdministrationView({
 }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [promptDraftSource, setPromptDraftSource] = useState<
+    "active" | "builtin"
+  >("active");
+  const promptDraftBase = promptDraftSource === "builtin"
+    ? promptGovernance?.builtin
+    : promptGovernance?.active;
 
   async function createWorkspace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -3459,17 +3850,34 @@ function AdministrationView({
               </div>
             </div>
             <form
-              key={promptGovernance.active.version}
+              key={`${promptGovernance.active.version}-${promptDraftSource}`}
               className="stack-form prompt-release-form"
               onSubmit={createPromptRelease}
             >
-              <div>
-                <p className="eyebrow">Immutable draft</p>
-                <h3>基于当前生效版本创建新草稿</h3>
-                <p className="form-note">
-                  草稿创建后不可修改；创建者不能自行审批，必须由另一名管理员复核。
-                  审批与激活前还必须通过当前 Eval 套件。审计日志只保存版本与哈希，不保存 Prompt 正文。
-                </p>
+              <div className="prompt-draft-toolbar">
+                <div>
+                  <p className="eyebrow">Immutable draft</p>
+                  <h3>
+                    {promptDraftSource === "builtin"
+                      ? "基于最新内容 Agent 基线创建草稿"
+                      : "基于当前生效版本创建新草稿"}
+                  </h3>
+                  <p className="form-note">
+                    草稿创建后不可修改；创建者不能自行审批，必须由另一名管理员复核。
+                    审批与激活前还必须通过当前 Eval 套件。审计日志只保存版本与哈希，不保存 Prompt 正文。
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  kind="ghost"
+                  onClick={() => setPromptDraftSource((source) => (
+                    source === "active" ? "builtin" : "active"
+                  ))}
+                >
+                  {promptDraftSource === "active"
+                    ? `载入最新 Agent 基线 ${promptGovernance.builtin.version}`
+                    : "改回当前生效版本"}
+                </Button>
               </div>
               <label>
                 变更摘要
@@ -3490,10 +3898,10 @@ function AdministrationView({
                       required
                       minLength={20}
                       maxLength={20000}
-                      defaultValue={promptGovernance.active.prompts[stage]}
+                      defaultValue={promptDraftBase?.prompts[stage] || ""}
                     />
                     <small>
-                      SHA-256 {promptGovernance.active.prompt_hashes[stage].slice(0, 12)}…
+                      SHA-256 {promptDraftBase?.prompt_hashes[stage].slice(0, 12)}…
                     </small>
                   </label>
                 ))}

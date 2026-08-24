@@ -38,7 +38,7 @@ from ..prompt_governance import (
     prompt_set_from_release,
     resolve_active_prompt_set,
 )
-from ..prompts import calculate_prompt_hashes
+from ..prompts import BUILTIN_PROMPT_SET, calculate_prompt_hashes
 from ..schemas import (
     AuditLogResponse,
     MemberCreate,
@@ -415,6 +415,13 @@ def list_prompt_releases(principal: Admin, session: Db, settings: AppSettings):
             "release_id": active.release_id,
             "prompts": dict(active.prompts),
             "prompt_hashes": dict(active.hashes),
+        },
+        builtin={
+            "source": BUILTIN_PROMPT_SET.source,
+            "version": BUILTIN_PROMPT_SET.version,
+            "release_id": None,
+            "prompts": dict(BUILTIN_PROMPT_SET.prompts),
+            "prompt_hashes": dict(BUILTIN_PROMPT_SET.hashes),
         },
         governance_required=settings.require_governed_prompts,
         ready_for_generation=ready_for_generation,

@@ -22,11 +22,12 @@ flowchart TB
 ## 2. 领域模型
 
 - `Workspace` 与 `Membership`：租户隔离和角色权限
-- `Campaign`：营销目标、用户、平台、语气、必含信息和禁用表达
+- `Campaign`：营销目标、用户、平台、语气、质量档位、风格 Skill、图片来源、必含信息和禁用表达
 - `KnowledgeDocument` / `KnowledgeChunk`：知识来源、切块、向量与引用
 - `WorkflowRun`：一次生成批次与各阶段状态
-- `ContentItem`：平台内容、结构化排版/镜头脚本、版本、规则结果和人工审核记录
-- `Asset`：图片、视频或离线分镜，关联内容版本
+- `ContentItem`：平台内容、结构化排版/镜头脚本、版本、规则结果、Agent/风格/质量元数据和人工审核记录
+- `Asset`：人工、生成或搜索图片候选、视频或离线分镜，关联内容版本与来源许可元数据
+- `StyleSkill`：工作区安装的声明式风格清单、语义版本、SHA-256、启停状态和安装审计
 - `ChannelConnection`：加密平台凭据与非敏感配置
 - `PublishJob`：立即/定时执行、内容版本、`connector/script/manual_export` 方式、外部 ID、响应摘要和可安全重试的失败边界
 - `MetricSnapshot`：同一发布任务的分时指标快照
@@ -43,7 +44,7 @@ flowchart TB
 
 - SQLite/离线验收：向量保存在 JSON 字段，应用内计算余弦相似度。
 - PostgreSQL：初始迁移创建 `vector(1024)` 的 `knowledge_vectors` 表和 HNSW 余弦索引；查询使用 `<=>` 完成近邻检索。
-- Provider：Hash Embedding 用于可复现测试；生产可选择 OpenAI-compatible Embedding，或使用固定提交、禁用远程代码、进程级懒加载缓存并对知识分块批量推理的本地 BGE-M3；媒体可选择中立 HTTP 契约或人工真实素材。
+- Provider：Hash Embedding 用于可复现测试；生产可选择 OpenAI-compatible Embedding，或使用固定提交、禁用远程代码、进程级懒加载缓存并对知识分块批量推理的本地 BGE-M3；媒体可选择中立 HTTP 契约、人工真实素材或受限开放图库搜索。
 
 生成结果保存引用的 `source_chunk_ids`，让审核人员能够追踪内容使用了哪些知识块。
 
@@ -51,19 +52,19 @@ flowchart TB
 
 `workflow.execute` 按以下阶段运行：
 
-1. 加载并校验 Campaign
+1. 加载 Campaign，并解析已启用的风格 Skill；运行请求冻结清单与 SHA-256
 2. 检索工作区知识
-3. 生成跨平台内容计划
-4. 针对各平台生成文案
-5. 执行禁用词、必含事实、CTA 和长度规则
-6. 规则失败时自动修复一次
-7. 保存内容与计划素材，状态进入 `needs_review`
+3. 生成多个选题候选、证据账本、叙事结构和媒体方向
+4. 针对各平台生成文案、备选标题、结构化排版和素材简报
+5. 执行禁用词、必含事实、CTA 和长度规则，必要时确定性修复
+6. 执行编辑与安全评审；深度档位最多定向修订一次，并拒绝质量回退
+7. 保存内容、九维质量/修订元数据与计划素材，状态进入 `needs_review`
 
 小红书的卡片结构、抖音的逐镜头脚本和公众号的章节结构保存在 `layout_json`，并与正文一起写入每条 `ContentRevision`。抖音分镜会进入视频素材任务，小红书排版结构会进入人工投放包。
 
 每次文本模型调用由工作流级追溯器记录到 `WorkflowRun.result_json.ai_provenance`：Provider/模型、Prompt 来源、工作区发布 ID/版本和模板哈希、调用阶段与平台、输入输出 SHA-256/字节数、时延、响应模型以及 Provider 原样返回的 Token 用量。工作流在第一次模型调用前解析当前工作区唯一的 `active` Prompt Release；没有自定义发布时使用内置安全基线。工作区 Release 的正文会在激活和运行前重新计算 SHA-256，记录值不一致时失败关闭，不会静默回退。候选 Release 必须先由 `prompt_eval.execute` Worker 使用当前活动 Eval 套件和当前配置的目标 Provider/模型运行；只有 Prompt 哈希、Suite 哈希、Suite 版本、实际 Provider 与模型都匹配的 `passed` 证据才能用于审批、激活或回滚。切换活动套件或目标模型会立即使旧证据失效。评测结果只保存输出哈希、字节数、确定性断言失败项与 AI provenance，不保存模型正文。追溯记录同样不复制原始 Prompt、知识文本或模型正文；失败时保留已完成调用和脱敏错误类型。Mock Provider 明确标记为离线确定性模型，Token 来源标记为未上报。
 
-审核通过后，自动媒体 `Asset` 才会入队；`manual` 媒体资产进入 `awaiting_upload` 且不创建生成 Job。人工上传按素材 ID 或当前版本唯一占位任务填充原 `Asset`，校验已审核内容版本并把安全规范化后的对象置为 `ready`。编辑内容会增加版本号、清空批准人、把旧素材标记为 `stale` 并创建新素材计划。发布 Worker 再检查：
+审核通过后，自动媒体 `Asset` 才会入队；`manual` 媒体资产进入 `awaiting_upload` 且不创建生成 Job。人工上传按素材 ID 或当前版本唯一占位任务填充原 `Asset`，校验已审核内容版本并把安全规范化后的对象置为 `ready`。搜索模式由 `asset.search` Worker 访问固定 Openverse API 和 Wikimedia 来源，只保留 CC0/PDM/BY/BY-SA、精确允许下载域名及安全 URL；用户必须核验原始许可页面后选择，下载内容仍经过大小、重定向和图片规范化边界。混合模式把搜索与生成素材放入同一候选组，发布只接受显式选中的 ready 候选。编辑内容会增加版本号、清空批准人、把旧素材标记为 `stale` 并创建新素材计划。发布 Worker 再检查：
 
 - 内容仍是 `approved`
 - 内容版本等于排期时版本

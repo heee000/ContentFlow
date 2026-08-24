@@ -1623,3 +1623,32 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 前端 ESLint、2 项渲染契约、vinext Sites 构建和 Next.js/TypeScript 生产构建通过。
 - Codex 内置浏览器因本机 Windows sandbox `helper_unknown_error: setup refresh had errors` 无法启动，未完成自动截图/点击视觉验收；用户需要刷新本地 Web 完成主观验收。
 - 隔离 `contentflow-live-test` 已无数据清理地重建 API/Worker/Web；PostgreSQL 与 MinIO 保留，API `/health/ready` 返回 database/storage ok，Web 200，Worker 新实例在线。实现提交 `b4b23b76119c31c4e71cef05fe5ad1d816a20521` 已普通推送；[CI #32724822598](https://github.com/heee000/ContentFlow/actions/runs/32724822598) 四个 Job 全部成功，真实 PostgreSQL/pgvector 与 MinIO 为 `230 passed, 143 subtests passed`、分支覆盖率 82.69%，供应链 Artifact `9519101023` 摘要为 `sha256:737dae20923f594ef1858d5d7072392b2e47ae630c5ecb0dc5fe2246c69cc73c`，SLSA 与双 CycloneDX 证明已反向验证。未读取、修改或暂存 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。
+
+## 21.32 内容工作室 Agent、风格 Skill 与多来源图片增量交接
+
+### 已实现
+
+1. 主生成链路从单轮模板升级为有界内容工作室 Agent：策略候选/证据账本 → 平台化初稿 → 确定性规则修复 → 九维编辑与安全评审 → 深度档位最多一次定向修订 → 安全且不回退才采用。
+2. Campaign 可选择声明式 Style Skill、自由风格补充、standard/deep 质量档位和 manual/generate/search/hybrid 图片来源。Style Skill 工作区隔离、语义版本、SHA-256 和启停审计齐全，不允许任何可执行代码。
+3. 新增 Openverse/Wikimedia 开放授权搜索、asset.search Worker、待选择素材 UI、人工许可确认、安全下载/图片规范化、来源/作者/许可/摘要追溯和混合候选互斥选择。AI 生成继续走供应商中立 HTTP 媒体契约；没有真实媒体 Provider 时明确失败或人工上传，不伪造结果。
+4. ContentItem/ContentRevision 保存 Agent、质量、修订和风格元数据；审核页展示总分、九维分数、主要问题、风格版本和修订状态。管理页可从最新内置 Agent 基线创建受治理 Prompt 草稿，仍必须真实 Eval 和双人激活。
+5. Alembic head 为 1a2b3c4d5e6f，public 表门槛 27；迁移器支持上一 head 安全增量接管。备份/恢复脚本默认值、Compose 环境透传、README/架构/手册/运维和示例均已同步。
+6. 文本模型单次请求超时从硬编码 60 秒改为 CONTENTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS，默认 120、范围 10–300 秒。可选修订或最终复评的 RuntimeError/TimeoutError 不再丢失已评审原稿，也不会采用未复评修订稿。
+
+### 真实运行证据
+
+- Openverse 无副作用搜索返回 2 个 BY-SA Wikimedia 候选；下载和落地页域名均符合精确白名单，没有下载/选择素材。
+- prompt-r2 首次因 60 秒 generate 超时进入 error，系统自动恢复旧 Eval；修改超时后，eval-v2 暴露错误用例设计并 failed，再次自动恢复。修正后的 eval-v3 在 openai-compatible/deepseek-v4-flash 上 passed，由不同管理员完成激活/审批；当前 workspace-r2 和 eval-v3 active，generation_ready=true。
+- 新 Prompt 的真实 CityWalk 深度工作流完成前四次模型调用，最终复评 JSON 解析失败；provenance 为 5 次调用、4 成功 1 失败、60784 Provider 上报 Token。没有内容、素材或平台写入。该发现已通过安全降级代码和单元回归修复，但为避免继续消耗真实额度，修复后没有自动再跑第二条真实工作流；下一次用户体验生成即为该路径的最终外部验收。
+- contentflow-live-test 无数据卷清理地从 e28a6b9c4f10/26 表迁移到 1a2b3c4d5e6f/27 表；原 1 个活动、2 条内容、6 个发布任务保留，API database/storage ok、Worker 在线、Web 200。
+- 迁移前备份 20260825-010604（26 表、2 对象）和迁移后备份 20260825-010724（27 表、2 对象）均完成随机临时数据库/bucket 隔离恢复。
+- 最终本地 Ruff、compile、双 Compose 和 PowerShell 语法通过；后端 234 passed、7 skipped、145 subtests passed，覆盖率 80.92%；前端 lint、2 项渲染测试、Sites 与 Next 构建通过。远程 CI 需在本阶段提交后回填。
+
+### 接手与使用注意
+
+- 现有旧活动的 brief 没有显式新字段时，后端按 builtin:editorial、deep、manual 补默认值；用户在活动页保存后才会把选择写回 brief。
+- Openverse 候选必须由编辑人员打开原始页面核验许可并确认；系统筛选和元数据不构成法律意见。
+- generate/hybrid 的真实 AI 图片需要 CONTENTFLOW_IMAGE_PROVIDER=http、媒体端点/密钥/模型和精确下载域名。当前本地仍是 manual，不能声称真实 AI 图片生成已验收。
+- 最新真实 Prompt 已生效；不要直接改数据库 Prompt 正文。后续变更继续走 Eval 套件、目标模型运行、双人审批与激活。
+- 失败的真实 run 5ff6da16-a534-4953-9982-378316b3795e 是保留的审计证据，不要把它手工改成成功或通用重试；创建新运行即可使用安全降级代码。
+- 未跟踪 knowledge/北京周末 CityWalk 路线助手产品资料.txt 继续视为用户私有文件，禁止读取、暂存、提交或删除。

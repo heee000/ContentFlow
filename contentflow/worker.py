@@ -32,6 +32,7 @@ from .entities import (
     WorkerNode,
 )
 from .embeddings import build_embedding_provider
+from .image_search import build_image_search_provider
 from .job_queue import (
     JobLeaseLost,
     claim_next_job,
@@ -313,6 +314,52 @@ def handle_connector_test(
         "channel_id": channel.id,
         "status": channel.status,
         "response": result.response,
+    }
+
+
+def handle_asset_search(
+    session: Session, payload: dict[str, Any], settings: Settings
+) -> dict[str, Any]:
+    asset = session.get(Asset, payload["asset_id"])
+    if asset is None:
+        raise ValueError("素材任务不存在")
+    if asset.status in {"ready", "awaiting_selection"}:
+        return {"asset_id": asset.id, "status": asset.status}
+    if asset.kind != "image" or asset.provider != "openverse":
+        raise MediaProviderError("素材任务不是开放图库搜索任务", retryable=False)
+    metadata = dict(asset.metadata_json or {})
+    query = str(metadata.get("search_query") or "").strip()
+    provider = build_image_search_provider(settings)
+    candidates = provider.search(query=query)
+    asset.status = "awaiting_selection"
+    asset.error = None
+    asset.metadata_json = {
+        **metadata,
+        "search_provider": provider.provider_name,
+        "search_query": query,
+        "search_candidates": candidates,
+        "candidate_count": len(candidates),
+        "license_review_required": True,
+        "license_notice": (
+            "Openverse 汇总的许可元数据可能不准确；使用前必须打开原始落地页核验"
+        ),
+    }
+    record_audit(
+        session,
+        action="asset.search",
+        entity_type="asset",
+        entity_id=asset.id,
+        workspace_id=asset.workspace_id,
+        actor_user_id=None,
+        metadata={
+            "provider": provider.provider_name,
+            "candidate_count": len(candidates),
+        },
+    )
+    return {
+        "asset_id": asset.id,
+        "status": asset.status,
+        "candidate_count": len(candidates),
     }
 
 
@@ -646,14 +693,20 @@ def handle_publish_dispatch(
     all_assets = list(
         session.scalars(select(Asset).where(Asset.content_item_id == content.id))
     )
-    assets = [
+    current_assets = [
         asset
         for asset in all_assets
         if int((asset.metadata_json or {}).get("content_version") or 1)
         == content.version
     ]
+    assets = [
+        asset
+        for asset in current_assets
+        if not bool((asset.metadata_json or {}).get("candidate_optional"))
+        or bool((asset.metadata_json or {}).get("selected"))
+    ]
     if not assets:
-        raise ValueError("当前内容版本没有可发布素材")
+        raise ValueError("当前内容版本没有已选用的可发布素材")
     unfinished = [asset.id for asset in assets if asset.status != "ready"]
     if unfinished:
         raise ValueError(f"仍有素材未就绪: {', '.join(unfinished)}")
@@ -1164,6 +1217,7 @@ HANDLERS: dict[str, Handler] = {
     "workflow.execute": handle_workflow_execute,
     "connector.test": handle_connector_test,
     "asset.generate": handle_asset_generate,
+    "asset.search": handle_asset_search,
     "asset.poll": handle_asset_poll,
     "publish.dispatch": handle_publish_dispatch,
     "publish.reconcile": handle_publish_reconcile,

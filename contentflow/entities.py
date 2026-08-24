@@ -324,6 +324,42 @@ class Campaign(TimestampMixin, Base):
     brief: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class StyleSkill(TimestampMixin, Base):
+    __tablename__ = "style_skills"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "slug",
+            "version",
+            name="uq_style_skill_workspace_slug_version",
+        ),
+        CheckConstraint(
+            "status IN ('enabled', 'disabled')",
+            name="status",
+        ),
+        Index("ix_style_skills_workspace_status", "workspace_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    version: Mapped[str] = mapped_column(String(40), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(24), default="enabled", nullable=False, index=True
+    )
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )
+    installed_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+
+
 class KnowledgeDocument(TimestampMixin, Base):
     __tablename__ = "knowledge_documents"
 
@@ -412,6 +448,11 @@ class ContentItem(TimestampMixin, Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     source_chunk_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     review_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    generation_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        default=dict,
+        server_default=text("'{}'"),
+    )
     approved_by: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -441,6 +482,11 @@ class ContentRevision(Base):
     hashtags: Mapped[list[str]] = mapped_column(JSON, default=list)
     call_to_action: Mapped[str] = mapped_column(Text, default="")
     layout_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        default=dict,
+        server_default=text("'{}'"),
+    )
+    generation_json: Mapped[dict[str, Any]] = mapped_column(
         JSON,
         default=dict,
         server_default=text("'{}'"),

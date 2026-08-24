@@ -62,6 +62,61 @@ class MockProvider:
                 },
                 "asset_direction": "城市夜景、路线节点和手机地图操作的组合",
                 "posting_window": "工作日 18:00-21:00，最终由运营人员结合账号数据确认",
+                "audience_tension": "想快速得到可执行路线，又不愿被固定攻略限制",
+                "angle_candidates": [
+                    {
+                        "angle": "从信息过载到可执行路线",
+                        "hook": "地点不难找，难的是把十几个收藏排成一条能走完的路线",
+                        "reader_value": "提供从候选地点到出发确认的完整方法",
+                        "evidence_chunk_ids": [
+                            chunk.get("chunk_id")
+                            for chunk in payload["knowledge"][:2]
+                        ],
+                        "risk": "不得暗示自动规划结果绝对准确",
+                    },
+                    {
+                        "angle": "临时出发的最小准备清单",
+                        "hook": "不做三小时攻略，也不等于毫无准备",
+                        "reader_value": "给临时出发者一份最小行动清单",
+                        "evidence_chunk_ids": [],
+                        "risk": "清单只能使用已确认产品事实",
+                    },
+                    {
+                        "angle": "路线调整中的取舍",
+                        "hook": "真正拖慢出发的不是少一个地点，而是不肯删地点",
+                        "reader_value": "帮助读者建立路线取舍顺序",
+                        "evidence_chunk_ids": [],
+                        "risk": "建议不能伪装成平台数据",
+                    },
+                ],
+                "selected_angle": "从信息过载到可执行路线",
+                "selection_reason": "与目标场景和产品已确认能力最贴近",
+                "content_thesis": "先集中信息，再按现实约束调整，最后人工确认",
+                "evidence_ledger": [],
+                "narrative_arc": ["提出矛盾", "给出方法", "说明边界", "引导行动"],
+                "platform_strategies": {
+                    "xiaohongshu": {
+                        "hook": "收藏很多却排不成路线",
+                        "structure": "场景、步骤、避坑、CTA",
+                        "native_devices": ["清单", "卡片"],
+                        "target_length": "350-650 字",
+                    },
+                    "douyin": {
+                        "hook": "前三秒展示地点过多的混乱",
+                        "structure": "冲突、操作、结果、CTA",
+                        "native_devices": ["短句字幕", "动作镜头"],
+                        "target_length": "180-330 字",
+                    },
+                    "wechat": {
+                        "hook": "地点不难找，难的是把信息变成决策",
+                        "structure": "观点导语、方法展开、边界、CTA",
+                        "native_devices": ["小标题", "步骤说明"],
+                        "target_length": "900-1500 字",
+                    },
+                },
+                "image_search_query": f"{brief['city']} 城市路线 街景 地图",
+                "image_generation_prompt": "真实城市出行场景，保留自然光线和生活细节",
+                "known_unknowns": ["具体平台流量时段需由运营人员结合账号数据确认"],
             }
 
         if stage == "generate":
@@ -80,6 +135,15 @@ class MockProvider:
                         f"这份流程适合想少做攻略、又希望保留临场选择的人。{cta}。"
                     ),
                     "hashtags": ["城市出行", "夜游路线", "地图攻略"],
+                    "alternate_titles": ["收藏很多，路线却总排不出来", "临时夜游的最小路线清单"],
+                    "evidence_usage": [],
+                    "media_brief": {
+                        "objective": "展示从零散收藏到清晰路线的变化",
+                        "must_show": ["真实城市街景", "路线节点"],
+                        "must_avoid": ["虚构产品界面", "无法核验的优惠"],
+                        "search_query": f"{brief['city']} 城市路线 街景 地图",
+                        "generation_prompt": "真实城市夜游场景，竖版构图，留出标题安全区",
+                    },
                     "layout": {
                         "cover_title": "夜游路线这样排更清楚",
                         "cards": [
@@ -103,6 +167,15 @@ class MockProvider:
                         f"{must_include}。结尾：{cta}。"
                     ),
                     "hashtags": ["夜游", "路线规划", "出行技巧"],
+                    "alternate_titles": ["收藏十个地点，为什么还是出不了门", "20 秒理清夜游路线"],
+                    "evidence_usage": [],
+                    "media_brief": {
+                        "objective": "用镜头表现信息从混乱到清晰",
+                        "must_show": ["地点选择", "路线调整"],
+                        "must_avoid": ["虚构产品界面", "夸张效果"],
+                        "search_query": f"{brief['city']} 夜景 路线 竖屏",
+                        "generation_prompt": "真实城市夜游，竖屏短视频封面，强前后对比",
+                    },
                     "layout": {
                         "aspect_ratio": "9:16",
                         "music_mood": "轻快、克制，不掩盖口播",
@@ -143,6 +216,15 @@ class MockProvider:
                     f"而是把零散信息变成便于确认的路线。{cta}。"
                 ),
                 "hashtags": ["城市出行", "路线规划"],
+                "alternate_titles": ["收藏夹不是路线：出发前还差这一步", "把零散地点变成可确认路线"],
+                "evidence_usage": [],
+                "media_brief": {
+                    "objective": "为长文提供可信、克制的城市路线头图",
+                    "must_show": ["真实城市空间", "路线感"],
+                    "must_avoid": ["虚构产品界面", "促销文字"],
+                    "search_query": f"{brief['city']} 城市路线 街景 地图",
+                    "generation_prompt": "真实城市街景与路线意象，横版编辑头图，留白克制",
+                },
                 "layout": {
                     "lead": "地点不难找，难的是把零散信息变成可执行路线。",
                     "sections": [
@@ -164,11 +246,25 @@ class MockProvider:
             return {
                 "passed": True,
                 "risk_level": "low",
+                "quality_score": 8.4,
+                "scores": {
+                    "hook": 8.2,
+                    "specificity": 8.3,
+                    "evidence": 8.5,
+                    "platform_native": 8.6,
+                    "structure": 8.5,
+                    "usefulness": 8.4,
+                    "voice": 8.2,
+                    "originality": 8.0,
+                    "cta": 8.6,
+                },
+                "strengths": ["结构完整，事实边界清楚", "行动引导与正文一致"],
                 "issues": [],
                 "fact_checks": [
                     "未发现超出输入知识范围的具体产品能力承诺",
                     "仍需人工确认品牌语气与平台合规",
                 ],
+                "revision_instructions": [],
                 "suggestion": "保留人工审核后再生成素材和分发",
             }
 
@@ -228,7 +324,11 @@ class OpenAICompatibleProvider:
                 },
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.3,
+            "temperature": {
+                "plan": 0.45,
+                "generate": 0.7,
+                "review": 0.15,
+            }.get(stage, 0.3),
         }
         request = urllib.request.Request(
             self.endpoint,

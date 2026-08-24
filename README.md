@@ -10,7 +10,7 @@ ContentFlow 是一套可部署的 AI 内容营销自动化系统，覆盖“内�
 flowchart LR
     A["营销 Brief"] --> B["品牌/产品知识检索"]
     B --> C["内容策划与平台文案生成"]
-    C --> D["确定性规则校验与一次修复"]
+    C --> D["规则校验、编辑评审与有界修订"]
     D --> E["人工编辑和审核"]
     E -->|通过| F["图片/视频素材任务"]
     E -->|驳回| C
@@ -30,10 +30,13 @@ flowchart LR
 - 离线 Hash Embedding；生产可显式选择 OpenAI-compatible Embedding 或固定版本的本地 BGE-M3（1024 维归一化 Dense 向量）
 - PostgreSQL + pgvector 1024 维向量列和 HNSW 余弦索引
 - Mock/OpenAI-compatible 文本生成
+- 有界内容工作室 Agent：策略候选、证据账本、平台化草稿、九维编辑评审、最多一次定向修订与回归保护
+- 可安装的声明式风格 Skill：工作区隔离、语义化版本、内容哈希和启停审计，不执行用户代码
 - 每次文本生成记录 Provider、模型、Prompt 来源/发布版本、Prompt/输入/输出摘要、分阶段时延和 Provider 返回的 Token 用量；不在运行追溯中复制原始 Prompt，也不虚构 Token 或成本
 - 工作区 Prompt Registry：不可变草稿、另一名管理员审批/拒绝、激活与历史回滚；激活和运行前校验正文 SHA-256，审计只保存版本与哈希
 - 版本化 Prompt Eval：不可变确定性用例、双人激活、异步 Worker 执行、Prompt/套件/目标 Provider 与模型绑定；当前套件未通过时审批、激活、回滚和每次实际生成均失败关闭
 - Mock/中立 HTTP 图片与异步视频生成，以及人工上传真实素材模式；结果写入本地存储或 S3/MinIO
+- 人工、AI 生成、开放授权搜索和混合候选四种图片来源；搜索候选保留作者/许可/原始页面并要求人工核验
 - 人工审核门禁、内容版本校验、旧素材失效
 - 小红书卡片结构、抖音逐镜头脚本和公众号章节结构随版本保存并进入投放链路
 - 抖音视频上传/创建/数据回收适配器
@@ -144,6 +147,7 @@ CONTENTFLOW_EMBEDDING_PROVIDER=openai-compatible
 CONTENTFLOW_MODEL_API_BASE=https://models.example.com/v1
 CONTENTFLOW_MODEL_API_KEY=...
 CONTENTFLOW_TEXT_MODEL=configured-text-model
+CONTENTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS=120
 CONTENTFLOW_EMBEDDING_MODEL=configured-embedding-model
 ```
 
@@ -156,6 +160,17 @@ CONTENTFLOW_LOCAL_EMBEDDING_REVISION=5617a9f61b028005a4858fdac845db406aefb181
 CONTENTFLOW_LOCAL_EMBEDDING_DEVICE=cpu
 CONTENTFLOW_LOCAL_EMBEDDING_OFFLINE=false
 CONTENTFLOW_LOCAL_EMBEDDING_BATCH_SIZE=8
+```
+
+文本请求默认超时 120 秒，可在 10–300 秒内调整。长文 Agent 会显著增加请求时长和 Token 用量；超时配置是单次请求上限，不会放开修订轮数。可选修订的生成或最终复评失败时，系统保留已经完成编辑/安全评审的原稿并记录失败类型，绝不会采用未经最终复评的修订稿。
+
+开放授权图片搜索默认使用 Openverse 的 Wikimedia 来源，只保留 CC0/PDM/BY/BY-SA 和精确允许的下载域名。页面要求用户打开原始页面核验许可后才能选择；许可元数据是检索线索，不是法律保证：
+
+```dotenv
+CONTENTFLOW_IMAGE_SEARCH_PROVIDER=openverse
+CONTENTFLOW_OPENVERSE_API_BASE=https://api.openverse.org/v1
+CONTENTFLOW_IMAGE_SEARCH_RESULT_LIMIT=6
+CONTENTFLOW_IMAGE_SEARCH_DOWNLOAD_ALLOWED_HOSTS=["upload.wikimedia.org"]
 ```
 
 没有可验收的媒体生成服务时，可以显式使用人工真实素材模式。审核通过后素材进入 `awaiting_upload`，上传并绑定当前内容版本且安全解码成功后才变为 `ready`；发布门禁不会把“等待人工封面”误报为生成成功：

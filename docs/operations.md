@@ -60,6 +60,10 @@ v1 尚未交付取消操作、能力发现和签名 Webhook；部署验收必须
 
 不要为初始化临时关闭治理门禁，也不要把注册入口直接暴露到公网。目标 Provider/模型、活动 Eval 套件或 Prompt 哈希变化会使旧证据失效，必须重新评测。
 
+## 文本 Agent 请求预算
+
+`CONTENTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS` 默认 120 秒，只允许 10–300 秒。它约束每次模型 HTTP 请求，不改变标准档位 0 次、深度档位最多 1 次修订的预算。Prompt Eval 或工作流出现 `TimeoutError` 时，应先查看脱敏 AI provenance 的阶段与时延；只有确认没有平台副作用且已经修正原因后才重试。可选修订或最终复评的 RuntimeError/TimeoutError 会保留已评审原稿并记录失败类型，不采用未复评修订稿。
+
 ## Docker Compose
 
 ```powershell
@@ -148,13 +152,13 @@ python -m alembic history
 .\scripts\verify_backup.ps1 -BackupPath <path> -ExpectedAlembicRevision <revision> -MinimumPublicTableCount <count>
 ```
 
-正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `e28a6b9c4f10`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
+正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `1a2b3c4d5e6f`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
 
-`verify_backup.ps1` 默认校验 dump 哈希、至少 26 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
+`verify_backup.ps1` 默认校验 dump 哈希、至少 27 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
 
 真正灾难恢复时仍必须恢复到新的 PostgreSQL 数据库和空 bucket，完成应用验收后再切换流量。不要未经演练直接对当前 `contentflow` 库执行 `pg_restore --clean`。
 
-- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `e28a6b9c4f10` 在 `c95f1e4a8d73` 后新增发布证据与确认表；持久 PostgreSQL 迁移与 26 表联合恢复需由当前 CI/恢复演练重新签收；旧证据不等于 PITR 或异地灾备。
+- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `1a2b3c4d5e6f` 在 `e28a6b9c4f10` 后新增风格 Skill 表及内容 Agent 元数据列；持久 PostgreSQL 迁移与 27 表联合恢复需由当前 CI/恢复演练重新签收；旧证据不等于 PITR 或异地灾备。
 - MinIO/S3 生产 bucket 应启用版本控制、生命周期、服务端加密和不可变保留策略。
 - `CONTENTFLOW_SECRET_KEY`、当前/历史凭据加密密钥必须单独备份到集中密钥管理系统；丢失后访问令牌和已加密平台凭据无法恢复。
 - 审计日志按合规周期归档，不要和普通应用日志一起随意清理。

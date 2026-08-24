@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 from contentflow.ai_provenance import AIProvenanceRecorder
 from contentflow.prompts import PROMPT_HASHES, PROMPT_SET_VERSION, PROMPTS
 from contentflow.providers import OpenAICompatibleProvider
+from contentflow.settings import Settings
+from contentflow.text_generation import build_text_provider
 
 
 class StaticProvider:
@@ -152,6 +154,18 @@ class AIProvenanceTest(unittest.TestCase):
                 "response_model": "provider-model-revision",
             },
         )
+
+    def test_text_provider_uses_configured_request_timeout(self):
+        provider = build_text_provider(
+            Settings(
+                text_provider="openai-compatible",
+                model_api_base="https://provider.test/v1",
+                model_api_key="test-key",
+                text_model="test-model",
+                model_request_timeout_seconds=180,
+            )
+        )
+        self.assertEqual(provider.timeout_seconds, 180)
 
     def test_prompt_hash_manifest_covers_every_template(self):
         self.assertEqual(set(PROMPT_HASHES), set(PROMPTS))

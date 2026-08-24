@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from .ai_provenance import AIProvenanceRecorder
+from .content_agent import run_content_agent
 from .entities import (
     Asset,
     Campaign,
@@ -18,8 +19,8 @@ from .knowledge_service import search_workspace_knowledge
 from .models import CampaignBrief
 from .prompt_eval import require_current_passed_eval
 from .prompt_governance import resolve_active_prompt_set
-from .review import RuleReviewer
 from .settings import Settings
+from .style_skills import resolve_style_skill
 from .text_generation import build_text_provider
 from .workflow import build_asset_tasks
 
@@ -39,6 +40,26 @@ def campaign_to_brief(campaign: Campaign) -> dict:
         "forbidden_phrases": list(stored.get("forbidden_phrases") or []),
         "call_to_action": stored.get("call_to_action")
         or f"打开{campaign.product_name}了解更多",
+    }
+
+
+def campaign_generation_preferences(campaign: Campaign) -> dict:
+    stored = dict(campaign.brief or {})
+    return {
+        "style_skill_id": stored.get("style_skill_id") or "builtin:editorial",
+        "style_notes": str(stored.get("style_notes") or "").strip(),
+        "quality_profile": (
+            stored.get("quality_profile")
+            if stored.get("quality_profile") in {"standard", "deep"}
+            else "deep"
+        ),
+        "image_source": (
+            stored.get("image_source")
+            if stored.get("image_source")
+            in {"manual", "generate", "search", "hybrid"}
+            else "manual"
+        ),
+        "image_search_query": str(stored.get("image_search_query") or "").strip(),
     }
 
 
@@ -74,7 +95,21 @@ def execute_workflow_run(
     run.started_at = datetime.now(timezone.utc)
     session.flush()
 
-    brief_raw = campaign_to_brief(campaign)
+    brief_raw = dict(
+        run.request_json.get("campaign_brief_snapshot")
+        or campaign_to_brief(campaign)
+    )
+    preferences = dict(
+        run.request_json.get("generation_preferences")
+        or campaign_generation_preferences(campaign)
+    )
+    style_skill = run.request_json.get("style_skill_snapshot")
+    if not isinstance(style_skill, dict):
+        style_skill = resolve_style_skill(
+            session,
+            run.workspace_id,
+            preferences.get("style_skill_id"),
+        )
     brief = CampaignBrief.from_dict(brief_raw)
     query = " ".join(
         [
@@ -107,7 +142,13 @@ def execute_workflow_run(
     session.flush()
     plan = provenance.complete_json(
         "plan",
-        {"brief": brief.to_dict(), "knowledge": knowledge_payload},
+        {
+            "brief": brief.to_dict(),
+            "knowledge": knowledge_payload,
+            "style_skill": style_skill,
+            "style_notes": preferences.get("style_notes") or "",
+            "quality_profile": preferences.get("quality_profile") or "deep",
+        },
     )
 
     run.current_stage = "content_generation"
@@ -115,36 +156,25 @@ def execute_workflow_run(
     requested_platforms = set(
         run.request_json.get("regenerate_platforms") or brief.platforms
     )
-    reviewer = RuleReviewer()
     result_items = []
     for platform in brief.platforms:
         if platform not in requested_platforms:
             continue
-        draft = provenance.complete_json(
-            "generate",
-            {
-                "brief": brief.to_dict(),
-                "platform": platform,
-                "plan": plan,
-                "knowledge": knowledge_payload,
-            },
+        agent_result = run_content_agent(
+            provenance=provenance,
+            brief=brief,
             platform=platform,
+            plan=plan,
+            knowledge=knowledge_payload,
+            style_skill=style_skill,
+            style_notes=str(preferences.get("style_notes") or ""),
+            quality_profile=str(preferences.get("quality_profile") or "deep"),
         )
-        rule_review = reviewer.review(platform, draft, brief)
-        if not rule_review.passed:
-            draft = reviewer.repair(platform, draft, brief)
-            rule_review = reviewer.review(platform, draft, brief)
-        model_review = provenance.complete_json(
-            "review",
-            {
-                "brief": brief.to_dict(),
-                "platform": platform,
-                "content": draft,
-                "knowledge": knowledge_payload,
-            },
-            platform=platform,
-        )
+        draft = agent_result.draft
+        rule_review = agent_result.rule_review
+        model_review = agent_result.model_review
         model_review_passed = bool(model_review.get("passed", False))
+        safety_passed = model_review_passed and model_review.get("risk_level") != "high"
 
         item = ContentItem(
             workspace_id=run.workspace_id,
@@ -160,15 +190,18 @@ def execute_workflow_run(
             ),
             status=(
                 "needs_review"
-                if rule_review.passed and model_review_passed
+                if rule_review.passed and safety_passed
                 else "blocked"
             ),
             source_chunk_ids=[chunk.chunk_id for chunk in retrieved],
             review_json={
                 "rule_review": rule_review.to_dict(),
                 "model_review": model_review,
+                "quality_score": agent_result.quality_score,
+                "quality_target": agent_result.generation_json["quality_target"],
                 "requires_human_approval": True,
             },
+            generation_json=agent_result.generation_json,
         )
         session.add(item)
         session.flush()
@@ -182,19 +215,33 @@ def execute_workflow_run(
                 hashtags=list(item.hashtags),
                 call_to_action=item.call_to_action,
                 layout_json=dict(item.layout_json),
+                generation_json=dict(item.generation_json),
                 changed_by=None,
-                change_reason="generated",
+                change_reason=(
+                    "agent_revised"
+                    if agent_result.generation_json["revision_selected"]
+                    else "agent_generated"
+                ),
             )
         )
-        for task in build_asset_tasks(platform, brief, plan, draft):
+        for task in build_asset_tasks(
+            platform,
+            brief,
+            plan,
+            draft,
+            image_source=str(preferences.get("image_source") or "manual"),
+            image_search_query=str(
+                preferences.get("image_search_query")
+                or plan.get("image_search_query")
+                or ""
+            ),
+        ):
             session.add(
                 Asset(
                     workspace_id=run.workspace_id,
                     content_item_id=item.id,
                     kind=str(task["type"]),
-                    provider=settings.image_provider
-                    if task["type"] == "image"
-                    else settings.video_provider,
+                    provider=str(task.get("provider") or "manual"),
                     status="planned",
                     prompt=str(task.get("model_input") or draft.get("body") or ""),
                     metadata_json={**task, "content_version": 1},
@@ -205,6 +252,8 @@ def execute_workflow_run(
                 "content_item_id": item.id,
                 "platform": platform,
                 "status": item.status,
+                "quality_score": agent_result.quality_score,
+                "revision_count": agent_result.revision_count,
                 "review": rule_review.to_dict(),
             }
         )
@@ -213,7 +262,17 @@ def execute_workflow_run(
     run.status = "awaiting_review"
     run.completed_at = datetime.now(timezone.utc)
     run.result_json = {
+        "agent_schema_version": 1,
+        "agent_mode": "bounded_content_agent",
         "plan": plan,
+        "style_skill": {
+            "id": style_skill["id"],
+            "source": style_skill["source"],
+            "manifest_sha256": style_skill["manifest_sha256"],
+            "slug": style_skill["manifest"]["slug"],
+            "version": style_skill["manifest"]["version"],
+        },
+        "generation_preferences": preferences,
         "retrieved_knowledge": knowledge_payload,
         "contents": result_items,
         "ai_provenance": provenance.snapshot(),

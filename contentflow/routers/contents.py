@@ -169,6 +169,11 @@ def update_content(
             hashtags=list(item.hashtags),
             call_to_action=item.call_to_action,
             layout_json=dict(item.layout_json or {}),
+            generation_json={
+                **dict(item.generation_json or {}),
+                "last_human_edit_by": principal.user_id,
+                "last_human_edit_at": datetime.now(timezone.utc).isoformat(),
+            },
             changed_by=principal.user_id,
             change_reason="human_edit",
         )
@@ -224,19 +229,52 @@ def review_content(
             )
         )
         for asset in assets:
-            provider = (
-                settings.image_provider
-                if asset.kind == "image"
-                else settings.video_provider
-            )
+            requested_provider = asset.provider
+            if requested_provider == "openverse":
+                asset.status = "queued"
+                asset.error = None
+                enqueue_job(
+                    session,
+                    job_type="asset.search",
+                    payload={"asset_id": asset.id},
+                    workspace_id=principal.workspace_id,
+                    idempotency_key=(
+                        f"asset.search:{asset.id}:content-v{item.version}"
+                    ),
+                )
+                continue
+            if requested_provider == "configured-image-generation":
+                provider = settings.image_provider
+            elif requested_provider == "configured-video-generation":
+                provider = settings.video_provider
+            else:
+                provider = (
+                    settings.image_provider
+                    if asset.kind == "image"
+                    else settings.video_provider
+                )
             asset.provider = provider
             asset.error = None
             if provider == "manual":
-                asset.status = "awaiting_upload"
-                asset.metadata_json = {
-                    **(asset.metadata_json or {}),
-                    "manual_upload_required": True,
-                }
+                if requested_provider in {
+                    "configured-image-generation",
+                    "configured-video-generation",
+                }:
+                    asset.provider = requested_provider
+                    asset.status = "failed"
+                    asset.error = (
+                        "活动要求 AI 生成素材，但当前环境未配置对应生成 Provider"
+                    )
+                    asset.metadata_json = {
+                        **(asset.metadata_json or {}),
+                        "provider_configuration_required": True,
+                    }
+                else:
+                    asset.status = "awaiting_upload"
+                    asset.metadata_json = {
+                        **(asset.metadata_json or {}),
+                        "manual_upload_required": True,
+                    }
                 continue
             asset.status = "queued"
             enqueue_job(

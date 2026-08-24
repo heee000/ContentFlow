@@ -447,3 +447,49 @@
 - 设计依据：沿用仓库 IBM Carbon 风格的单一蓝色、高密度、直角与边框层级；在 `web/DESIGN.md` 固化信息架构、渐进披露和动效纪律，没有引入渐变、发光、浮夸弹跳或假进度。
 - 验证：ESLint、2 项服务器渲染/源契约测试、vinext Sites 构建和 Next.js 生产构建全部通过；TypeScript 通过。远程 Backend 在真实 PostgreSQL/pgvector 与 MinIO 上为 `230 passed, 143 subtests passed`，分支覆盖率 82.69%，Python/npm 审计无已知漏洞；供应链 Artifact `9519101023` 摘要为 `sha256:737dae20923f594ef1858d5d7072392b2e47ae630c5ecb0dc5fe2246c69cc73c`，SLSA 与双 CycloneDX 证明发布后反向验证成功。Codex 内置浏览器在本机因 Windows sandbox `helper_unknown_error` 无法启动，未用非授权的替代浏览器冒充视觉签收。
 - 边界：下一步推荐是基于当前聚合状态的保守规则，不是个性化推荐；复杂历史/多活动并行仍需更细的任务分组。视觉与文案的最终主观验收需真实用户在本地页面完成。
+
+## 2026-08-25 内容工作室 Agent、风格 Skill 与多来源图片阶段
+
+### CF-20260825-01：一次性生成 Prompt 只能产出结构正确但内容单薄的文案
+
+- 状态：实现、本地全量门禁、真实 Prompt Eval 和本地运行栈升级已完成；远程 CI 待本阶段提交后签收。
+- 问题与影响：旧生成链路只有 plan → generate → review 三次独立调用，Prompt 主要约束 JSON 结构与禁用词，没有选题比较、证据账本、平台写作标准、可解释质量维度或编辑修订闭环，导致流程能跑通但正文信息密度和平台原生性不足。
+- 解决方案：新增有界 Content Studio Agent。Plan 必须给出至少三个角度候选、选择理由、内容论点、证据账本、叙事结构、平台策略和媒体方向；Generate 输出平台正文、备选标题、证据使用和素材简报；Review 同时承担事实/品牌安全与 hook、specificity、evidence、platform_native、structure、usefulness、voice、originality、cta 九维编辑评审。深度档位最多定向修订一次，标准档位不修订，禁止无限循环、任意工具和代码执行。
+- 安全选择：只有修订稿规则、安全评审通过且质量不回退时才采用；高分但仍不安全的修订稿永不替换原稿。质量分不能替代人工审核，内容仍停在 needs_review 或 blocked。
+- 追溯：ContentItem/ContentRevision 新增 generation_json，记录 Agent 模式、质量档位、目标/实际分数、修订是否尝试/采用、失败类型、风格版本与清单 SHA-256；人工作品版本继续保留生成来源。
+
+### CF-20260825-02：用户无法选择、安装和冻结写作风格
+
+- 状态：实现和 API/UI/示例回归完成。
+- 根因：Campaign 只有自由文本 tone，没有可复用、可版本化、可审计的写作规则对象；若直接把所谓 Skill 设计成代码插件，又会扩大为租户级远程代码执行。
+- 解决方案：新增工作区 StyleSkill 表、迁移和 API，内置“专业社媒编辑、场景叙事、专业解释型”三种风格。自定义清单只接受固定 JSON 字段 manifest_version/slug/name/version/description/instructions/forbidden_patterns/platform_instructions/examples，限制 64 KiB、语义版本、平台和文本长度，未知字段一律拒绝；不加载 Python、JavaScript、模板代码或任意依赖。
+- 运行边界：活动选择具体 Skill ID；入队时冻结规范化清单与 SHA-256，运行时再次校验，后续停用/升级不改写历史。安装、启用/停用和使用版本均可审计。可安装示例位于 docs/examples/style-skills/warm-city-guide.json，并由测试真实解析。
+
+### CF-20260825-03：素材只有人工或单一生成，缺开放图库和候选选择
+
+- 状态：实现、真实 Openverse 无副作用搜索烟测和本地对象存储选择回归完成；真实计费图片生成 Provider 尚未提供，不能宣称已经生成过真实 AI 图片。
+- 解决方案：Campaign 新增 manual/generate/search/hybrid 四种图片来源。Agent 产出搜索词和生成提示；审核通过后 search 入 asset.search，generate 使用既有中立 HTTP 媒体契约，hybrid 并行建立同一 cover 候选组。未选中的可选候选不会阻塞发布，同组只能显式选中一个。
+- 搜索边界：Openverse 固定 Wikimedia source，只保留 CC0/PDM/BY/BY-SA；API 响应限制 2 MiB、候选 1–12、禁止重定向，下载仅允许精确 upload.wikimedia.org，落地页仅 commons.wikimedia.org，许可页仅 creativecommons.org。用户必须打开原始页面核验并确认许可后才能下载；图片仍经过字节/像素/单帧限制、重编码去元数据、对象摘要和内容版本门禁。数据库失败会尽力删除新写对象。
+- 真实烟测：查询 Beijing city street 返回 2 个 BY-SA 候选，下载域名均为 upload.wikimedia.org，落地页均为 commons.wikimedia.org；未下载、选择或发布任何外部图片。Openverse 许可元数据只作线索，不构成 ContentFlow 的法律保证。
+
+### CF-20260825-04：长文 Agent 暴露 60 秒硬编码和错误的 Eval 正向样本
+
+- 状态：超时配置、Eval 用例和真实治理升级完成。
+- 真实证据：第一次 prompt-r2/eval-v2 在 generate 阶段 60 秒 TimeoutError，系统自动恢复 eval-v1；没有审批或激活失败版本。随后把文本请求超时改为 CONTENTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS，默认 120 秒且只允许 10–300 秒，并透传 API/Worker Compose。
+- 第二次评测不再超时，但 eval-v2 的 Plan 输入未声明 platforms 却要求 platform_strategies.wechat，Review 又对“测试正文”错误要求 passed=true；模型正确缺省平台策略并拒绝空泛正文，结果 failed，系统再次恢复 eval-v1。
+- 修复：eval-v3 明确 goal/audience/platforms=[wechat]，使用包含已确认事实、人工复核边界和 CTA 的正向正文，并要求全部九维评分路径。真实 openai-compatible/deepseek-v4-flash Eval passed；由不同管理员完成套件激活、Prompt 审批和激活。当前 workspace-r2 active、eval-v3 active、generation_ready=true。
+- 边界：Eval 证明三个固定契约样本通过，不证明跨主题质量、稳定延迟、成本、事实正确率或模型漂移已签收。
+
+### CF-20260825-05：可选修订的最终复评失败会丢失已评审原稿
+
+- 状态：代码修复和回归完成；为避免继续消耗真实模型额度，修复后未再自动发起第二条真实深度工作流。
+- 真实发现：现有 CityWalk 活动在新 Prompt 下完成 Plan、初稿、首次 Review 和定向修订，最后一次 Review 返回不可解析 JSON，工作流以 RuntimeError 失败。脱敏 provenance 记录 5 次调用、4 成功 1 失败、总计 60784 个 Provider 上报 Token；没有保存模型正文，没有创建 ContentItem/Asset，更没有微信素材、草稿或发布副作用。
+- 修复：修订是可选增强而非新的单点故障。定向生成或最终复评出现 RuntimeError/TimeoutError 时，保留首次规则与模型评审完成的原稿、原评分和安全状态，记录 revision_attempt_status=failed 与脱敏 error_type；未经最终复评的修订稿绝不采用。初稿或首次安全评审失败仍使工作流失败关闭。
+- 验证：新增高分但不安全修订拒绝、最终复评失败保留原稿、风格示例、候选选择/许可确认/互斥等回归。最终本地 Ruff/compile 通过；后端 234 passed、7 skipped、145 subtests passed，分支覆盖率 80.92%；前端 ESLint、2 项渲染测试、Sites 与 Next 生产构建通过；默认/observability Compose 与备份脚本语法通过。
+
+### 数据迁移、恢复与现场边界
+
+- Alembic head 从 e28a6b9c4f10 升为 1a2b3c4d5e6f，新增 style_skills 表和两处 generation_json；备份/恢复默认门槛同步为 27 张 public 表。
+- 升级前静默联合备份 .contentflow/backups/20260825-010604 已隔离恢复通过：26 表、旧 head、2 个对象。升级后 .contentflow/backups/20260825-010724 再次隔离恢复通过：27 表、新 head、2 个对象。
+- contentflow-live-test 保留 PostgreSQL/MinIO 卷完成迁移；原 1 个活动、2 条内容、6 个发布任务仍在。API database/storage ready、Worker 启动、Web 200。
+- 仍未读取、修改或暂存 knowledge/北京周末 CityWalk 路线助手产品资料.txt；本地 .env、账号文件、模型缓存和备份均不进入 Git。
