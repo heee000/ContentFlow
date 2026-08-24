@@ -234,4 +234,5 @@ ContentFlow 已经从早期可演示原型演进为一个有真实业务主链�
 - 工作台默认主导航改为创建、审核、素材、发布四步，总览只给一个基于真实状态的下一步；知识、渠道、复盘、队列和管理收纳为高级资源。发布页优先显示立即/定时和必要前置项，脚本/人工导出渐进展开；加入 80–180ms 点击、视图和消息反馈，并完整支持 reduced motion。
 - 本地隔离配置下全仓 Ruff 与后端 `223 passed, 7 skipped, 143 subtests passed`；前端 ESLint、2 项渲染契约、Sites 和 Next.js 生产构建通过。自动浏览器视觉验收因本机 Codex Windows 浏览器沙箱初始化故障未执行，仍需用户刷新本地页面完成主观可用性验收。
 - 新版本已在保留 PostgreSQL/MinIO 数据的前提下重建 API、Worker 与 Web，readiness 和运行中 OpenAPI 证明新端点/字段已生效。当前有 4 条旧任务记录 40164、无 external ID 并保持待对账；一条已审核内容已有 2 个 ready 素材，另一条仍等待 1 个素材上传。
+- 实现提交 `b4b23b7` 的 [GitHub CI #32724822598](https://github.com/heee000/ContentFlow/actions/runs/32724822598) 四个 Job 全部成功：真实 PostgreSQL/pgvector 与 MinIO 为 `230 passed, 143 subtests passed`，分支覆盖率 82.69%；前端 lint/test/build/audit、Python 审计、可复现源码、SLSA 与双 CycloneDX 证明均通过。Artifact `9519101023` 摘要为 `sha256:737dae20923f594ef1858d5d7072392b2e47ae630c5ecb0dc5fe2246c69cc73c`。
 - 这些改进提升个人本地使用的可靠性和上手速度，但不新增真实平台成功、公开部署、容量、灾备、IAM 或合规证据，因此分层成熟度比例暂不再次上调。
