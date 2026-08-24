@@ -452,7 +452,7 @@
 
 ### CF-20260825-01：一次性生成 Prompt 只能产出结构正确但内容单薄的文案
 
-- 状态：实现、本地全量门禁、真实 Prompt Eval 和本地运行栈升级已完成；远程 CI 待本阶段提交后签收。
+- 状态：实现、本地全量门禁、真实 Prompt Eval、本地运行栈升级和远程 CI/供应链签收均已完成。
 - 问题与影响：旧生成链路只有 plan → generate → review 三次独立调用，Prompt 主要约束 JSON 结构与禁用词，没有选题比较、证据账本、平台写作标准、可解释质量维度或编辑修订闭环，导致流程能跑通但正文信息密度和平台原生性不足。
 - 解决方案：新增有界 Content Studio Agent。Plan 必须给出至少三个角度候选、选择理由、内容论点、证据账本、叙事结构、平台策略和媒体方向；Generate 输出平台正文、备选标题、证据使用和素材简报；Review 同时承担事实/品牌安全与 hook、specificity、evidence、platform_native、structure、usefulness、voice、originality、cta 九维编辑评审。深度档位最多定向修订一次，标准档位不修订，禁止无限循环、任意工具和代码执行。
 - 安全选择：只有修订稿规则、安全评审通过且质量不回退时才采用；高分但仍不安全的修订稿永不替换原稿。质量分不能替代人工审核，内容仍停在 needs_review 或 blocked。
@@ -493,3 +493,9 @@
 - 升级前静默联合备份 .contentflow/backups/20260825-010604 已隔离恢复通过：26 表、旧 head、2 个对象。升级后 .contentflow/backups/20260825-010724 再次隔离恢复通过：27 表、新 head、2 个对象。
 - contentflow-live-test 保留 PostgreSQL/MinIO 卷完成迁移；原 1 个活动、2 条内容、6 个发布任务仍在。API database/storage ready、Worker 启动、Web 200。
 - 仍未读取、修改或暂存 knowledge/北京周末 CityWalk 路线助手产品资料.txt；本地 .env、账号文件、模型缓存和备份均不进入 Git。
+
+### 远程交付证据
+
+- 实现提交 `9e94d0f58170b3291e9425bfa04ba167a0b3bd8f` 已通过普通 `git push` 同步到 `codex/enterprise-media-runtime`，未使用 force 或 force-with-lease。
+- [ContentFlow CI #32758080637](https://github.com/heee000/ContentFlow/actions/runs/32758080637) 四个 Job 全部成功：真实 PostgreSQL/pgvector 与 MinIO 后端门禁、Python/前端审计、前端 lint/test/build、可复现源码归档、SLSA 来源证明和双 CycloneDX attestation 均已签收。
+- 供应链 Artifact `9531626220` 名为 `contentflow-supply-chain-9e94d0f58170b3291e9425bfa04ba167a0b3bd8f`，摘要为 `sha256:71cc728211a092020ca3a369785c59e8edb6b28cdfd3482c0a558ad0562c75f3`；CI 后端结果与本地一致为 `234 passed, 7 skipped, 145 subtests passed`，分支覆盖率 80.92%。

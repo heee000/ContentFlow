@@ -1642,7 +1642,8 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 新 Prompt 的真实 CityWalk 深度工作流完成前四次模型调用，最终复评 JSON 解析失败；provenance 为 5 次调用、4 成功 1 失败、60784 Provider 上报 Token。没有内容、素材或平台写入。该发现已通过安全降级代码和单元回归修复，但为避免继续消耗真实额度，修复后没有自动再跑第二条真实工作流；下一次用户体验生成即为该路径的最终外部验收。
 - contentflow-live-test 无数据卷清理地从 e28a6b9c4f10/26 表迁移到 1a2b3c4d5e6f/27 表；原 1 个活动、2 条内容、6 个发布任务保留，API database/storage ok、Worker 在线、Web 200。
 - 迁移前备份 20260825-010604（26 表、2 对象）和迁移后备份 20260825-010724（27 表、2 对象）均完成随机临时数据库/bucket 隔离恢复。
-- 最终本地 Ruff、compile、双 Compose 和 PowerShell 语法通过；后端 234 passed、7 skipped、145 subtests passed，覆盖率 80.92%；前端 lint、2 项渲染测试、Sites 与 Next 构建通过。远程 CI 需在本阶段提交后回填。
+- 最终本地 Ruff、compile、双 Compose 和 PowerShell 语法通过；后端 234 passed、7 skipped、145 subtests passed，覆盖率 80.92%；前端 lint、2 项渲染测试、Sites 与 Next 构建通过。
+- 实现提交 `9e94d0f58170b3291e9425bfa04ba167a0b3bd8f` 已普通推送；[CI #32758080637](https://github.com/heee000/ContentFlow/actions/runs/32758080637) 四个 Job 全部成功，Artifact `9531626220` 摘要为 `sha256:71cc728211a092020ca3a369785c59e8edb6b28cdfd3482c0a558ad0562c75f3`，SLSA 与双 CycloneDX attestation 已反向验证。
 
 ### 接手与使用注意
 
