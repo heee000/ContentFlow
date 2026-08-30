@@ -558,6 +558,15 @@
 - 状态：完整实现路线已记录；部署资产、云资源和目标环境证据尚未实施，不能写成已上线。
 - 问题与影响：本机 Worker 的出口由当前网络或代理决定，换网可能再次触发微信 40164；GitHub Pages、Vercel、GitHub Actions、固定 IP 云主机分别能承担什么没有形成明确决策，容易把静态托管或有时限的 Serverless Function 误当成长驻 Worker。
 - 现场证据：2026-08-31 从宿主机与 `contentflow-live-test` Worker 容器测得相同公网出口 `18.183.44.57`，证明当前 Docker Worker 跟随宿主出口，而不是每个 Worker 随机获得公网 IP。该地址只代表当时网络，不是长期固定资源。
-- 解决方案：新增[公网测试部署实现计划](public_test_deployment_plan.md)。测试阶段推荐一个固定公网 IPv4 的境外云主机，用 Caddy 提供同源 HTTPS，初期同机运行 Web/API/Worker/PostgreSQL/MinIO；GitHub 负责源码、CI、GHCR 和受控部署，GitHub Pages 仅可选文档，Vercel 仅作为稳定后的可选前端托管。计划分 M0-M6 规定部署资产、镜像门禁、云环境、真实业务验收、备份回滚和可选 Vercel 拆分。
+- 解决方案：新增[公网测试部署实现计划](public_test_deployment_plan.md)。初版先确定固定公网 IPv4、Caddy 同源 HTTPS、GitHub CI/GHCR 和不把 Worker 放入 Serverless 的边界；随后 CF-20260831-02 用资源/价格实测把运行组合进一步收敛为 Hetzner + 本地 BGE + R2。计划分 M0-M6 规定部署资产、镜像门禁、云环境、真实业务验收、备份回滚和可选 Vercel 拆分。
 - 安全边界：首次公网环境默认新建干净数据、关闭公开注册、只开放 80/443、数据库和对象存储不映射公网；微信公众号保持 `auto_publish=false`，先验收渠道和草稿。真实密钥、平台账号、本地 `.env`、运行数据库及未跟踪知识文件继续排除在 Git 外。
 - 验收门槛：只有 M1-M5 在目标环境完成，同一固定 Worker IP 经两个客户端网络验证、完整内容到微信草稿闭环、联合恢复与镜像回滚各有证据后，才能标记“个人受控公网测试可用”。本次只改变计划和记录，不调整个人公开部署 60%-65% 的完成度估计。
+
+### CF-20260831-02：Embedding 与公网资源方案缺少成本实测和明确选型
+
+- 状态：性价比路线已定案并写入计划；云资源、R2 和目标环境压力/兼容性证据仍待实施。
+- 实测：运行 5 小时后的 `contentflow-live-test` Worker 已加载 BGE-M3，RSS 约 899 MiB；API 约 138 MiB、Web 约 34 MiB、PostgreSQL 约 66 MiB、MinIO 约 247 MiB，容器合计约 1.38 GiB。BGE 缓存 2.2 GiB，后端镜像约 2.47 GB。采样证明 4 GiB 低并发试运行具有现实余量，但不替代索引峰值、OOM、swap 和耐久验收。
+- 决策：首选 Hetzner 欧洲区 CX23 x86（2 vCPU/4 GiB/40 GiB）+ €0.50 Primary IPv4，Worker 继续本地 BGE-M3；移除公网栈 MinIO，使用 Cloudflare R2 业务 Bucket 和独立加密备份 Bucket；Web/API/Worker/PostgreSQL/Caddy 同机。按 2026-06-15 后官方价格，主机加 IPv4 约 €5.99/月，未含税、域名和文本模型用量。
+- Embedding 边界：不因为“云部署”就自动改 API。Hetzner 最低推荐档已经是 4 GiB，本地 BGE 不增加套餐费用，且保留当前中文向量行为与数据边界。API 仅在 2 GiB 后备主机、持续 OOM、多 Worker 或真实检索评测更优时启用；优先验证 $0.02/百万 Token 的 `text-embedding-3-small` 1024 维路径。
+- 代码缺口：当前 OpenAI-compatible Embedding 和文本生成共用 `MODEL_API_BASE/KEY`。进入 API 后备前必须增加独立、供应商中立的 Embedding Base/Key，并为模型切换建立全量重索引/索引代际，禁止混合不同模型向量。
+- 存储边界：R2 官方声明 S3 兼容且 Standard 免费额度为 10 GB-month、100 万 Class A、1000 万 Class B和免费出口，但 ContentFlow 仍需真实验证 HeadBucket、上传/Metadata、读取、删除、分段和上限；通过前不能写成 R2 已签收。

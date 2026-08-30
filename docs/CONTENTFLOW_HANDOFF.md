@@ -1694,7 +1694,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 ### 已确认的路线
 
 1. 当前目标是个人、非商业、受控公网测试，不要求中国大陆可用，不开放匿名注册，也不把结果表述为公开 Beta 或商业上线。
-2. 首次上线推荐固定公网 IPv4 的境外云主机：Caddy 作为唯一 80/443 入口，同源反代 Next.js 与 FastAPI；API、Worker、PostgreSQL/pgvector、MinIO 和初期 Web 在 Docker 内网运行。该固定 IP 加入微信公众号白名单，从而不受用户本机换网影响。
+2. 首次上线推荐固定公网 IPv4 的境外云主机：Caddy 作为唯一 80/443 入口，同源反代 Next.js 与 FastAPI；该固定 IP 加入微信公众号白名单，从而不受用户本机换网影响。初版曾保留同机 MinIO，当前具体组合已由 21.36 收敛为 R2，不再以本条初版为准。
 3. GitHub 承担源码、CI、GHCR 镜像、Release 和受控部署，不承担长期服务运行。GitHub Pages 只能可选发布静态说明/文档。
 4. Vercel 只作为 M6 可选前端托管；常驻数据库队列 Worker、BGE-M3 模型缓存、对象存储和微信公众号发布连接器不迁入 Vercel Functions。拆分前端时必须使用同一注册域的 Web/API HTTPS 子域并重新验证 Cookie/CORS/CSP。
 5. 完整 M0-M6 路线、文件清单、初始化、真实业务验收、备份、监控和回滚门槛见 [公网测试部署实现计划](public_test_deployment_plan.md)。
@@ -1702,7 +1702,24 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 ### 当前现场与后续规则
 
 - 2026-08-31 宿主机和 `contentflow-live-test` Worker 当时的公网出口均为 `18.183.44.57`；它只适用于当前网络，不是项目持有的固定地址。不得把它写入长期部署模板。
-- 规划记录不等于已上线，当前个人公开部署完成度仍保持约 60%-65%。先在仓库完成 `deploy/public-test`、GHCR 镜像和手动批准部署工作流；实际创建云资源时再向用户索取云账号/受限入口、域名、BGE 部署选择和预算。
+- 规划记录不等于已上线，当前个人公开部署完成度仍保持约 60%-65%。先在仓库完成 `deploy/public-test`、GHCR 镜像和手动批准部署工作流；实际创建云资源时再向用户索取云账号/受限入口、域名、R2 和预算。Embedding 默认继续本地 BGE，不再作为前置选择。
 - 首次公网环境默认新建干净数据库和对象，不直接复制本机历史任务与账号；如用户明确要求迁移，PostgreSQL dump、MinIO 对象和凭据解密密钥必须作为原子迁移单元先做隔离恢复。
 - 公网测试初期保持 `CONTENTFLOW_ALLOW_REGISTRATION=false`（初始化短窗口除外）和微信公众号 `auto_publish=false`；真实公开发布仍需单独授权。
 - 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、平台账密、模型缓存、备份和运行数据继续排除。
+
+## 21.36 公网测试性价比与 Embedding 选型增量交接
+
+### 定案
+
+1. 公网个人测试优先使用 Hetzner 欧洲区 CX23 x86（2 vCPU/4 GiB/40 GiB）和 Primary IPv4；按 2026-06-15 后官方价约 €5.49 + €0.50 IPv4/月，未含税。若 Hetzner 账号/支付/资源不可用，再退到 AWS Lightsail。
+2. 不默认改 Embedding API。当前已加载 BGE-M3 的 Worker 实测约 899 MiB，API/Web/PostgreSQL/MinIO 分别约 138/34/66/247 MiB，完整容器约 1.38 GiB；BGE 缓存 2.2 GiB、后端镜像约 2.47 GB。4 GiB 是需要峰值验收的测试起点，不是容量承诺。
+3. 公网栈移除同机 MinIO，业务对象和加密 PostgreSQL 备份使用两个隔离的 Cloudflare R2 Bucket/Token。官方 S3 兼容与免费额度不替代真实 ContentFlow 操作矩阵，R2 未签收前保留 MinIO 回退。
+4. Web、API、Worker、PostgreSQL 和 Caddy 同机，不用 Vercel；Web 当前约 34 MiB，不值得为个人测试增加跨域 Cookie 与第二套部署面。固定 IPv4 作为微信唯一白名单出口。
+5. 详细成本、升级阈值、R2 验收、BGE offline 缓存、AWS 后备和 M0-M6 路线已更新到 [公网测试部署实现计划](public_test_deployment_plan.md)。
+
+### API 后备规则
+
+- 只有 Hetzner 不可用而选择 2 GiB 主机、BGE 持续 OOM/高 swap、多 Worker 扩展或真实中文召回评测更优时才切 Embedding API。
+- 当前适配器会发送 `dimensions=1024`，数据库结构可兼容支持缩短维度的模型；切换模型仍必须重建全部知识向量，禁止混用。
+- 当前 Embedding 与文本共用 `CONTENTFLOW_MODEL_API_BASE/KEY`。若文本继续 DeepSeek、Embedding 使用其他服务，先增加独立的供应商中立 Embedding Base/Key 配置和安全校验，不要覆盖文本 Provider 配置。
+- API 后备优先验证 `text-embedding-3-small`；官方价 $0.02/百万输入 Token。价格低不等于中文 RAG 已签收，仍需检索金标、时延、限流、账单和失败恢复证据。
