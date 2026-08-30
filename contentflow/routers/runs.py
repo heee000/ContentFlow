@@ -26,6 +26,22 @@ Editor = Annotated[Principal, Depends(require_role("editor"))]
 RunLimit = Annotated[int, Query(ge=1, le=100)]
 
 
+@router.get("/runs", response_model=list[WorkflowRunResponse])
+def list_workspace_runs(
+    principal: CurrentPrincipal,
+    session: Db,
+    limit: RunLimit = 100,
+):
+    return list(
+        session.scalars(
+            select(WorkflowRun)
+            .where(WorkflowRun.workspace_id == principal.workspace_id)
+            .order_by(WorkflowRun.created_at.desc())
+            .limit(limit)
+        )
+    )
+
+
 @router.get("/campaigns/{campaign_id}/runs", response_model=list[WorkflowRunResponse])
 def list_runs(
     campaign_id: str,

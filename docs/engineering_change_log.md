@@ -499,3 +499,34 @@
 - 实现提交 `9e94d0f58170b3291e9425bfa04ba167a0b3bd8f` 已通过普通 `git push` 同步到 `codex/enterprise-media-runtime`，未使用 force 或 force-with-lease。
 - [ContentFlow CI #32758080637](https://github.com/heee000/ContentFlow/actions/runs/32758080637) 四个 Job 全部成功：真实 PostgreSQL/pgvector 与 MinIO 后端门禁、Python/前端审计、前端 lint/test/build、可复现源码归档、SLSA 来源证明和双 CycloneDX attestation 均已签收。
 - 供应链 Artifact `9531626220` 名为 `contentflow-supply-chain-9e94d0f58170b3291e9425bfa04ba167a0b3bd8f`，摘要为 `sha256:71cc728211a092020ca3a369785c59e8edb6b28cdfd3482c0a558ad0562c75f3`；CI 后端结果与本地一致为 `234 passed, 7 skipped, 145 subtests passed`，分支覆盖率 80.92%。
+
+## 2026-08-30 真实进度、素材待办与项目辨识阶段
+
+### CF-20260830-01：内容生成只有笼统状态，无法判断是否卡住
+
+- 状态：实现、本地回归、生产构建与公开登录页浏览器验收完成；提交、远程 CI 与重新登录后的业务页主观验收待本阶段后续回填。
+- 问题与影响：工作流只在知识检索、策划、内容生成和人工审核之间保存粗粒度状态；内容 Agent 最耗时的初稿、编辑评审、定向改写与最终复核都显示为同一个“生产中”，用户无法区分正常等待、阶段推进和故障。
+- 根因：Content Agent 没有向工作流暴露阶段回调，前端也没有工作区级运行查询和一致的异步反馈组件。
+- 解决方案：Agent 在每个平台模型调用前发出 `drafting/reviewing/revising/final_review` 阶段；工作流附加当前平台序号与总平台数，并用独立短事务只更新 `WorkflowRun.current_stage`，不提前提交内容、素材或审计行。新增工作区级 `GET /runs`，Web 在真实活动期间 2.5 秒轮询，显示平台、阶段名称、序号、说明、转圈和单调递增的真实阶段映射进度；未知时长素材任务只显示不确定进度，不伪造 ETA。
+- 涉及文件：`contentflow/content_agent.py`、`contentflow/workflow_service.py`、`contentflow/routers/runs.py`、`web/app/contentflow-app.tsx`、`web/app/globals.css`、`tests/test_content_agent.py`、`tests/test_api_v2.py` 及设计/架构/手册。
+- 当前验证：Content Agent 阶段顺序单元测试通过；工作区运行查询与 Job 上下文 API 回归通过；失败 AI provenance 和完整 Worker 流程在隔离 `hash/local/无 Prompt 门禁` 测试配置下通过，证明短事务没有破坏失败恢复或最终事务提交。本地完整回归为 `234 passed, 7 skipped, 145 subtests passed`，前端 ESLint、`tsc --noEmit --incremental false`、2 项源码/SSR 测试和生产 Next 构建通过；Compose 新容器 readiness/database/storage 与启动日志正常。
+- 剩余边界：百分比表示已进入的离散阶段，不是模型内部 Token 进度；Worker 进程被强杀时仍依赖租约/超时与任务队列恢复，不保证阶段持续更新。
+
+### CF-20260830-02：“准备素材”混合系统工作和人工工作
+
+- 状态：实现、静态验证、生产构建和公开登录页响应式验收完成；Docker 重建使既有会话过期，认证后素材页主观验收待用户重新登录后完成。
+- 问题与影响：旧素材页直接呈现上传表单、候选图和全量表格，用户不知道哪些任务系统会自动完成、何时必须介入、为何上传以及应上传什么。
+- 根因：页面按数据类型组织，没有按责任主体和下一步组织；人工素材占位的业务原因只存在于后端状态与元数据中。
+- 解决方案：素材页固定为“系统处理中 / 等你操作 / 已就绪”三段，分别给出数量和责任说明；系统生成/检索带自动刷新与不确定进度；人工待办解释真实品牌素材不可凭空获得或活动主动选择人工模式，并把按钮定位到已绑定项目/当前版本的上传表单。表单解释为什么、上传什么、完成后怎样，显示接受类型和授权提示；候选图继续要求原始许可页面核验。
+- 涉及文件：`web/app/contentflow-app.tsx`、`web/app/globals.css`、`web/DESIGN.md`、`docs/user_manual.md`、`docs/architecture.md`。
+- 剩余边界：界面能说明技术与流程责任，不能判断用户是否真正拥有素材版权，也不能替代品牌视觉审核、恶意文件扫描和普通视频内容探测。
+
+### CF-20260830-03：相似活动跨页面和队列容易混淆
+
+- 状态：实现、API 回归、前端静态验证与生产构建完成；提交与 CI 待回填。
+- 问题与影响：审核、素材、发布、复盘和任务队列主要显示内容标题或任务类型，多个名称相近的测试活动很难区分，误操作风险随并行项目增加。
+- 根因：Job 响应没有非敏感业务归属；前端没有稳定项目展示编号和全局作用域过滤。
+- 解决方案：每个 Campaign 由既有 UUID 派生稳定显示编号 `CF-XXXXXX`，不新增可冲突业务 ID；顶部项目筛选统一约束活动、运行、内容、素材、发布和任务，总览按过滤后的实体重算。复盘请求使用 `campaign_id`，后端经 `MetricSnapshot → PublishJob → ContentItem` 关联并重复施加工作区边界，避免只在浏览器过滤造成数据误读或跨工作区引用。审核、素材、发布、复盘与 Job 同时显示编号、活动、产品和内容标题。Job API 先批量解析运行/素材/发布引用，再按工作区查询关联对象并只返回 `JobContextResponse`；原始 payload 继续不对前端暴露，避免 N+1 与敏感字段泄漏。
+- 涉及文件：`contentflow/routers/jobs.py`、`contentflow/routers/metrics.py`、`contentflow/schemas.py`、`web/app/contentflow-app.tsx`、`web/app/globals.css`、`tests/test_api_v2.py` 及文档。
+- 当前验证：API 测试断言最新 workflow Job 返回正确 campaign/product context 且不含 `payload_json`，并验证项目指标筛选只汇总关联 Campaign；前端 TypeScript/ESLint 通过。公开登录页在桌面 1674px 和移动 375px 视口均无横向溢出，控制台无 warning/error；既有登录会话在容器重建后过期，因此未伪造认证后点击证据。未知未跟踪知识文件、本地 `.env`、账号凭据、模型缓存和运行数据库均未读取或暂存。
+- 剩余边界：`CF-XXXXXX` 是便于人工辨识的短展示码，不是数据库唯一键或外部 API 标识；极低概率前缀碰撞仍由完整 UUID 与项目名称共同消歧。

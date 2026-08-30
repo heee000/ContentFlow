@@ -505,6 +505,15 @@ class MetricInput(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class JobContextResponse(BaseModel):
+    campaign_id: str | None = None
+    campaign_name: str | None = None
+    product_name: str | None = None
+    content_item_id: str | None = None
+    content_title: str | None = None
+    platform: str | None = None
+
+
 class JobResponse(ORMModel):
     id: str
     job_type: str
@@ -514,6 +523,7 @@ class JobResponse(ORMModel):
     run_at: datetime
     last_error: str | None
     result_json: dict[str, Any]
+    context: JobContextResponse = Field(default_factory=JobContextResponse)
     created_at: datetime
     updated_at: datetime
 

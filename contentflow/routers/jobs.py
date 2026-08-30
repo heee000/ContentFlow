@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..dependencies import CurrentPrincipal, Principal, require_role
-from ..entities import Job, PublishJob
-from ..schemas import JobResponse
+from ..entities import Asset, Campaign, ContentItem, Job, PublishJob, WorkflowRun
+from ..schemas import JobContextResponse, JobResponse
 
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -22,7 +22,122 @@ def list_jobs(principal: CurrentPrincipal, session: Db, status: str | None = Non
     query = select(Job).where(Job.workspace_id == principal.workspace_id)
     if status:
         query = query.where(Job.status == status)
-    return list(session.scalars(query.order_by(Job.created_at.desc()).limit(200)))
+    jobs = list(session.scalars(query.order_by(Job.created_at.desc()).limit(200)))
+    run_ids = {
+        str(job.payload_json.get("run_id"))
+        for job in jobs
+        if job.job_type == "workflow.execute" and job.payload_json.get("run_id")
+    }
+    asset_ids = {
+        str(job.payload_json.get("asset_id"))
+        for job in jobs
+        if job.job_type.startswith("asset.") and job.payload_json.get("asset_id")
+    }
+    publish_job_ids = {
+        str(job.payload_json.get("publish_job_id"))
+        for job in jobs
+        if job.payload_json.get("publish_job_id")
+    }
+    runs = (
+        {
+            item.id: item
+            for item in session.scalars(
+                select(WorkflowRun).where(
+                    WorkflowRun.workspace_id == principal.workspace_id,
+                    WorkflowRun.id.in_(run_ids),
+                )
+            )
+        }
+        if run_ids
+        else {}
+    )
+    assets = (
+        {
+            item.id: item
+            for item in session.scalars(
+                select(Asset).where(
+                    Asset.workspace_id == principal.workspace_id,
+                    Asset.id.in_(asset_ids),
+                )
+            )
+        }
+        if asset_ids
+        else {}
+    )
+    publish_jobs = (
+        {
+            item.id: item
+            for item in session.scalars(
+                select(PublishJob).where(
+                    PublishJob.workspace_id == principal.workspace_id,
+                    PublishJob.id.in_(publish_job_ids),
+                )
+            )
+        }
+        if publish_job_ids
+        else {}
+    )
+    content_ids = {
+        item.content_item_id for item in assets.values() if item.content_item_id
+    } | {item.content_item_id for item in publish_jobs.values()}
+    contents = (
+        {
+            item.id: item
+            for item in session.scalars(
+                select(ContentItem).where(
+                    ContentItem.workspace_id == principal.workspace_id,
+                    ContentItem.id.in_(content_ids),
+                )
+            )
+        }
+        if content_ids
+        else {}
+    )
+    campaign_ids = {item.campaign_id for item in runs.values()} | {
+        item.campaign_id for item in contents.values()
+    }
+    campaigns = (
+        {
+            item.id: item
+            for item in session.scalars(
+                select(Campaign).where(
+                    Campaign.workspace_id == principal.workspace_id,
+                    Campaign.id.in_(campaign_ids),
+                )
+            )
+        }
+        if campaign_ids
+        else {}
+    )
+
+    responses: list[JobResponse] = []
+    for job in jobs:
+        payload = dict(job.payload_json or {})
+        content = None
+        campaign = None
+        if job.job_type == "workflow.execute":
+            run = runs.get(str(payload.get("run_id") or ""))
+            campaign = campaigns.get(run.campaign_id) if run else None
+        elif job.job_type.startswith("asset."):
+            asset = assets.get(str(payload.get("asset_id") or ""))
+            content = contents.get(asset.content_item_id) if asset else None
+        elif payload.get("publish_job_id"):
+            publish_job = publish_jobs.get(str(payload["publish_job_id"]))
+            content = contents.get(publish_job.content_item_id) if publish_job else None
+        if content is not None:
+            campaign = campaigns.get(content.campaign_id)
+        context = JobContextResponse(
+            campaign_id=campaign.id if campaign else None,
+            campaign_name=campaign.name if campaign else None,
+            product_name=campaign.product_name if campaign else None,
+            content_item_id=content.id if content else None,
+            content_title=content.title if content else None,
+            platform=content.platform if content else None,
+        )
+        responses.append(
+            JobResponse.model_validate(job).model_copy(update={"context": context})
+        )
+    return responses
 
 
 @router.post("/{job_id}/retry", response_model=JobResponse)
@@ -60,4 +175,3 @@ def retry_job(job_id: str, principal: Editor, session: Db):
     job.attempts = 0
     job.last_error = None
     return job
-

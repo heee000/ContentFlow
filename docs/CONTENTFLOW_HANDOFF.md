@@ -1653,3 +1653,21 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 最新真实 Prompt 已生效；不要直接改数据库 Prompt 正文。后续变更继续走 Eval 套件、目标模型运行、双人审批与激活。
 - 失败的真实 run 5ff6da16-a534-4953-9982-378316b3795e 是保留的审计证据，不要把它手工改成成功或通用重试；创建新运行即可使用安全降级代码。
 - 未跟踪 knowledge/北京周末 CityWalk 路线助手产品资料.txt 继续视为用户私有文件，禁止读取、暂存、提交或删除。
+
+## 21.33 真实生成进度、素材责任分层与项目辨识增量交接
+
+### 本轮实现
+
+1. `WorkflowRun.current_stage` 新增可观察的真实细阶段：知识检索、策划、逐平台初稿、编辑评审、定向修订、最终复核和人工审核。平台内阶段附带 `当前序号/总平台数`，Web 据此保持多平台进度单调递增。阶段在模型调用前由独立短事务持久化；内容、素材和审计仍在主工作流成功时统一提交，不能为了进度提前暴露半成品。
+2. 新增当前工作区运行列表 `GET /api/v1/runs?limit=100`。Web 有活动运行或素材任务时每 2.5 秒刷新，否则 15 秒；顶部与活动卡片显示转圈、阶段文本和离散阶段进度，不显示虚构 ETA。
+3. 素材中心按“系统处理中 / 等你操作 / 已就绪”分层。人工上传待办明确解释原因、接受文件、目标项目/内容版本和完成后的发布门禁；生成/检索只显示不确定进度并自动刷新。
+4. 每个 Campaign 使用稳定展示码 `CF-XXXXXX`；顶部可按项目过滤。总览在前端按同一作用域重算，`GET /api/v1/metrics/summary?campaign_id=...` 在后端通过发布记录与内容关联做工作区受限汇总；审核、素材、发布、数据复盘和任务队列携带项目、产品和内容上下文，减少相似测试活动误操作。
+5. Job API 通过工作区受限的批量关联查询补充只读 `context`，仍不返回 `payload_json`。原始 payload 可能包含内部引用，禁止为了前端方便重新暴露。
+
+### 当前验证与接手注意
+
+- 本地隔离回归合计 `234 passed, 7 skipped, 145 subtests passed`；前端 ESLint、无增量 TypeScript、2 项源码/服务端渲染测试和生产 Next 构建均通过。Compose 只重建 API、Worker、Web，保留 PostgreSQL/MinIO 数据卷；API readiness 返回 database/storage `ok`，Web HTTP 200，Worker 启动无错误。
+- 浏览器签收确认桌面和 375px 移动登录页无横向溢出、控制台无 warning/error。Docker 重建后既有登录会话已过期，未猜测密码、改数据库或新建污染性账号；认证后业务页的最终主观走查仍需用户重新登录后完成，不得把本轮写成已做真实点击验收。
+- 本机 `.env` 启用了真实 BGE、MinIO 和 Prompt 门禁，直接跑隔离测试会污染默认值；测试时只用进程级 `CONTENTFLOW_EMBEDDING_PROVIDER=hash`、`CONTENTFLOW_STORAGE_BACKEND=local`、`CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=false` 覆盖，禁止改写真实 `.env`。
+- 继续排除 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`、`.env`、模型缓存、备份和运行数据。微信渠道保持 `auto_publish=false`；本轮没有调用任何平台接口，也没有创建素材、草稿或公开发布副作用。
+- 提交和远程 CI 证据尚未回填时，不得把本轮状态写成已远程签收。

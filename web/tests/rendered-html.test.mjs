@@ -113,7 +113,14 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /该脚本尝试已过期/);
   assert.match(app, /生成记录/);
   assert.match(app, /提示词版本/);
-  assert.match(app, /runs\?limit=5/);
+  assert.match(app, /runs\?limit=100/);
+  assert.match(app, /系统处理中/);
+  assert.match(app, /等你操作/);
+  assert.match(app, /为什么需要你上传/);
+  assert.match(app, /GenerationProgress/);
+  assert.match(app, /平台 \$\{index\} \/ \$\{total\}/);
+  assert.match(app, /projectCode/);
+  assert.match(app, /按项目筛选当前工作台/);
   assert.match(css, /--blue:\s*#0f62fe/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(css, /transition-duration:\s*0\.01ms/);

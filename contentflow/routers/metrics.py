@@ -3,14 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..db import get_db
 from ..dependencies import CurrentPrincipal, Principal, require_role
-from ..entities import MetricSnapshot, PublishJob
+from ..entities import ContentItem, MetricSnapshot, PublishJob
 from ..job_queue import enqueue_job
 from ..schemas import JobResponse, MetricInput
 
@@ -56,17 +56,36 @@ def ingest_metric(payload: MetricInput, principal: Editor, session: Db):
 
 
 @router.get("/summary")
-def metrics_summary(principal: CurrentPrincipal, session: Db):
-    rows = session.execute(
-        select(
-            func.count(MetricSnapshot.id),
-            func.sum(MetricSnapshot.impressions),
-            func.sum(MetricSnapshot.clicks),
-            func.sum(MetricSnapshot.likes),
-            func.sum(MetricSnapshot.comments),
-            func.sum(MetricSnapshot.shares),
-        ).where(MetricSnapshot.workspace_id == principal.workspace_id)
-    ).one()
+def metrics_summary(
+    principal: CurrentPrincipal,
+    session: Db,
+    campaign_id: str | None = Query(default=None, min_length=1, max_length=36),
+):
+    statement = select(
+        func.count(MetricSnapshot.id),
+        func.sum(MetricSnapshot.impressions),
+        func.sum(MetricSnapshot.clicks),
+        func.sum(MetricSnapshot.likes),
+        func.sum(MetricSnapshot.comments),
+        func.sum(MetricSnapshot.shares),
+    ).where(MetricSnapshot.workspace_id == principal.workspace_id)
+    if campaign_id:
+        statement = (
+            statement.join(
+                PublishJob,
+                PublishJob.id == MetricSnapshot.publish_job_id,
+            )
+            .join(
+                ContentItem,
+                ContentItem.id == PublishJob.content_item_id,
+            )
+            .where(
+                PublishJob.workspace_id == principal.workspace_id,
+                ContentItem.workspace_id == principal.workspace_id,
+                ContentItem.campaign_id == campaign_id,
+            )
+        )
+    rows = session.execute(statement).one()
     sample_count = int(rows[0] or 0)
     impressions = float(rows[1] or 0)
     clicks = float(rows[2] or 0)

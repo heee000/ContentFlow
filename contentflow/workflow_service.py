@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from .ai_provenance import AIProvenanceRecorder
@@ -55,8 +56,7 @@ def campaign_generation_preferences(campaign: Campaign) -> dict:
         ),
         "image_source": (
             stored.get("image_source")
-            if stored.get("image_source")
-            in {"manual", "generate", "search", "hybrid"}
+            if stored.get("image_source") in {"manual", "generate", "search", "hybrid"}
             else "manual"
         ),
         "image_search_query": str(stored.get("image_search_query") or "").strip(),
@@ -93,11 +93,23 @@ def execute_workflow_run(
     run.status = "running"
     run.current_stage = "knowledge_retrieval"
     run.started_at = datetime.now(timezone.utc)
-    session.flush()
+    session.commit()
+
+    def publish_stage(stage: str) -> None:
+        """Persist observable progress without committing partial content rows."""
+        with Session(session.get_bind()) as progress_session:
+            progress_session.execute(
+                update(WorkflowRun)
+                .where(
+                    WorkflowRun.id == run.id,
+                    WorkflowRun.workspace_id == run.workspace_id,
+                )
+                .values(current_stage=stage)
+            )
+            progress_session.commit()
 
     brief_raw = dict(
-        run.request_json.get("campaign_brief_snapshot")
-        or campaign_to_brief(campaign)
+        run.request_json.get("campaign_brief_snapshot") or campaign_to_brief(campaign)
     )
     preferences = dict(
         run.request_json.get("generation_preferences")
@@ -138,8 +150,8 @@ def execute_workflow_run(
         prompt_set=prompt_set,
     )
     run.provider = provenance.provider_name
-    run.current_stage = "planning"
-    session.flush()
+    session.commit()
+    publish_stage("planning")
     plan = provenance.complete_json(
         "plan",
         {
@@ -151,15 +163,15 @@ def execute_workflow_run(
         },
     )
 
-    run.current_stage = "content_generation"
-    session.flush()
     requested_platforms = set(
         run.request_json.get("regenerate_platforms") or brief.platforms
     )
+    platforms_to_generate = [
+        platform for platform in brief.platforms if platform in requested_platforms
+    ]
+    platform_count = len(platforms_to_generate)
     result_items = []
-    for platform in brief.platforms:
-        if platform not in requested_platforms:
-            continue
+    for platform_index, platform in enumerate(platforms_to_generate, start=1):
         agent_result = run_content_agent(
             provenance=provenance,
             brief=brief,
@@ -169,6 +181,9 @@ def execute_workflow_run(
             style_skill=style_skill,
             style_notes=str(preferences.get("style_notes") or ""),
             quality_profile=str(preferences.get("quality_profile") or "deep"),
+            on_stage=lambda stage, index=platform_index: publish_stage(
+                f"{stage}__{index}_of_{platform_count}"
+            ),
         )
         draft = agent_result.draft
         rule_review = agent_result.rule_review
@@ -189,9 +204,7 @@ def execute_workflow_run(
                 draft.get("layout") if isinstance(draft.get("layout"), dict) else {}
             ),
             status=(
-                "needs_review"
-                if rule_review.passed and safety_passed
-                else "blocked"
+                "needs_review" if rule_review.passed and safety_passed else "blocked"
             ),
             source_chunk_ids=[chunk.chunk_id for chunk in retrieved],
             review_json={

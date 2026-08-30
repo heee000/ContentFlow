@@ -26,12 +26,15 @@ ContentFlow uses a restrained enterprise application system inspired by IBM Carb
 - The dashboard computes one evidence-based next action from real workflow state. It never claims completion from fake or inferred platform success.
 - Forms reveal common choices first. Scheduling, script fallback and manual export are progressive options, while safety warnings remain visible at the decision point.
 - On phones, the four workflow stages remain directly reachable and secondary tools move into one native “more” selector.
+- Every campaign receives a stable `CF-XXXXXX` project code. The utility header can scope the workspace to one project, and project code, campaign, product and content title travel together through review, assets, publishing, metrics and jobs.
+- Asset preparation uses three explicit lanes: system processing, action required and ready. Manual upload explains why human input is required, the exact file expected and what becomes unblocked after validation.
 
 ## Motion and interaction
 
 - Motion communicates input, navigation or state change only: 80–180ms button press, view entrance and toast arrival.
 - Pressed controls move by at most 1px; selection uses borders and surface changes, never glow or ornamental bounce.
 - Loading state stays explicit and disables duplicate submission. Success, failure, retry-safe and reconciliation-required remain text-labelled.
+- Known workflow stages use persisted backend stage progress; unknown-duration asset work uses an indeterminate activity indicator. Neither may invent elapsed percentages, ETA or platform success.
 - `prefers-reduced-motion` reduces animations and transitions to effectively zero.
 
 ## Anti-patterns

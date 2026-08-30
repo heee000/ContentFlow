@@ -231,6 +231,14 @@ type QueueJob = {
   run_at: string;
   last_error: string | null;
   updated_at: string;
+  context: {
+    campaign_id: string | null;
+    campaign_name: string | null;
+    product_name: string | null;
+    content_item_id: string | null;
+    content_title: string | null;
+    platform: string | null;
+  };
 };
 
 type DashboardSummary = {
@@ -483,6 +491,7 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
 type DataState = {
   dashboard: DashboardSummary;
   campaigns: Campaign[];
+  runs: WorkflowRun[];
   styleSkills: StyleSkill[];
   contents: Content[];
   assets: Asset[];
@@ -508,6 +517,7 @@ const EMPTY_DATA: DataState = {
     jobs_failed: 0,
   },
   campaigns: [],
+  runs: [],
   styleSkills: [],
   contents: [],
   assets: [],
@@ -712,8 +722,149 @@ function StatusBadge({ value }: { value: string }) {
             value === "scheduled"
           ? "info"
           : "neutral";
+  const animated = ["processing", "running", "queued", "generating", "indexing", "retry"].includes(value);
   return (
-    <span className={`status status-${semantic}`}>{STATUS[value] || value}</span>
+    <span className={`status status-${semantic} ${animated ? "status-animated" : ""}`}>
+      {animated ? <span className="status-spinner" aria-hidden="true" /> : null}
+      {STATUS[value] || value}
+    </span>
+  );
+}
+
+const ACTIVE_RUN_STATUSES = new Set(["queued", "running"]);
+
+function projectCode(id: string): string {
+  return `CF-${id.replaceAll("-", "").slice(0, 6).toUpperCase()}`;
+}
+
+function runStageMeta(run: WorkflowRun) {
+  if (run.status === "awaiting_review" || run.current_stage === "human_review") {
+    return { label: "生成完成，等待人工审核", detail: "内容与质量报告已保存", progress: 100, step: "7 / 7" };
+  }
+  if (run.status === "failed" || run.current_stage === "failed") {
+    return { label: "生成失败", detail: "查看错误后修复，再创建新的生成批次", progress: 100, step: "已停止" };
+  }
+  const stage = run.current_stage || "queued";
+  const platformStage = stage.match(
+    /^(final_review|drafting|reviewing|revising)_([a-z0-9-]+)__(\d+)_of_(\d+)$/,
+  );
+  if (platformStage) {
+    const phaseMetaByName = {
+      drafting: { label: "正在撰写平台初稿…", detail: "根据选定角度、知识与风格生成正文", fraction: 0.18, step: "3 / 7" },
+      reviewing: { label: "正在编辑与安全评审…", detail: "检查事实边界、平台表达与 9 项质量指标", fraction: 0.48, step: "4 / 7" },
+      revising: { label: "正在定向改写…", detail: "只修正评审指出的问题，最多 1 次", fraction: 0.72, step: "5 / 7" },
+      final_review: { label: "正在复核改写稿…", detail: "确认安全与质量没有回退", fraction: 0.9, step: "6 / 7" },
+    } as const;
+    const phase = platformStage[1] as keyof typeof phaseMetaByName;
+    const [, , platform, indexRaw, totalRaw] = platformStage;
+    const index = Number(indexRaw);
+    const total = Math.max(Number(totalRaw), 1);
+    const phaseMeta = phaseMetaByName[phase];
+    const platformName = PLATFORM[platform] || platform;
+    const progress = Math.round(34 + ((index - 1 + phaseMeta.fraction) / total) * 60);
+    return {
+      label: `${platformName}：${phaseMeta.label}`,
+      detail: phaseMeta.detail,
+      progress,
+      step: `平台 ${index} / ${total} · ${phaseMeta.step}`,
+    };
+  }
+  if (stage.startsWith("final_review_")) {
+    return { label: "正在复核改写稿…", detail: "确认安全与质量没有回退", progress: 88, step: "6 / 7" };
+  }
+  if (stage.startsWith("revising_")) {
+    return { label: "正在定向改写…", detail: "只修正评审指出的问题，最多 1 次", progress: 76, step: "5 / 7" };
+  }
+  if (stage.startsWith("reviewing_")) {
+    return { label: "正在编辑与安全评审…", detail: "检查事实边界、平台表达与 9 项质量指标", progress: 64, step: "4 / 7" };
+  }
+  if (stage.startsWith("drafting_") || stage === "content_generation") {
+    return { label: "正在撰写平台初稿…", detail: "根据选定角度、知识与风格生成正文", progress: 50, step: "3 / 7" };
+  }
+  if (stage === "planning") {
+    return { label: "正在比较选题角度…", detail: "建立证据账本、结构和素材方向", progress: 34, step: "2 / 7" };
+  }
+  if (stage === "knowledge_retrieval") {
+    return { label: "正在检索项目知识…", detail: "只使用当前工作区可访问的资料", progress: 20, step: "1 / 7" };
+  }
+  return { label: "等待 Worker 接手…", detail: "任务已安全入队，可以离开当前页面", progress: 8, step: "排队" };
+}
+
+function ProjectIdentity({
+  campaign,
+  context,
+  contentTitle,
+  fallbackCampaignId,
+  compact = false,
+}: {
+  campaign?: Campaign | null;
+  context?: QueueJob["context"];
+  contentTitle?: string | null;
+  fallbackCampaignId?: string | null;
+  compact?: boolean;
+}) {
+  const id = campaign?.id || context?.campaign_id || fallbackCampaignId || "";
+  const name = campaign?.name || context?.campaign_name || "系统级任务";
+  const product = campaign?.product_name || context?.product_name || "不属于单个内容项目";
+  const detail = contentTitle || context?.content_title;
+  return (
+    <div className={`project-identity ${compact ? "project-identity-compact" : ""}`}>
+      <span className="project-code" translate="no">{id ? projectCode(id) : "SYSTEM"}</span>
+      <span className="project-identity-copy">
+        <strong>{name}</strong>
+        <small>{product}{detail ? ` · ${detail}` : ""}</small>
+      </span>
+    </div>
+  );
+}
+
+function GenerationProgress({ run, compact = false }: { run: WorkflowRun; compact?: boolean }) {
+  const stage = runStageMeta(run);
+  const active = ACTIVE_RUN_STATUSES.has(run.status);
+  return (
+    <div className={`generation-progress ${compact ? "generation-progress-compact" : ""}`} aria-live="polite">
+      <div className="generation-progress-heading">
+        {active ? <span className="activity-spinner" aria-hidden="true" /> : null}
+        <span>
+          <strong>{stage.label}</strong>
+          <small>{stage.step} · {stage.detail}</small>
+        </span>
+      </div>
+      <div
+        className="progress-track"
+        role="progressbar"
+        aria-label="内容生成阶段"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={stage.progress}
+        aria-valuetext={`${stage.label}，${stage.step}`}
+      >
+        <span style={{ width: `${stage.progress}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function ActiveGenerationStrip({ runs, campaigns }: { runs: WorkflowRun[]; campaigns: Campaign[] }) {
+  const activeRuns = runs.filter((run) => ACTIVE_RUN_STATUSES.has(run.status));
+  if (!activeRuns.length) return null;
+  const campaignMap = Object.fromEntries(campaigns.map((campaign) => [campaign.id, campaign]));
+  return (
+    <section className="active-generation-strip" aria-label="正在生成的内容" aria-live="polite">
+      <div className="active-generation-title">
+        <span className="activity-spinner" aria-hidden="true" />
+        <div><strong>{activeRuns.length} 个内容任务正在进行</strong><small>页面会自动刷新，离开本页不会中断任务。</small></div>
+      </div>
+      <div className="active-generation-list">
+        {activeRuns.slice(0, 3).map((run) => (
+          <article key={run.id}>
+            <ProjectIdentity campaign={campaignMap[run.campaign_id]} compact />
+            <GenerationProgress run={run} compact />
+          </article>
+        ))}
+        {activeRuns.length > 3 ? <p>另有 {activeRuns.length - 3} 个任务正在运行。</p> : null}
+      </div>
+    </section>
   );
 }
 
@@ -896,6 +1047,7 @@ function AuthScreen({
 export function ContentFlowApp() {
   const [session, setSession] = useState<Session | null>(null);
   const [view, setView] = useState<View>("dashboard");
+  const [campaignFilter, setCampaignFilter] = useState("");
   const [advancedNavOpen, setAdvancedNavOpen] = useState(false);
   const [data, setData] = useState<DataState>(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
@@ -909,6 +1061,7 @@ export function ContentFlowApp() {
       const [
         dashboard,
         campaigns,
+        runs,
         styleSkills,
         contents,
         assets,
@@ -925,6 +1078,7 @@ export function ContentFlowApp() {
       ] = await Promise.all([
         api<DashboardSummary>("/dashboard/summary"),
         api<Campaign[]>("/campaigns"),
+        api<WorkflowRun[]>("/runs?limit=100"),
         api<StyleSkill[]>("/style-skills"),
         api<Content[]>("/contents"),
         api<Asset[]>("/assets"),
@@ -932,7 +1086,11 @@ export function ContentFlowApp() {
         api<PublishJob[]>("/publishing/jobs"),
         api<KnowledgeDocument[]>("/knowledge/documents"),
         api<QueueJob[]>("/jobs"),
-        api<MetricsSummary>("/metrics/summary"),
+        api<MetricsSummary>(
+          campaignFilter
+            ? `/metrics/summary?campaign_id=${encodeURIComponent(campaignFilter)}`
+            : "/metrics/summary",
+        ),
         api<WorkspaceAccess[]>("/auth/workspaces"),
         session?.role === "admin"
           ? api<Member[]>("/admin/members")
@@ -950,6 +1108,7 @@ export function ContentFlowApp() {
       setData({
         dashboard,
         campaigns,
+        runs,
         styleSkills,
         contents,
         assets,
@@ -974,7 +1133,7 @@ export function ContentFlowApp() {
     } finally {
       setRefreshing(false);
     }
-  }, [session]);
+  }, [session, campaignFilter]);
 
   useEffect(() => {
     async function restore() {
@@ -990,15 +1149,21 @@ export function ContentFlowApp() {
     void restore();
   }, []);
 
+  const hasActiveWork = data.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status))
+    || data.assets.some((asset) => ["queued", "generating", "processing"].includes(asset.status));
+
   useEffect(() => {
     if (!session) return;
     const initial = window.setTimeout(() => void loadData(), 0);
-    const timer = window.setInterval(() => void loadData(true), 15_000);
+    const timer = window.setInterval(
+      () => void loadData(true),
+      hasActiveWork ? 2_500 : 15_000,
+    );
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(timer);
     };
-  }, [session, loadData]);
+  }, [session, loadData, hasActiveWork]);
 
   function flash(message: string) {
     setNotice(message);
@@ -1015,6 +1180,7 @@ export function ContentFlowApp() {
       );
       const current = await api<Session>("/auth/session");
       setData(EMPTY_DATA);
+      setCampaignFilter("");
       setView("dashboard");
       setSession(current);
       flash(`已切换到 ${current.workspace.name}`);
@@ -1032,6 +1198,7 @@ export function ContentFlowApp() {
     });
     const current = await api<Session>("/auth/session");
     setData(EMPTY_DATA);
+    setCampaignFilter("");
     setView("dashboard");
     setSession(current);
     flash(`工作区 ${current.workspace.name} 已创建`);
@@ -1043,6 +1210,7 @@ export function ContentFlowApp() {
     } finally {
       setSession(null);
       setData(EMPTY_DATA);
+      setCampaignFilter("");
       setView("dashboard");
     }
   }
@@ -1058,6 +1226,51 @@ export function ContentFlowApp() {
   if (!session) {
     return <AuthScreen onAuthenticated={setSession} />;
   }
+
+  const effectiveCampaignFilter = data.campaigns.some((campaign) => campaign.id === campaignFilter)
+    ? campaignFilter
+    : "";
+  const scopedCampaigns = effectiveCampaignFilter
+    ? data.campaigns.filter((campaign) => campaign.id === effectiveCampaignFilter)
+    : data.campaigns;
+  const scopedRuns = effectiveCampaignFilter
+    ? data.runs.filter((run) => run.campaign_id === effectiveCampaignFilter)
+    : data.runs;
+  const scopedContents = effectiveCampaignFilter
+    ? data.contents.filter((content) => content.campaign_id === effectiveCampaignFilter)
+    : data.contents;
+  const scopedContentIds = new Set(scopedContents.map((content) => content.id));
+  const scopedAssets = effectiveCampaignFilter
+    ? data.assets.filter((asset) => asset.content_item_id && scopedContentIds.has(asset.content_item_id))
+    : data.assets;
+  const scopedPublishes = effectiveCampaignFilter
+    ? data.publishes.filter((job) => scopedContentIds.has(job.content_item_id))
+    : data.publishes;
+  const scopedJobs = effectiveCampaignFilter
+    ? data.jobs.filter((job) => job.context.campaign_id === effectiveCampaignFilter)
+    : data.jobs;
+  const scopedDashboard: DashboardSummary = effectiveCampaignFilter
+    ? {
+        campaigns: scopedCampaigns.filter((campaign) => campaign.status !== "archived").length,
+        runs_active: scopedRuns.filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length,
+        contents_needing_review: scopedContents.filter((content) => content.status === "needs_review").length,
+        assets_processing: scopedAssets.filter((asset) => ["pending", "processing"].includes(asset.status)).length,
+        publishes_scheduled: scopedPublishes.filter((job) => job.status === "scheduled").length,
+        jobs_failed: scopedJobs.filter((job) => job.status === "failed").length,
+      }
+    : data.dashboard;
+  const scopedData: DataState = effectiveCampaignFilter
+    ? {
+        ...data,
+        dashboard: scopedDashboard,
+        campaigns: scopedCampaigns,
+        runs: scopedRuns,
+        contents: scopedContents,
+        assets: scopedAssets,
+        publishes: scopedPublishes,
+        jobs: scopedJobs,
+      }
+    : data;
 
   const visibleNav = NAV.filter(
     (item) => item.id !== "admin" || session.role === "admin",
@@ -1080,8 +1293,8 @@ export function ContentFlowApp() {
     >
       <Icon name={item.icon} />
       <span>{item.label}</span>
-      {item.id === "review" && data.dashboard.contents_needing_review ? (
-        <b>{data.dashboard.contents_needing_review}</b>
+      {item.id === "review" && scopedDashboard.contents_needing_review ? (
+        <b>{scopedDashboard.contents_needing_review}</b>
       ) : null}
     </button>
   );
@@ -1150,6 +1363,20 @@ export function ContentFlowApp() {
                 <option value={session.workspace.id}>{session.workspace.name}</option>
               )}
             </select>
+            <span className="header-divider" />
+            <select
+              className="project-switcher"
+              aria-label="按项目筛选当前工作台"
+              value={effectiveCampaignFilter}
+              onChange={(event) => setCampaignFilter(event.target.value)}
+            >
+              <option value="">全部项目</option>
+              {data.campaigns.map((campaign) => (
+                <option key={campaign.id} value={campaign.id}>
+                  {projectCode(campaign.id)} · {campaign.name}
+                </option>
+              ))}
+            </select>
           </div>
           <button
             className="icon-button"
@@ -1157,7 +1384,7 @@ export function ContentFlowApp() {
             onClick={() => void loadData()}
             disabled={refreshing}
           >
-            <Icon name="refresh" />
+            <span className={refreshing ? "refresh-spin" : ""}><Icon name="refresh" /></span>
           </button>
         </header>
         <div className="mobile-nav">
@@ -1198,12 +1425,14 @@ export function ContentFlowApp() {
               <button onClick={() => setError("")}>关闭</button>
             </div>
           ) : null}
+          <ActiveGenerationStrip runs={scopedRuns} campaigns={data.campaigns} />
           {view === "dashboard" ? (
-            <DashboardView data={data} onNavigate={setView} />
+            <DashboardView data={scopedData} onNavigate={setView} />
           ) : null}
           {view === "campaigns" ? (
             <CampaignsView
-              campaigns={data.campaigns}
+              campaigns={scopedCampaigns}
+              runs={scopedRuns}
               styleSkills={data.styleSkills}
               role={session.role}
               onChanged={() => loadData()}
@@ -1212,7 +1441,8 @@ export function ContentFlowApp() {
           ) : null}
           {view === "review" ? (
             <ReviewView
-              contents={data.contents}
+              campaigns={data.campaigns}
+              contents={scopedContents}
               role={session.role}
               onChanged={() => loadData()}
               flash={flash}
@@ -1220,8 +1450,9 @@ export function ContentFlowApp() {
           ) : null}
           {view === "assets" ? (
             <AssetsView
-              assets={data.assets}
-              contents={data.contents}
+              assets={scopedAssets}
+              campaigns={data.campaigns}
+              contents={scopedContents}
               role={session.role}
               onChanged={() => loadData()}
               flash={flash}
@@ -1229,8 +1460,9 @@ export function ContentFlowApp() {
           ) : null}
           {view === "publishing" ? (
             <PublishingView
-              publishes={data.publishes}
-              contents={data.contents}
+              publishes={scopedPublishes}
+              campaigns={data.campaigns}
+              contents={scopedContents}
               channels={data.channels}
               role={session.role}
               onNavigate={setView}
@@ -1257,8 +1489,9 @@ export function ContentFlowApp() {
           {view === "metrics" ? (
             <MetricsView
               data={data.metrics}
-              publishes={data.publishes}
-              contents={data.contents}
+              publishes={scopedPublishes}
+              campaigns={data.campaigns}
+              contents={scopedContents}
               channels={data.channels}
               role={session.role}
               onChanged={() => loadData()}
@@ -1267,7 +1500,7 @@ export function ContentFlowApp() {
           ) : null}
           {view === "jobs" ? (
             <JobsView
-              jobs={data.jobs}
+              jobs={scopedJobs}
               role={session.role}
               onNavigate={setView}
               onChanged={() => loadData()}
@@ -1360,6 +1593,9 @@ function DashboardView({
     { label: "准备素材", detail: "封面与视频", done: hasReadyAsset, view: "assets" as View },
     { label: "发布", detail: "立即或定时", done: hasDelivered, view: "publishing" as View },
   ];
+  const campaignMap = Object.fromEntries(
+    data.campaigns.map((campaign) => [campaign.id, campaign]),
+  );
 
   return (
     <>
@@ -1430,6 +1666,11 @@ function DashboardView({
                       {(PLATFORM[item.platform] || item.platform).slice(0, 1)}
                     </div>
                     <div className="record-main">
+                      <ProjectIdentity
+                        campaign={campaignMap[item.campaign_id]}
+                        fallbackCampaignId={item.campaign_id}
+                        compact
+                      />
                       <strong>{item.title}</strong>
                       <small>
                         {PLATFORM[item.platform]} · 版本 {item.version}
@@ -1467,9 +1708,9 @@ function DashboardView({
             </div>
           </div>
           <DataTable
-            headers={["活动", "产品", "平台", "状态", "更新时间"]}
+            headers={["项目", "产品", "平台", "状态", "更新时间"]}
             rows={data.campaigns.slice(0, 6).map((campaign) => [
-              campaign.name,
+              <ProjectIdentity key="project" campaign={campaign} compact />,
               campaign.product_name,
               campaign.platforms.map((item) => PLATFORM[item]).join(" / "),
               <StatusBadge key="status" value={campaign.status} />,
@@ -1503,6 +1744,7 @@ function RunEvidence({ run }: { run: WorkflowRun }) {
         </div>
         <StatusBadge value={run.status} />
       </div>
+      <GenerationProgress run={run} compact />
       <div className="run-evidence-grid">
         <span><small>生成来源</small><b>{source}</b></span>
         <span><small>模型</small><b>{provenance?.model || "等待执行"}</b></span>
@@ -1517,12 +1759,14 @@ function RunEvidence({ run }: { run: WorkflowRun }) {
 
 function CampaignsView({
   campaigns,
+  runs,
   styleSkills,
   role,
   onChanged,
   flash,
 }: {
   campaigns: Campaign[];
+  runs: WorkflowRun[];
   styleSkills: StyleSkill[];
   role: string;
   onChanged: () => Promise<void> | void;
@@ -1534,7 +1778,7 @@ function CampaignsView({
   const [busyId, setBusyId] = useState("");
   const [error, setError] = useState("");
   const [expandedCampaignId, setExpandedCampaignId] = useState("");
-  const [runsByCampaign, setRunsByCampaign] = useState<Record<string, WorkflowRun[]>>({});
+
   const canEdit = roleAtLeast(role, "editor");
 
   function closeForm() {
@@ -1651,42 +1895,28 @@ function CampaignsView({
     }
   }
 
-  async function toggleRuns(campaign: Campaign) {
-    if (expandedCampaignId === campaign.id) {
-      setExpandedCampaignId("");
-      return;
-    }
-    setExpandedCampaignId(campaign.id);
-    if (Object.prototype.hasOwnProperty.call(runsByCampaign, campaign.id)) return;
-    setBusyId(`runs-${campaign.id}`);
-    setError("");
-    try {
-      const runs = await api<WorkflowRun[]>(
-        `/campaigns/${campaign.id}/runs?limit=5`,
-      );
-      setRunsByCampaign((current) => ({ ...current, [campaign.id]: runs }));
-    } catch (caught) {
-      setError(messageOf(caught));
-    } finally {
-      setBusyId("");
-    }
+  function toggleRuns(campaign: Campaign) {
+    setExpandedCampaignId((current) => current === campaign.id ? "" : campaign.id);
+  }
+
+  function campaignRuns(campaignId: string) {
+    return runs.filter((runItem) => runItem.campaign_id === campaignId).slice(0, 5);
+  }
+
+  function activeCampaignRun(campaignId: string) {
+    return campaignRuns(campaignId).find((runItem) => ACTIVE_RUN_STATUSES.has(runItem.status));
   }
 
   async function run(campaign: Campaign) {
     setBusyId(`run-${campaign.id}`);
     setError("");
     try {
-      await api(`/campaigns/${campaign.id}/runs`, {
+      await api<WorkflowRun>(`/campaigns/${campaign.id}/runs`, {
         method: "POST",
         body: {},
       });
-      flash("内容生成任务已进入队列");
-      setRunsByCampaign((current) => {
-        const next = { ...current };
-        delete next[campaign.id];
-        return next;
-      });
-      setExpandedCampaignId("");
+      flash("内容任务已入队；页面会持续显示真实生成阶段");
+      setExpandedCampaignId(campaign.id);
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -1877,7 +2107,7 @@ function CampaignsView({
           <div className="campaign-list">
             {campaigns.map((campaign) => (
               <article key={campaign.id} className="campaign-row">
-                <div className="campaign-index">{String(campaigns.indexOf(campaign) + 1).padStart(2, "0")}</div>
+                <div className="campaign-index"><span>{String(campaigns.indexOf(campaign) + 1).padStart(2, "0")}</span><strong translate="no">{projectCode(campaign.id)}</strong></div>
                 <div className="campaign-copy">
                   <div className="row-title">
                     <h2>{campaign.name}</h2>
@@ -1895,16 +2125,17 @@ function CampaignsView({
                     <span>{campaign.brief.quality_profile === "standard" ? "标准创作" : "深度创作"}</span>
                     <span>{formatDate(campaign.updated_at)}</span>
                   </div>
+                  {activeCampaignRun(campaign.id) ? (
+                    <GenerationProgress run={activeCampaignRun(campaign.id)!} />
+                  ) : null}
                   {expandedCampaignId === campaign.id ? (
                     <section className="run-history" aria-label={`${campaign.name} 的生成记录`}>
                       <div className="run-history-heading">
                         <strong>最近生成记录</strong>
                         <span>最多展示 5 个批次</span>
                       </div>
-                      {busyId === `runs-${campaign.id}` ? (
-                        <p className="run-history-empty">正在读取生成证据…</p>
-                      ) : (runsByCampaign[campaign.id] || []).length ? (
-                        (runsByCampaign[campaign.id] || []).map((runItem) => (
+                      {campaignRuns(campaign.id).length ? (
+                        campaignRuns(campaign.id).map((runItem) => (
                           <RunEvidence key={runItem.id} run={runItem} />
                         ))
                       ) : (
@@ -1918,11 +2149,11 @@ function CampaignsView({
                     <>
                       <Button
                         kind="secondary"
-                        busy={busyId === `run-${campaign.id}`}
+                        busy={busyId === `run-${campaign.id}` || Boolean(activeCampaignRun(campaign.id))}
                         onClick={() => void run(campaign)}
-                        disabled={campaign.status === "archived"}
+                        disabled={campaign.status === "archived" || Boolean(activeCampaignRun(campaign.id))}
                       >
-                        生成内容
+                        {activeCampaignRun(campaign.id) ? "生成进行中…" : "生成内容"}
                       </Button>
                       <button type="button" onClick={() => openEdit(campaign)}>编辑 Brief</button>
                       <button
@@ -1941,8 +2172,7 @@ function CampaignsView({
                   ) : null}
                   <button
                     type="button"
-                    disabled={busyId === `runs-${campaign.id}`}
-                    onClick={() => void toggleRuns(campaign)}
+                    onClick={() => toggleRuns(campaign)}
                   >
                     {expandedCampaignId === campaign.id ? "收起记录" : "生成记录"}
                   </button>
@@ -1959,11 +2189,13 @@ function CampaignsView({
 }
 
 function ReviewView({
+  campaigns,
   contents,
   role,
   onChanged,
   flash,
 }: {
+  campaigns: Campaign[];
   contents: Content[];
   role: string;
   onChanged: () => Promise<void> | void;
@@ -1971,6 +2203,9 @@ function ReviewView({
 }) {
   const reviewable = contents.filter((item) =>
     ["needs_review", "blocked"].includes(item.status),
+  );
+  const campaignMap = Object.fromEntries(
+    campaigns.map((campaign) => [campaign.id, campaign]),
   );
   const [showAll, setShowAll] = useState(false);
   const visibleContents = showAll ? contents : reviewable;
@@ -2129,14 +2364,22 @@ function ReviewView({
                 onClick={() => setSelectedId(item.id)}
               >
                 <span className="platform-mark">{(PLATFORM[item.platform] || item.platform).slice(0, 1)}</span>
-                <span><strong>{item.title}</strong><small>{PLATFORM[item.platform]} · v{item.version}</small></span>
+                <span className="review-item-copy">
+                  <ProjectIdentity campaign={campaignMap[item.campaign_id]} compact />
+                  <strong className="review-content-title">{item.title}</strong>
+                  <small>{PLATFORM[item.platform]} · v{item.version}</small>
+                </span>
                 <StatusBadge value={item.status} />
               </button>
             ))}
           </section>
           <section className="panel review-editor">
             <div className="panel-heading">
-              <div><p className="eyebrow">{PLATFORM[selected.platform]} · v{selected.version}</p><h2>编辑与确认</h2></div>
+              <div>
+                <ProjectIdentity campaign={campaignMap[selected.campaign_id]} contentTitle={selected.title} compact />
+                <p className="eyebrow">{PLATFORM[selected.platform]} · v{selected.version}</p>
+                <h2>编辑与确认</h2>
+              </div>
               <StatusBadge value={selected.status} />
             </div>
             <form className="stack-form" onSubmit={save} key={`${selected.id}-${selected.version}`}>
@@ -2241,12 +2484,14 @@ function ReviewView({
 }
 
 function AssetsView({
+  campaigns,
   assets,
   contents,
   role,
   onChanged,
   flash,
 }: {
+  campaigns: Campaign[];
   assets: Asset[];
   contents: Content[];
   role: string;
@@ -2263,6 +2508,14 @@ function AssetsView({
     () => Object.fromEntries(contents.map((item) => [item.id, item.title])),
     [contents],
   );
+  const contentById = useMemo(
+    () => Object.fromEntries(contents.map((item) => [item.id, item])),
+    [contents],
+  );
+  const campaignMap = useMemo(
+    () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, campaign])),
+    [campaigns],
+  );
   const contentVersionMap = useMemo(
     () => Object.fromEntries(contents.map((item) => [item.id, item.version])),
     [contents],
@@ -2276,12 +2529,35 @@ function AssetsView({
     [assets, contentVersionMap],
   );
   const uploadTarget = uploadTargets.find((asset) => asset.id === uploadTargetId);
+  const systemProcessing = assets.filter((asset) =>
+    ["queued", "generating", "processing"].includes(asset.status),
+  );
+  const awaitingUpload = assets.filter((asset) => asset.status === "awaiting_upload");
+  const awaitingSelection = assets.filter((asset) => asset.status === "awaiting_selection");
+  const needsAction = [...awaitingUpload, ...awaitingSelection].length;
+  const readyAssets = assets.filter((asset) => asset.status === "ready");
+  const campaignForAsset = (asset: Asset) => {
+    const content = contentById[asset.content_item_id || ""];
+    return content ? campaignMap[content.campaign_id] : undefined;
+  };
   const selectedUploadKind = uploadTarget?.kind || uploadKind;
   const uploadAccept = selectedUploadKind === "image"
     ? "image/png,image/jpeg,image/webp"
     : selectedUploadKind === "video_storyboard"
       ? "application/json,.json"
       : "video/*";
+  function openUpload(targetId = "") {
+    setUploadTargetId(targetId);
+    setUploadKind("image");
+    setShowUpload(true);
+    window.setTimeout(() => {
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      document.getElementById("asset-upload-form")?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+    }, 0);
+  }
   async function retry(asset: Asset) {
     try {
       await api(`/assets/${asset.id}/retry`, { method: "POST" });
@@ -2345,26 +2621,106 @@ function AssetsView({
       <PageHeading
         eyebrow="Media"
         title="素材中心"
-        description="封面可人工上传、AI 生成或从开放授权图库检索；搜索与混合模式必须人工核验许可并明确选图。"
+        description="先看系统是否仍在处理，再只完成“等你操作”中的上传或选图；已就绪素材会自动成为发布前置条件。"
         action={canEdit ? (
-          <Button onClick={() => {
-            setUploadTargetId("");
-            setUploadKind("image");
-            setShowUpload((value) => !value);
-          }}>
-            <Icon name="plus" />上传素材
+          <Button onClick={() => openUpload()}>
+            <Icon name="plus" />上传所需素材
           </Button>
         ) : undefined}
       />
       {error ? <p className="inline-error">{error}</p> : null}
       {!canEdit ? <p className="permission-note">当前为只读权限，可查看和下载已就绪素材。</p> : null}
+      <section className="asset-stage-grid" aria-label="素材准备阶段">
+        <article className="asset-stage-lane">
+          <span className="asset-stage-number">1</span>
+          <div><strong>系统处理中</strong><small>生成或检索会自动刷新，无需重复点击</small></div>
+          <b>{systemProcessing.length}</b>
+        </article>
+        <article className={needsAction ? "asset-stage-lane asset-stage-action" : "asset-stage-lane"}>
+          <span className="asset-stage-number">2</span>
+          <div><strong>等你操作</strong><small>上传真实文件，或核验并选用候选图</small></div>
+          <b>{needsAction}</b>
+        </article>
+        <article className="asset-stage-lane">
+          <span className="asset-stage-number">3</span>
+          <div><strong>已就绪</strong><small>素材已绑定当前内容版本，可以进入发布</small></div>
+          <b>{readyAssets.length}</b>
+        </article>
+      </section>
+      {systemProcessing.length ? (
+        <section className="panel asset-processing-panel" aria-live="polite">
+          <div className="panel-heading">
+            <div><p className="eyebrow">System activity</p><h2>系统正在准备素材</h2><p>页面会自动更新；离开此页不会中断任务。</p></div>
+          </div>
+          <div className="asset-processing-list">
+            {systemProcessing.map((asset) => (
+              <div className="asset-processing-row" key={asset.id}>
+                <ProjectIdentity
+                  campaign={campaignForAsset(asset)}
+                  contentTitle={contentMap[asset.content_item_id || ""]}
+                  compact
+                />
+                <div className="asset-processing-state">
+                  <span className="activity-spinner" aria-hidden="true" />
+                  <span>{asset.provider === "openverse" ? "正在检索候选图片" : "正在生成素材"}</span>
+                </div>
+                <div className="indeterminate-track" aria-label="处理中"><span /></div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+      {awaitingUpload.length || awaitingSelection.length ? (
+        <section className="panel asset-action-panel">
+          <div className="panel-heading">
+            <div><p className="eyebrow">Action required</p><h2>等你操作</h2><p>只处理下面列出的任务；没有列出时不需要上传。</p></div>
+          </div>
+          <div className="asset-action-list">
+            {awaitingUpload.map((asset) => (
+              <article className="asset-action-card" key={asset.id}>
+                <ProjectIdentity
+                  campaign={campaignForAsset(asset)}
+                  contentTitle={contentMap[asset.content_item_id || ""]}
+                />
+                <div className="asset-action-copy">
+                  <strong>需要上传{asset.kind === "image" ? "真实封面图片" : asset.kind === "video" ? "真实视频" : "分镜 JSON"}</strong>
+                  <p>
+                    {asset.metadata_json.reason === "provider_configuration_required"
+                      ? "活动选择了 AI 图片，但当前没有可用图片 Provider；为保证发布内容真实可用，需要你补充文件。"
+                      : "该活动选择了人工真实素材，系统不会替你猜测品牌视觉或自动使用未授权图片。"}
+                  </p>
+                </div>
+                {canEdit ? <Button onClick={() => openUpload(asset.id)}>查看要求并上传</Button> : null}
+              </article>
+            ))}
+            {awaitingSelection.map((asset) => (
+              <article className="asset-action-card" key={asset.id}>
+                <ProjectIdentity
+                  campaign={campaignForAsset(asset)}
+                  contentTitle={contentMap[asset.content_item_id || ""]}
+                />
+                <div className="asset-action-copy">
+                  <strong>需要核验并选择候选图片</strong>
+                  <p>打开图片原始页面核对作者、许可与署名要求，再明确选用；系统不会自动替你接受许可风险。</p>
+                </div>
+                <a className="button button-ghost" href={`#asset-candidates-${asset.id}`}>查看候选图</a>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
       {showUpload && canEdit ? (
-        <section className="panel form-panel">
-          <div className="panel-heading"><div><p className="eyebrow">Upload</p><h2>上传真实素材</h2></div></div>
+        <section className="panel form-panel" id="asset-upload-form">
+          <div className="panel-heading"><div><p className="eyebrow">Upload</p><h2>上传真实素材</h2><p>选择明确的待办后，文件会绑定到对应项目和当前内容版本。</p></div></div>
+          <div className="upload-explainer">
+            <div><strong>为什么需要你上传</strong><span>系统无法凭空获得品牌实拍、产品图或企业授权文件。</span></div>
+            <div><strong>上传什么</strong><span>{selectedUploadKind === "image" ? "PNG、JPEG 或 WebP 的真实封面图" : selectedUploadKind === "video_storyboard" ? "合法 JSON 分镜文件" : "平台可接受的视频文件"}</span></div>
+            <div><strong>完成后会怎样</strong><span>文件校验并绑定当前内容版本，随后才能创建发布任务。</span></div>
+          </div>
           <form className="stack-form" onSubmit={uploadAsset}>
             <label>待上传任务
               <select name="asset_id" value={uploadTargetId} onChange={(event) => setUploadTargetId(event.target.value)}>
-                <option value="">作为当前版本的额外素材上传</option>
+                <option value="">补充素材（仅在没有对应待办时使用）</option>
                 {uploadTargets.map((asset) => (
                   <option key={asset.id} value={asset.id}>
                     {asset.kind === "image" ? "封面图片" : asset.kind === "video" ? "视频" : "视频分镜 JSON"} · {contentMap[asset.content_item_id || ""] || "未关联"} · {STATUS[asset.status] || asset.status}
@@ -2389,9 +2745,18 @@ function AssetsView({
                 </label>
               </>
             ) : (
-              <p className="form-note">将填充选中的当前版本素材任务；上传成功后才允许发布。</p>
+              <div className="upload-target-summary">
+                <ProjectIdentity
+                  campaign={campaignForAsset(uploadTarget)}
+                  contentTitle={contentMap[uploadTarget.content_item_id || ""]}
+                />
+                <p className="form-note">只会填充这个项目的当前版本素材任务；上传成功并通过类型校验后才允许发布。</p>
+              </div>
             )}
-            <label>文件<input name="file" type="file" accept={uploadAccept} required /></label>
+            <label>选择本机文件
+              <input name="file" type="file" accept={uploadAccept} required />
+              <small>接受：{uploadAccept.replaceAll(",", "、")}。请使用清晰、无水印且你有权发布的文件。</small>
+            </label>
             <div className="form-actions"><Button type="submit" busy={uploading}>上传并绑定</Button><Button type="button" kind="ghost" onClick={() => { setShowUpload(false); setUploadTargetId(""); }}>取消</Button></div>
           </form>
         </section>
@@ -2403,11 +2768,14 @@ function AssetsView({
             ? asset.metadata_json.search_candidates as ImageSearchCandidate[]
             : [];
           return (
-            <section className="panel media-candidate-panel" key={asset.id}>
+            <section className="panel media-candidate-panel" id={`asset-candidates-${asset.id}`} key={asset.id}>
               <div className="panel-heading">
                 <div>
                   <p className="eyebrow">Open-licensed candidates</p>
-                  <h2>{contentMap[asset.content_item_id || ""] || "图片候选"}</h2>
+                  <ProjectIdentity
+                    campaign={campaignForAsset(asset)}
+                    contentTitle={contentMap[asset.content_item_id || ""] || "图片候选"}
+                  />
                   <p>
                     搜索词：{String(asset.metadata_json.search_query || "未记录")}。
                     Openverse 许可元数据仅作线索，选用前必须打开原始页面核验。
@@ -2424,6 +2792,8 @@ function AssetsView({
                         <img
                           src={candidate.thumbnail_url}
                           alt={candidate.title}
+                          width={320}
+                          height={180}
                           loading="lazy"
                           referrerPolicy="no-referrer"
                         />
@@ -2455,10 +2825,15 @@ function AssetsView({
         })}
       <section className="panel">
         <DataTable
-          headers={["素材", "关联内容", "生成方式", "大小", "状态", "操作"]}
+          headers={["项目 / 内容", "素材", "生成方式", "大小", "状态", "操作"]}
           rows={assets.map((asset) => [
+            <ProjectIdentity
+              key="project"
+              campaign={campaignForAsset(asset)}
+              contentTitle={contentMap[asset.content_item_id || ""]}
+              compact
+            />,
             asset.kind === "image" ? "营销图片" : asset.kind === "video" ? "视频" : "视频分镜 JSON",
-            contentMap[asset.content_item_id || ""] || "未关联",
             ["manual", "manual-upload"].includes(asset.provider)
               ? "人工上传"
               : asset.provider === "openverse"
@@ -2483,7 +2858,7 @@ function AssetsView({
                 <span className="selected-candidate">已选用</span>
               ) : null}
               {canEdit && asset.status === "awaiting_upload" ? (
-                <button onClick={() => { setUploadTargetId(asset.id); setShowUpload(true); }}>上传真实素材</button>
+                <button onClick={() => openUpload(asset.id)}>上传真实素材</button>
               ) : null}
               {canEdit && !["manual", "manual-upload"].includes(asset.provider) && ["failed", "planned", "stale"].includes(asset.status) ? (
                 <button onClick={() => void retry(asset)}>
@@ -2500,6 +2875,7 @@ function AssetsView({
 }
 
 function PublishingView({
+  campaigns,
   publishes,
   contents,
   channels,
@@ -2508,6 +2884,7 @@ function PublishingView({
   onChanged,
   flash,
 }: {
+  campaigns: Campaign[];
   publishes: PublishJob[];
   contents: Content[];
   channels: Channel[];
@@ -2544,6 +2921,10 @@ function PublishingView({
   const contentMap = useMemo(
     () => Object.fromEntries(contents.map((item) => [item.id, item])),
     [contents],
+  );
+  const campaignMap = useMemo(
+    () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, campaign])),
+    [campaigns],
   );
   const channelMap = useMemo(
     () => Object.fromEntries(channels.map((item) => [item.id, item])),
@@ -2850,7 +3231,7 @@ function PublishingView({
                   <option value="" disabled>选择要发布的内容</option>
                   {approved.map((item) => (
                     <option key={item.id} value={item.id}>
-                      {PLATFORM[item.platform]} · {item.title}
+                      {projectCode(item.campaign_id)} · {campaignMap[item.campaign_id]?.name || "未知项目"} · {PLATFORM[item.platform]} · {item.title}
                     </option>
                   ))}
                 </select>
@@ -2991,9 +3372,14 @@ function PublishingView({
       ) : null}
       <section className="panel">
         <DataTable
-          headers={["内容", "平台", "方式", "执行时间", "尝试", "状态", "下一步"]}
+          headers={["项目 / 内容", "平台", "方式", "执行时间", "尝试", "状态", "下一步"]}
           rows={publishes.map((job) => [
-            contentMap[job.content_item_id]?.title || job.content_item_id,
+            <ProjectIdentity
+              key="project"
+              campaign={campaignMap[contentMap[job.content_item_id]?.campaign_id]}
+              contentTitle={contentMap[job.content_item_id]?.title || job.content_item_id}
+              compact
+            />,
             channelMap[job.channel_id]?.display_name || job.channel_id,
             DELIVERY_MODE[job.delivery_mode] || job.delivery_mode,
             <div className="timing-cell" key="timing">
@@ -3338,6 +3724,7 @@ function ChannelsView({
 function MetricsView({
   data,
   publishes,
+  campaigns,
   contents,
   channels,
   role,
@@ -3346,6 +3733,7 @@ function MetricsView({
 }: {
   data: MetricsSummary;
   publishes: PublishJob[];
+  campaigns: Campaign[];
   contents: Content[];
   channels: Channel[];
   role: string;
@@ -3360,6 +3748,10 @@ function MetricsView({
   const contentMap = useMemo(
     () => Object.fromEntries(contents.map((item) => [item.id, item])),
     [contents],
+  );
+  const campaignMap = useMemo(
+    () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, campaign])),
+    [campaigns],
   );
   const channelMap = useMemo(
     () => Object.fromEntries(channels.map((item) => [item.id, item])),
@@ -3429,7 +3821,7 @@ function MetricsView({
                   const channel = channelMap[job.channel_id];
                   return (
                     <option key={job.id} value={job.id}>
-                      {PLATFORM[channel?.platform || content?.platform] || channel?.platform} · {content?.title || job.content_item_id} · {STATUS[job.status] || job.status}
+                      {content ? projectCode(content.campaign_id) : "SYSTEM"} · {content ? campaignMap[content.campaign_id]?.name || "未知项目" : "系统任务"} · {PLATFORM[channel?.platform || content?.platform] || channel?.platform} · {content?.title || job.content_item_id} · {STATUS[job.status] || job.status}
                     </option>
                   );
                 })}
@@ -4263,8 +4655,9 @@ function JobsView({
       {!canRetry ? <p className="permission-note">当前为只读权限，可查看任务状态与错误信息。</p> : null}
       <section className="panel">
         <DataTable
-          headers={["任务类型", "执行时间", "尝试次数", "状态", "最近错误", "操作"]}
+          headers={["项目 / 内容", "任务类型", "执行时间", "尝试次数", "状态", "最近错误", "操作"]}
           rows={jobs.map((job) => [
+            <ProjectIdentity key="project" context={job.context} compact />,
             job.job_type,
             formatDateTime(job.run_at),
             `${job.attempts} / ${job.max_attempts}`,

@@ -87,6 +87,7 @@ class ContentAgentTest(unittest.TestCase):
             ),
         }
         provenance = SequencedProvenance()
+        stages: list[str] = []
 
         result = run_content_agent(
             provenance=provenance,
@@ -97,6 +98,7 @@ class ContentAgentTest(unittest.TestCase):
             style_skill=style,
             style_notes="克制、有细节",
             quality_profile="deep",
+            on_stage=stages.append,
         )
 
         self.assertEqual(
@@ -109,6 +111,15 @@ class ContentAgentTest(unittest.TestCase):
             ],
         )
         self.assertEqual(result.revision_count, 1)
+        self.assertEqual(
+            stages,
+            [
+                "drafting_xiaohongshu",
+                "reviewing_xiaohongshu",
+                "revising_xiaohongshu",
+                "final_review_xiaohongshu",
+            ],
+        )
         self.assertEqual(result.quality_score, 8.8)
         self.assertTrue(result.rule_review.passed)
         self.assertEqual(
@@ -177,6 +188,7 @@ class ContentAgentSafetyTest(unittest.TestCase):
         self.assertFalse(result.generation_json["revision_selected"])
         self.assertEqual(result.quality_score, 5.5)
 
+
 class FailingFinalReviewProvenance(SequencedProvenance):
     def complete_json(self, stage, payload, *, platform=None):
         if stage == "review" and self.review_count == 1:
@@ -228,6 +240,7 @@ class ContentAgentFallbackTest(unittest.TestCase):
             result.generation_json["revision_error_type"],
             "RuntimeError",
         )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .ai_provenance import AIProvenanceRecorder
 from .models import CampaignBrief, ReviewResult
@@ -67,9 +67,7 @@ def normalize_editorial_review(raw: Any) -> dict[str, Any]:
         "issues": strings(review.get("issues"), limit=20),
         "fact_checks": strings(review.get("fact_checks"), limit=20),
         "strengths": strings(review.get("strengths"), limit=12),
-        "revision_instructions": strings(
-            review.get("revision_instructions"), limit=12
-        ),
+        "revision_instructions": strings(review.get("revision_instructions"), limit=12),
         "suggestion": str(review.get("suggestion") or "").strip()[:2000],
     }
 
@@ -85,7 +83,12 @@ def run_content_agent(
     style_notes: str,
     quality_profile: str,
     quality_target: float = DEFAULT_QUALITY_TARGET,
+    on_stage: Callable[[str], None] | None = None,
 ) -> ContentAgentResult:
+    def emit_stage(stage: str) -> None:
+        if on_stage is not None:
+            on_stage(stage)
+
     reviewer = RuleReviewer()
     common = {
         "brief": brief.to_dict(),
@@ -105,6 +108,7 @@ def run_content_agent(
             ],
         },
     }
+    emit_stage(f"drafting_{platform}")
     draft = provenance.complete_json(
         "generate",
         {**common, "phase": "initial_draft"},
@@ -115,6 +119,7 @@ def run_content_agent(
         draft = reviewer.repair(platform, draft, brief)
         rule_review = reviewer.review(platform, draft, brief)
 
+    emit_stage(f"reviewing_{platform}")
     model_review = normalize_editorial_review(
         provenance.complete_json(
             "review",
@@ -130,8 +135,7 @@ def run_content_agent(
     revision_count = 0
     revision_selected = False
     should_revise = quality_profile == "deep" and (
-        not model_review["passed"]
-        or model_review["quality_score"] < quality_target
+        not model_review["passed"] or model_review["quality_score"] < quality_target
     )
     revision_attempt_status = "not_needed"
     revision_error_type = None
@@ -139,6 +143,7 @@ def run_content_agent(
         revision_count = 1
         revision_attempt_status = "failed"
         try:
+            emit_stage(f"revising_{platform}")
             revised = provenance.complete_json(
                 "generate",
                 {
@@ -156,6 +161,7 @@ def run_content_agent(
             if not revised_rule_review.passed:
                 revised = reviewer.repair(platform, revised, brief)
                 revised_rule_review = reviewer.review(platform, revised, brief)
+            emit_stage(f"final_review_{platform}")
             final_review = normalize_editorial_review(
                 provenance.complete_json(
                     "review",
@@ -199,9 +205,7 @@ def run_content_agent(
                 rule_review = revised_rule_review
                 model_review = final_review
                 revision_selected = True
-            revision_attempt_status = (
-                "selected" if revision_selected else "rejected"
-            )
+            revision_attempt_status = "selected" if revision_selected else "rejected"
     draft_extras = {
         key: value
         for key, value in draft.items()
