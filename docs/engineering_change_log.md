@@ -550,3 +550,14 @@
 - 运行边界：本地 `image_provider=manual`，所以不能宣称真实 AI 图片生成已接通；人工上传和 Openverse 可用。要启用真实 AI 卡片，仍需供应商中立 ContentFlow Media v1 HTTP 图片生成端点、密钥、模型名和精确下载域名白名单。切换图库仍要求用户核验原始许可页面。
 - 现场：`contentflow-live-test` 保留 PostgreSQL/MinIO 数据卷重建 API/Worker/Web，readiness 为 database/storage `ok`、Web HTTP 200。浏览器已打开新的本地登录页；登录后创建一条真实内容并停在待审核队列的证据待补。
 - 远程证据：实现提交 `0b3d015d84c3ea74108a4ccd10d50aa1fda39695` 已用 John Wang 身份普通推送；[ContentFlow CI #33315195769](https://github.com/heee000/ContentFlow/actions/runs/33315195769) 四个 Job 全部成功。PostgreSQL/pgvector 与 MinIO 后端为 `242 passed, 145 subtests passed`，总覆盖率 82.04%；前端 lint/test/build/audit、Python 漏洞审计、可复现源码、SLSA 与双 CycloneDX attestation 均通过。Artifact `9733221112` 名为 `contentflow-supply-chain-0b3d015d84c3ea74108a4ccd10d50aa1fda39695`，摘要 `sha256:21467c243812afc956bb2f27ee0c8498fed740d984e77c9ee6b822481e9e94e3`。
+
+## 2026-08-31 公网测试部署规划阶段
+
+### CF-20260831-01：本地换网会改变微信公众号白名单，公网运行平台职责不清
+
+- 状态：完整实现路线已记录；部署资产、云资源和目标环境证据尚未实施，不能写成已上线。
+- 问题与影响：本机 Worker 的出口由当前网络或代理决定，换网可能再次触发微信 40164；GitHub Pages、Vercel、GitHub Actions、固定 IP 云主机分别能承担什么没有形成明确决策，容易把静态托管或有时限的 Serverless Function 误当成长驻 Worker。
+- 现场证据：2026-08-31 从宿主机与 `contentflow-live-test` Worker 容器测得相同公网出口 `18.183.44.57`，证明当前 Docker Worker 跟随宿主出口，而不是每个 Worker 随机获得公网 IP。该地址只代表当时网络，不是长期固定资源。
+- 解决方案：新增[公网测试部署实现计划](public_test_deployment_plan.md)。测试阶段推荐一个固定公网 IPv4 的境外云主机，用 Caddy 提供同源 HTTPS，初期同机运行 Web/API/Worker/PostgreSQL/MinIO；GitHub 负责源码、CI、GHCR 和受控部署，GitHub Pages 仅可选文档，Vercel 仅作为稳定后的可选前端托管。计划分 M0-M6 规定部署资产、镜像门禁、云环境、真实业务验收、备份回滚和可选 Vercel 拆分。
+- 安全边界：首次公网环境默认新建干净数据、关闭公开注册、只开放 80/443、数据库和对象存储不映射公网；微信公众号保持 `auto_publish=false`，先验收渠道和草稿。真实密钥、平台账号、本地 `.env`、运行数据库及未跟踪知识文件继续排除在 Git 外。
+- 验收门槛：只有 M1-M5 在目标环境完成，同一固定 Worker IP 经两个客户端网络验证、完整内容到微信草稿闭环、联合恢复与镜像回滚各有证据后，才能标记“个人受控公网测试可用”。本次只改变计划和记录，不调整个人公开部署 60%-65% 的完成度估计。

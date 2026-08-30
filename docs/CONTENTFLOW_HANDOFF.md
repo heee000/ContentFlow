@@ -1688,3 +1688,21 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - `contentflow-live-test` 保留数据卷重建后 API/Worker/Web/PostgreSQL/MinIO 正常。新的本地浏览器页因重建后会话失效停在登录界面；用户登录后再创建测试内容并停在 `needs_review/awaiting_review`，不得继续审核素材或创建发布任务。
 - 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。公众号 `auto_publish=false`，本轮未调用平台接口、创建微信永久素材/草稿或公开发布。
 - 实现提交 `0b3d015d84c3ea74108a4ccd10d50aa1fda39695` 已用 John Wang 身份普通推送到 `codex/enterprise-media-runtime`，未使用 force；[ContentFlow CI #33315195769](https://github.com/heee000/ContentFlow/actions/runs/33315195769) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 结果为 `242 passed, 145 subtests passed`、覆盖率 82.04%，前端/审计/可复现源码/SLSA/双 CycloneDX 全部签收。Artifact `9733221112` 摘要为 `sha256:21467c243812afc956bb2f27ee0c8498fed740d984e77c9ee6b822481e9e94e3`。
+
+## 21.35 公网测试部署规划增量交接
+
+### 已确认的路线
+
+1. 当前目标是个人、非商业、受控公网测试，不要求中国大陆可用，不开放匿名注册，也不把结果表述为公开 Beta 或商业上线。
+2. 首次上线推荐固定公网 IPv4 的境外云主机：Caddy 作为唯一 80/443 入口，同源反代 Next.js 与 FastAPI；API、Worker、PostgreSQL/pgvector、MinIO 和初期 Web 在 Docker 内网运行。该固定 IP 加入微信公众号白名单，从而不受用户本机换网影响。
+3. GitHub 承担源码、CI、GHCR 镜像、Release 和受控部署，不承担长期服务运行。GitHub Pages 只能可选发布静态说明/文档。
+4. Vercel 只作为 M6 可选前端托管；常驻数据库队列 Worker、BGE-M3 模型缓存、对象存储和微信公众号发布连接器不迁入 Vercel Functions。拆分前端时必须使用同一注册域的 Web/API HTTPS 子域并重新验证 Cookie/CORS/CSP。
+5. 完整 M0-M6 路线、文件清单、初始化、真实业务验收、备份、监控和回滚门槛见 [公网测试部署实现计划](public_test_deployment_plan.md)。
+
+### 当前现场与后续规则
+
+- 2026-08-31 宿主机和 `contentflow-live-test` Worker 当时的公网出口均为 `18.183.44.57`；它只适用于当前网络，不是项目持有的固定地址。不得把它写入长期部署模板。
+- 规划记录不等于已上线，当前个人公开部署完成度仍保持约 60%-65%。先在仓库完成 `deploy/public-test`、GHCR 镜像和手动批准部署工作流；实际创建云资源时再向用户索取云账号/受限入口、域名、BGE 部署选择和预算。
+- 首次公网环境默认新建干净数据库和对象，不直接复制本机历史任务与账号；如用户明确要求迁移，PostgreSQL dump、MinIO 对象和凭据解密密钥必须作为原子迁移单元先做隔离恢复。
+- 公网测试初期保持 `CONTENTFLOW_ALLOW_REGISTRATION=false`（初始化短窗口除外）和微信公众号 `auto_publish=false`；真实公开发布仍需单独授权。
+- 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、平台账密、模型缓存、备份和运行数据继续排除。

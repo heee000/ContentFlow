@@ -302,6 +302,7 @@ gh attestation verify .\contentflow-source-<commit>.tar.gz --repo heee000/Conten
 
 - [系统架构](docs/architecture.md)
 - [生产部署与运维](docs/operations.md)
+- [公网测试部署实现计划](docs/public_test_deployment_plan.md)
 - [系统使用手册](docs/user_manual.md)
 - [平台连接器与权限边界](docs/platform_connectors.md)
 - [系统能力概览](docs/capability_overview.md)
