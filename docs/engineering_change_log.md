@@ -541,7 +541,7 @@
 
 ### CF-20260830-04：封面来源藏在 Brief 下拉框，素材任务一旦建立就像被强制人工上传
 
-- 状态：代码、接口定向回归、受真实 `.env` 影响用例的隔离复跑、前端 lint/生产构建和本地生产栈重建已完成；远程 CI 与登录后业务页验收待本轮提交后补记。
+- 状态：代码、接口定向回归、受真实 `.env` 影响用例的隔离复跑、前端 lint/渲染测试/生产构建、本地生产栈重建、提交和远程 CI/供应链签收已完成；登录后业务页验收仍等待用户完成本地登录。
 - 问题与影响：新建活动把 `manual` 作为不醒目的界面默认值，用户可能没有作出选择就创建活动；内容审核后，单条封面任务没有改变来源的 API 和界面，`awaiting_upload` 只能显示上传按钮。因此底层虽然已有 manual/generate/search/hybrid 四种活动级能力，实际体验仍像强制人工上传。
 - 解决方案：活动表单改为四张显式路线卡，不再替新活动预选来源；同时展示人工、AI、开放图库和混合路线的用途及当前环境能力，保存前必须选择。新增认证后的只读 `GET /assets/capabilities`，只返回可用性布尔值，不泄露 Provider、模型、端点或密钥。
 - 单条改线：新增 editor 权限的 `POST /assets/{id}/source`，允许已审核、当前内容版本的图片在 `planned/failed/awaiting_upload/awaiting_selection` 间切换 manual/generate/search。接口在数据库行锁下校验工作区、内容状态、版本、素材类型与可用 Provider；运行中、已就绪、旧版本和混合候选拒绝改写。切换会清理旧图库候选/许可状态/外部任务引用，递增 `source_revision`，使用包含版本与 revision 的队列幂等键，并记录 `asset.source_change` 审计。
@@ -549,3 +549,4 @@
 - 验证：新增真实 API 回归覆盖能力探测、未配置 AI 失败关闭、人工→图库、处理中并发切换拒绝、图库候选→人工、候选清理、revision 和 Job 数量；素材定向回归 `5 passed`，Ruff、ESLint 与 Next.js 生产构建通过。真实 `.env` 会把 Prompt 门禁、S3、CORS 和 Provider 注入默认 Settings；受影响的四组使用仅进程有效的完整隔离配置复跑为 `58 passed, 32 subtests passed`。未改写 `.env`。
 - 运行边界：本地 `image_provider=manual`，所以不能宣称真实 AI 图片生成已接通；人工上传和 Openverse 可用。要启用真实 AI 卡片，仍需供应商中立 ContentFlow Media v1 HTTP 图片生成端点、密钥、模型名和精确下载域名白名单。切换图库仍要求用户核验原始许可页面。
 - 现场：`contentflow-live-test` 保留 PostgreSQL/MinIO 数据卷重建 API/Worker/Web，readiness 为 database/storage `ok`、Web HTTP 200。浏览器已打开新的本地登录页；登录后创建一条真实内容并停在待审核队列的证据待补。
+- 远程证据：实现提交 `0b3d015d84c3ea74108a4ccd10d50aa1fda39695` 已用 John Wang 身份普通推送；[ContentFlow CI #33315195769](https://github.com/heee000/ContentFlow/actions/runs/33315195769) 四个 Job 全部成功。PostgreSQL/pgvector 与 MinIO 后端为 `242 passed, 145 subtests passed`，总覆盖率 82.04%；前端 lint/test/build/audit、Python 漏洞审计、可复现源码、SLSA 与双 CycloneDX attestation 均通过。Artifact `9733221112` 名为 `contentflow-supply-chain-0b3d015d84c3ea74108a4ccd10d50aa1fda39695`，摘要 `sha256:21467c243812afc956bb2f27ee0c8498fed740d984e77c9ee6b822481e9e94e3`。

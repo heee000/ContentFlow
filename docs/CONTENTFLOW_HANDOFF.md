@@ -1687,3 +1687,4 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 当前真实栈明确报告图片生成不可用、Openverse 可用；没有媒体端点时 API 对 AI 改线 409 失败关闭，界面不会用 mock 冒充。启用真实 AI 生成仍需 ContentFlow Media v1 HTTP 端点、密钥、图片模型和精确下载域名白名单。
 - `contentflow-live-test` 保留数据卷重建后 API/Worker/Web/PostgreSQL/MinIO 正常。新的本地浏览器页因重建后会话失效停在登录界面；用户登录后再创建测试内容并停在 `needs_review/awaiting_review`，不得继续审核素材或创建发布任务。
 - 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。公众号 `auto_publish=false`，本轮未调用平台接口、创建微信永久素材/草稿或公开发布。
+- 实现提交 `0b3d015d84c3ea74108a4ccd10d50aa1fda39695` 已用 John Wang 身份普通推送到 `codex/enterprise-media-runtime`，未使用 force；[ContentFlow CI #33315195769](https://github.com/heee000/ContentFlow/actions/runs/33315195769) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 结果为 `242 passed, 145 subtests passed`、覆盖率 82.04%，前端/审计/可复现源码/SLSA/双 CycloneDX 全部签收。Artifact `9733221112` 摘要为 `sha256:21467c243812afc956bb2f27ee0c8498fed740d984e77c9ee6b822481e9e94e3`。
