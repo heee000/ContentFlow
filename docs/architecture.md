@@ -64,7 +64,7 @@ flowchart TB
 
 每次文本模型调用由工作流级追溯器记录到 `WorkflowRun.result_json.ai_provenance`：Provider/模型、Prompt 来源、工作区发布 ID/版本和模板哈希、调用阶段与平台、输入输出 SHA-256/字节数、时延、响应模型以及 Provider 原样返回的 Token 用量。工作流在第一次模型调用前解析当前工作区唯一的 `active` Prompt Release；没有自定义发布时使用内置安全基线。工作区 Release 的正文会在激活和运行前重新计算 SHA-256，记录值不一致时失败关闭，不会静默回退。候选 Release 必须先由 `prompt_eval.execute` Worker 使用当前活动 Eval 套件和当前配置的目标 Provider/模型运行；只有 Prompt 哈希、Suite 哈希、Suite 版本、实际 Provider 与模型都匹配的 `passed` 证据才能用于审批、激活或回滚。切换活动套件或目标模型会立即使旧证据失效。评测结果只保存输出哈希、字节数、确定性断言失败项与 AI provenance，不保存模型正文。追溯记录同样不复制原始 Prompt、知识文本或模型正文；失败时保留已完成调用和脱敏错误类型。Mock Provider 明确标记为离线确定性模型，Token 来源标记为未上报。
 
-审核通过后，自动媒体 `Asset` 才会入队；`manual` 媒体资产进入 `awaiting_upload` 且不创建生成 Job。人工上传按素材 ID 或当前版本唯一占位任务填充原 `Asset`，校验已审核内容版本并把安全规范化后的对象置为 `ready`。搜索模式由 `asset.search` Worker 访问固定 Openverse API 和 Wikimedia 来源，只保留 CC0/PDM/BY/BY-SA、精确允许下载域名及安全 URL；用户必须核验原始许可页面后选择，下载内容仍经过大小、重定向和图片规范化边界。混合模式把搜索与生成素材放入同一候选组，发布只接受显式选中的 ready 候选。编辑内容会增加版本号、清空批准人、把旧素材标记为 `stale` 并创建新素材计划。发布 Worker 再检查：
+审核通过后，自动媒体 `Asset` 才会入队；`manual` 媒体资产进入 `awaiting_upload` 且不创建生成 Job。人工上传按素材 ID 或当前版本唯一占位任务填充原 `Asset`，校验已审核内容版本并把安全规范化后的对象置为 `ready`。编辑人员可通过 `POST /assets/{id}/source` 把已审核、当前版本且未运行/未就绪的单条图片在 manual/generate/search 间改线；接口用行锁验证租户、内容与素材状态，清除旧候选/许可/外部任务引用，递增 revision 并以版本化幂等键入队，运行中、ready、旧版本或混合候选失败关闭。`GET /assets/capabilities` 只暴露能力布尔值。搜索模式由 `asset.search` Worker 访问固定 Openverse API 和 Wikimedia 来源，只保留 CC0/PDM/BY/BY-SA、精确允许下载域名及安全 URL；用户必须核验原始许可页面后选择，下载内容仍经过大小、重定向和图片规范化边界。混合模式把搜索与生成素材放入同一候选组，发布只接受显式选中的 ready 候选。编辑内容会增加版本号、清空批准人、把旧素材标记为 `stale` 并创建新素材计划。发布 Worker 再检查：
 
 - 内容仍是 `approved`
 - 内容版本等于排期时版本

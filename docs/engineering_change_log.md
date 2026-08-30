@@ -536,3 +536,16 @@
 - 实现提交 `1f94450d7fca8be8059bf2d05ab2621f4da8ea35` 已通过普通 `git push` 同步到 `codex/enterprise-media-runtime`，作者为 `John Wang <182348029+heee000@users.noreply.github.com>`，未使用 force 或 force-with-lease。
 - [ContentFlow CI #33313099365](https://github.com/heee000/ContentFlow/actions/runs/33313099365) 四个 Job 全部成功：PostgreSQL/pgvector 与 MinIO 后端和安全门禁、前端 lint/test/生产构建与依赖审计、可复现源码/SBOM，以及签名 SLSA 来源证明和 Python/前端 CycloneDX attestation 均已签收。
 - CI 后端结果为 `241 passed, 145 subtests passed`，分支覆盖率 82.07%。供应链 Artifact `9732605974` 名为 `contentflow-supply-chain-1f94450d7fca8be8059bf2d05ab2621f4da8ea35`，摘要为 `sha256:f6112e8429e00c891c5b2d73e8ea87445df848e7d2317252d2088f002a5f72bb`。
+
+## 2026-08-30 封面来源显式选择与单条任务改线阶段
+
+### CF-20260830-04：封面来源藏在 Brief 下拉框，素材任务一旦建立就像被强制人工上传
+
+- 状态：代码、接口定向回归、受真实 `.env` 影响用例的隔离复跑、前端 lint/生产构建和本地生产栈重建已完成；远程 CI 与登录后业务页验收待本轮提交后补记。
+- 问题与影响：新建活动把 `manual` 作为不醒目的界面默认值，用户可能没有作出选择就创建活动；内容审核后，单条封面任务没有改变来源的 API 和界面，`awaiting_upload` 只能显示上传按钮。因此底层虽然已有 manual/generate/search/hybrid 四种活动级能力，实际体验仍像强制人工上传。
+- 解决方案：活动表单改为四张显式路线卡，不再替新活动预选来源；同时展示人工、AI、开放图库和混合路线的用途及当前环境能力，保存前必须选择。新增认证后的只读 `GET /assets/capabilities`，只返回可用性布尔值，不泄露 Provider、模型、端点或密钥。
+- 单条改线：新增 editor 权限的 `POST /assets/{id}/source`，允许已审核、当前内容版本的图片在 `planned/failed/awaiting_upload/awaiting_selection` 间切换 manual/generate/search。接口在数据库行锁下校验工作区、内容状态、版本、素材类型与可用 Provider；运行中、已就绪、旧版本和混合候选拒绝改写。切换会清理旧图库候选/许可状态/外部任务引用，递增 `source_revision`，使用包含版本与 revision 的队列幂等键，并记录 `asset.source_change` 审计。
+- 界面：素材中心把“选择路线”置于单条封面待办上，人工上传是三种选择之一；AI 未配置时入口仍可见但明确禁用并解释所需配置，开放图库可直接入检索队列。当前路线、最近错误、上传动作和图库许可核验动作分开呈现，避免把“为什么上传”和“只能上传”混为一谈。
+- 验证：新增真实 API 回归覆盖能力探测、未配置 AI 失败关闭、人工→图库、处理中并发切换拒绝、图库候选→人工、候选清理、revision 和 Job 数量；素材定向回归 `5 passed`，Ruff、ESLint 与 Next.js 生产构建通过。真实 `.env` 会把 Prompt 门禁、S3、CORS 和 Provider 注入默认 Settings；受影响的四组使用仅进程有效的完整隔离配置复跑为 `58 passed, 32 subtests passed`。未改写 `.env`。
+- 运行边界：本地 `image_provider=manual`，所以不能宣称真实 AI 图片生成已接通；人工上传和 Openverse 可用。要启用真实 AI 卡片，仍需供应商中立 ContentFlow Media v1 HTTP 图片生成端点、密钥、模型名和精确下载域名白名单。切换图库仍要求用户核验原始许可页面。
+- 现场：`contentflow-live-test` 保留 PostgreSQL/MinIO 数据卷重建 API/Worker/Web，readiness 为 database/storage `ok`、Web HTTP 200。浏览器已打开新的本地登录页；登录后创建一条真实内容并停在待审核队列的证据待补。

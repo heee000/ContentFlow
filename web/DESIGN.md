@@ -27,7 +27,7 @@ ContentFlow uses a restrained enterprise application system inspired by IBM Carb
 - Forms reveal common choices first. Scheduling, script fallback and manual export are progressive options, while safety warnings remain visible at the decision point.
 - On phones, the four workflow stages remain directly reachable and secondary tools move into one native “more” selector.
 - Every campaign receives a stable `CF-XXXXXX` project code. The utility header can scope the workspace to one project, and project code, campaign, product and content title travel together through review, assets, publishing, metrics and jobs.
-- Asset preparation uses three explicit lanes: system processing, action required and ready. Manual upload explains why human input is required, the exact file expected and what becomes unblocked after validation.
+- Asset preparation uses three explicit lanes: system processing, action required and ready. Campaign creation requires an explicit default media route; current-version cover tasks expose manual, AI and open-library routes at the decision point. Manual upload explains why human input is required, the exact file expected and what becomes unblocked after validation, while unavailable AI capability stays visible and clearly disabled.
 
 ## Motion and interaction
 

@@ -362,6 +362,16 @@ class AssetSelectionRequest(BaseModel):
     acknowledge_license_check: bool = False
 
 
+class AssetSourceChangeRequest(BaseModel):
+    source: Literal["manual", "generate", "search"]
+
+
+class AssetCapabilitiesResponse(BaseModel):
+    image_generation_available: bool
+    image_search_available: bool
+    video_generation_available: bool
+
+
 class AssetResponse(ORMModel):
     id: str
     content_item_id: str | None

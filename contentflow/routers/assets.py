@@ -25,7 +25,13 @@ from ..knowledge_service import local_path_from_uri
 from ..media_providers import MediaGeneration, MediaProviderError, download_generated_media
 from ..object_storage import build_object_storage
 from ..publish_evidence import PublishEvidenceError, normalize_publish_evidence
-from ..schemas import AssetResponse, AssetSelectionRequest, JobResponse
+from ..schemas import (
+    AssetCapabilitiesResponse,
+    AssetResponse,
+    AssetSelectionRequest,
+    AssetSourceChangeRequest,
+    JobResponse,
+)
 
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -77,6 +83,18 @@ def list_assets(
     return list(session.scalars(query.order_by(Asset.created_at.desc())))
 
 
+@router.get("/capabilities", response_model=AssetCapabilitiesResponse)
+def get_asset_capabilities(
+    _principal: CurrentPrincipal,
+    settings: AppSettings,
+):
+    return AssetCapabilitiesResponse(
+        image_generation_available=settings.image_provider in {"http", "mock"},
+        image_search_available=settings.image_search_provider == "openverse",
+        video_generation_available=settings.video_provider in {"http", "mock"},
+    )
+
+
 @router.get("/{asset_id}", response_model=AssetResponse)
 def get_asset_detail(asset_id: str, principal: CurrentPrincipal, session: Db):
     return get_asset(session, principal.workspace_id, asset_id)
@@ -112,6 +130,138 @@ def download_asset(
             "Content-Disposition": f'attachment; filename="{asset.id}"',
         },
     )
+
+
+@router.post("/{asset_id}/source", response_model=AssetResponse)
+def change_asset_source(
+    asset_id: str,
+    payload: AssetSourceChangeRequest,
+    principal: Editor,
+    session: Db,
+    settings: AppSettings,
+):
+    asset = get_asset(
+        session,
+        principal.workspace_id,
+        asset_id,
+        for_update=True,
+    )
+    if asset.kind != "image":
+        raise HTTPException(status_code=409, detail="当前只支持切换封面图片来源")
+    if asset.content_item_id is None:
+        raise HTTPException(status_code=409, detail="素材未关联内容")
+    content = session.scalar(
+        select(ContentItem)
+        .where(
+            ContentItem.id == asset.content_item_id,
+            ContentItem.workspace_id == principal.workspace_id,
+        )
+        .with_for_update()
+    )
+    if content is None or content.status != "approved":
+        raise HTTPException(status_code=409, detail="内容审核通过后才能切换封面来源")
+    if asset_content_version(asset) != content.version:
+        raise HTTPException(status_code=409, detail="不能修改旧内容版本的素材")
+    if asset.status not in {
+        "planned",
+        "failed",
+        "awaiting_upload",
+        "awaiting_selection",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="素材正在处理或已经就绪，不能并发切换来源",
+        )
+
+    metadata = dict(asset.metadata_json or {})
+    if metadata.get("candidate_group"):
+        raise HTTPException(
+            status_code=409,
+            detail="混合候选已经分别生成，请直接选择候选素材",
+        )
+    previous_source = str(metadata.get("media_source") or asset.provider)
+    if payload.source == "generate" and settings.image_provider not in {
+        "http",
+        "mock",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="AI 图片生成服务尚未配置，可先选择人工上传或开放图库",
+        )
+    if payload.source == "search" and settings.image_search_provider != "openverse":
+        raise HTTPException(status_code=409, detail="开放图库搜索服务尚未配置")
+
+    try:
+        source_revision = int(metadata.get("source_revision") or 0) + 1
+    except (TypeError, ValueError):
+        source_revision = 1
+    for key in (
+        "candidate_count",
+        "license_checked_at",
+        "license_checked_by_user_id",
+        "license_review_required",
+        "provider_configuration_required",
+        "search_candidates",
+        "search_provider",
+        "selected_candidate",
+        "source_checksum",
+    ):
+        metadata.pop(key, None)
+    metadata = {
+        **metadata,
+        "media_source": payload.source,
+        "source_revision": source_revision,
+        "selected": True,
+        "manual_upload_required": payload.source == "manual",
+    }
+    asset.storage_uri = None
+    asset.mime_type = None
+    asset.size_bytes = None
+    asset.external_task_id = None
+    asset.error = None
+    asset.metadata_json = metadata
+
+    job_type = None
+    if payload.source == "manual":
+        asset.provider = "manual"
+        asset.status = "awaiting_upload"
+    elif payload.source == "search":
+        asset.provider = "openverse"
+        asset.status = "queued"
+        job_type = "asset.search"
+    else:
+        asset.provider = settings.image_provider
+        asset.status = "queued"
+        job_type = "asset.generate"
+
+    if job_type is not None:
+        enqueue_job(
+            session,
+            job_type=job_type,
+            payload={"asset_id": asset.id},
+            workspace_id=principal.workspace_id,
+            idempotency_key=(
+                f"{job_type}:{asset.id}:source-r{source_revision}:"
+                f"content-v{content.version}"
+            ),
+        )
+    record_audit(
+        session,
+        action="asset.source_change",
+        entity_type="asset",
+        entity_id=asset.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "content_item_id": content.id,
+            "content_version": content.version,
+            "from": previous_source,
+            "to": payload.source,
+            "source_revision": source_revision,
+        },
+    )
+    session.flush()
+    return asset
 
 
 @router.post("/{asset_id}/select", response_model=AssetResponse)

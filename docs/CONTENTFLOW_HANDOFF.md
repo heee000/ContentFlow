@@ -1671,3 +1671,19 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 本机 `.env` 启用了真实 BGE、MinIO 和 Prompt 门禁，直接跑隔离测试会污染默认值；测试时只用进程级 `CONTENTFLOW_EMBEDDING_PROVIDER=hash`、`CONTENTFLOW_STORAGE_BACKEND=local`、`CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=false` 覆盖，禁止改写真实 `.env`。
 - 继续排除 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`、`.env`、模型缓存、备份和运行数据。微信渠道保持 `auto_publish=false`；本轮没有调用任何平台接口，也没有创建素材、草稿或公开发布副作用。
 - 实现提交 `1f94450d7fca8be8059bf2d05ab2621f4da8ea35` 已用 John Wang 身份普通推送到 `codex/enterprise-media-runtime`，未使用 force；[ContentFlow CI #33313099365](https://github.com/heee000/ContentFlow/actions/runs/33313099365) 四个 Job 全部成功。CI 在 PostgreSQL/pgvector 与 MinIO 上为 `241 passed, 145 subtests passed`，分支覆盖率 82.07%；Artifact `9732605974` 摘要为 `sha256:f6112e8429e00c891c5b2d73e8ea87445df848e7d2317252d2088f002a5f72bb`，SLSA 与 Python/前端 CycloneDX attestation 已反向验证。
+
+## 21.34 封面来源显式选择与单条任务改线增量交接
+
+### 本轮实现
+
+1. 新活动不再在 Web 中隐式预选人工封面。用户必须在人工上传、AI 生成、开放图库、图库+AI 四张路线卡中明确选择；卡片同步显示当前环境是否已配置对应能力，并说明内容审核后还能针对单条封面改线。后端 Campaign 默认值仍保留 `manual`，避免破坏既有 API 客户端兼容性。
+2. 新增认证只读 `GET /api/v1/assets/capabilities`，只返回图片生成、图片搜索和视频生成三个可用性布尔值，不返回内部 Provider、模型、端点或密钥。
+3. 新增 editor 权限的 `POST /api/v1/assets/{asset_id}/source`。仅允许已审核、当前内容版本、非混合候选的图片，在没有运行中任务和未就绪时切换 manual/generate/search；工作区、内容和素材均加锁校验。切换清除旧候选、许可、错误和外部任务引用，递增 source_revision，队列键包含 revision/content version，并审计 `asset.source_change`。
+4. 素材中心对每条可改线封面显示三路选择。人工上传不再是唯一动作；AI 未配置时保留可发现但禁用的入口，开放图库可直接检索，人工路线才显示文件选择。运行中、ready、旧版本或混合候选保持拒绝改写，防止旧 Worker 结果覆盖用户新选择。
+
+### 当前验证与边界
+
+- 新增能力/改线回归与既有候选选择合计 `5 passed`；Ruff、前端 ESLint、TypeScript/Next 生产构建通过。根目录真实 `.env` 会污染默认单元测试 Settings，首轮全量出现 Prompt 门禁/S3/CORS/Provider 相关失败；未修改 `.env`，用进程级完整隔离配置复跑受影响 `test_api_v2/test_script_publish_flow/test_security/test_worker_v2` 为 `58 passed, 32 subtests passed`。远程 PostgreSQL/MinIO 全量 CI 仍是最终签收门禁。
+- 当前真实栈明确报告图片生成不可用、Openverse 可用；没有媒体端点时 API 对 AI 改线 409 失败关闭，界面不会用 mock 冒充。启用真实 AI 生成仍需 ContentFlow Media v1 HTTP 端点、密钥、图片模型和精确下载域名白名单。
+- `contentflow-live-test` 保留数据卷重建后 API/Worker/Web/PostgreSQL/MinIO 正常。新的本地浏览器页因重建后会话失效停在登录界面；用户登录后再创建测试内容并停在 `needs_review/awaiting_review`，不得继续审核素材或创建发布任务。
+- 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。公众号 `auto_publish=false`，本轮未调用平台接口、创建微信永久素材/草稿或公开发布。

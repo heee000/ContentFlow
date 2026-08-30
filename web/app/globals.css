@@ -139,6 +139,32 @@ textarea { min-height: 96px; resize: vertical; }
 input:focus, textarea:focus, select:focus { border-bottom: 2px solid var(--blue); outline: none; }
 label small { color: var(--ink-muted); font-size: 12px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.media-source-fieldset { padding: 0; border: 0; }
+.field-help { margin: 0; color: var(--ink-muted); font-size: 12px; }
+.field-prompt { color: var(--blue-dark); }
+.media-source-grid { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--border); border-left: 1px solid var(--border); }
+.media-source-option {
+  position: relative;
+  min-height: 132px;
+  display: grid !important;
+  grid-template-columns: 1fr auto;
+  align-content: space-between;
+  gap: 12px !important;
+  padding: 16px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: white;
+  cursor: pointer;
+}
+.media-source-option:hover { background: var(--surface); }
+.media-source-option:focus-within { outline: 2px solid var(--blue); outline-offset: -2px; }
+.media-source-option.selected { border-bottom: 3px solid var(--blue); background: var(--info-soft); }
+.media-source-option input { position: absolute; width: 1px; min-height: 1px; padding: 0; opacity: 0; }
+.media-source-option > span { display: grid; align-content: start; gap: 7px; }
+.media-source-option strong { font-size: 14px; }
+.media-source-option small { line-height: 1.5; }
+.media-source-option > b { align-self: start; color: var(--ink-muted); font-size: 10px; font-weight: 500; }
+.media-source-option.selected > b { color: var(--blue-dark); }
 .checkbox-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .checkbox-row label {
   min-height: 44px;
@@ -990,6 +1016,16 @@ tbody tr:last-child td { border-bottom: 0; }
 .asset-action-copy { min-width: 0; }
 .asset-action-copy p { margin: 5px 0 0; color: var(--ink-muted); font-size: 12px; line-height: 1.55; }
 .asset-action-card .button { text-decoration: none; }
+.asset-source-card { grid-template-columns: minmax(220px, 0.8fr) minmax(240px, 1fr) minmax(360px, 1.5fr); }
+.asset-source-actions { display: grid; gap: 12px; }
+.asset-source-actions > .button { justify-self: end; }
+.asset-source-chooser { display: grid; gap: 7px; }
+.asset-source-chooser > span { color: var(--ink-muted); font-size: 11px; }
+.asset-source-chooser > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.asset-source-chooser .button { min-width: 0; padding-inline: 10px; border-right-width: 0; font-size: 12px; }
+.asset-source-chooser .button:last-child { border-right-width: 1px; }
+.asset-source-chooser .button-secondary:disabled { opacity: 1; }
+.asset-source-chooser > small { color: var(--ink-muted); font-size: 10px; }
 .upload-explainer { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--border); background: var(--surface); }
 .upload-explainer > div { min-height: 112px; display: grid; align-content: center; gap: 6px; padding: 16px 20px; border-right: 1px solid var(--border); }
 .upload-explainer > div:last-child { border-right: 0; }
@@ -1050,6 +1086,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .active-generation-title { border-right: 0; border-bottom: 1px solid var(--border); }
   .asset-processing-row,
   .asset-action-card { grid-template-columns: 1fr; }
+  .media-source-grid { grid-template-columns: repeat(2, 1fr); }
   .review-queue { display: grid; grid-template-columns: repeat(2, 1fr); }
   .review-queue .panel-heading { grid-column: 1 / -1; }
 }
@@ -1119,6 +1156,9 @@ tbody tr:last-child td { border-bottom: 0; }
   .dashboard-grid, .connector-grid, .knowledge-grid { grid-template-columns: 1fr; }
   .span-2, .span-3 { grid-column: auto; }
   .form-grid { grid-template-columns: 1fr; }
+  .media-source-grid { grid-template-columns: 1fr; }
+  .asset-source-chooser > div { grid-template-columns: 1fr; gap: 4px; }
+  .asset-source-chooser .button { border-right-width: 1px; }
   .prompt-active-summary { grid-template-columns: 1fr; }
   .prompt-draft-toolbar { flex-direction: column; }
   .prompt-active-summary > div { border-right: 0; }

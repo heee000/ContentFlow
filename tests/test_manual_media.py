@@ -248,6 +248,88 @@ class ManualMediaFlowTest(unittest.TestCase):
             wrong_storyboard_type.text,
         )
 
+    def test_cover_source_can_change_after_approval_without_forcing_upload(self):
+        capabilities = self.client.get(
+            "/api/v1/assets/capabilities",
+            headers=self.headers,
+        )
+        self.assertEqual(capabilities.status_code, 200, capabilities.text)
+        self.assertFalse(capabilities.json()["image_generation_available"])
+        self.assertTrue(capabilities.json()["image_search_available"])
+
+        reviewed = self.client.post(
+            f"/api/v1/contents/{self.content_id}/review",
+            headers=self.headers,
+            json={
+                "decision": "approve",
+                "reason": "文案已核验，可以选择封面路线",
+                "expected_version": 1,
+            },
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+
+        unavailable = self.client.post(
+            f"/api/v1/assets/{self.asset_id}/source",
+            headers=self.headers,
+            json={"source": "generate"},
+        )
+        self.assertEqual(unavailable.status_code, 409, unavailable.text)
+        self.assertIn("尚未配置", unavailable.json()["error"]["message"])
+
+        searched = self.client.post(
+            f"/api/v1/assets/{self.asset_id}/source",
+            headers=self.headers,
+            json={"source": "search"},
+        )
+        self.assertEqual(searched.status_code, 200, searched.text)
+        searched_payload = searched.json()
+        self.assertEqual(searched_payload["provider"], "openverse")
+        self.assertEqual(searched_payload["status"], "queued")
+        self.assertEqual(searched_payload["metadata_json"]["media_source"], "search")
+        self.assertFalse(
+            searched_payload["metadata_json"]["manual_upload_required"]
+        )
+
+        concurrent_change = self.client.post(
+            f"/api/v1/assets/{self.asset_id}/source",
+            headers=self.headers,
+            json={"source": "manual"},
+        )
+        self.assertEqual(concurrent_change.status_code, 409, concurrent_change.text)
+
+        with db.SessionLocal() as session:
+            asset = session.get(Asset, self.asset_id)
+            asset.status = "awaiting_selection"
+            asset.metadata_json = {
+                **asset.metadata_json,
+                "search_candidates": [{"id": "discarded-candidate"}],
+            }
+            session.commit()
+
+        manual = self.client.post(
+            f"/api/v1/assets/{self.asset_id}/source",
+            headers=self.headers,
+            json={"source": "manual"},
+        )
+        self.assertEqual(manual.status_code, 200, manual.text)
+        manual_payload = manual.json()
+        self.assertEqual(manual_payload["provider"], "manual")
+        self.assertEqual(manual_payload["status"], "awaiting_upload")
+        self.assertTrue(manual_payload["metadata_json"]["manual_upload_required"])
+        self.assertNotIn("search_candidates", manual_payload["metadata_json"])
+        self.assertEqual(manual_payload["metadata_json"]["source_revision"], 2)
+
+        with db.SessionLocal() as session:
+            source_jobs = list(
+                session.scalars(
+                    select(Job).where(
+                        Job.job_type == "asset.search",
+                        Job.workspace_id == self.workspace_id,
+                    )
+                )
+            )
+            self.assertEqual(len(source_jobs), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

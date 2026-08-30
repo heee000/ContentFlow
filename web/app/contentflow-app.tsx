@@ -131,6 +131,14 @@ type Asset = {
   created_at: string;
 };
 
+type MediaSource = "manual" | "generate" | "search" | "hybrid";
+
+type MediaCapabilities = {
+  image_generation_available: boolean;
+  image_search_available: boolean;
+  video_generation_available: boolean;
+};
+
 type StyleSkill = {
   id: string;
   source: "builtin" | "workspace";
@@ -495,6 +503,7 @@ type DataState = {
   styleSkills: StyleSkill[];
   contents: Content[];
   assets: Asset[];
+  mediaCapabilities: MediaCapabilities;
   channels: Channel[];
   publishes: PublishJob[];
   knowledge: KnowledgeDocument[];
@@ -521,6 +530,11 @@ const EMPTY_DATA: DataState = {
   styleSkills: [],
   contents: [],
   assets: [],
+  mediaCapabilities: {
+    image_generation_available: false,
+    image_search_available: false,
+    video_generation_available: false,
+  },
   channels: [],
   publishes: [],
   knowledge: [],
@@ -1065,6 +1079,7 @@ export function ContentFlowApp() {
         styleSkills,
         contents,
         assets,
+        mediaCapabilities,
         channels,
         publishes,
         knowledge,
@@ -1082,6 +1097,7 @@ export function ContentFlowApp() {
         api<StyleSkill[]>("/style-skills"),
         api<Content[]>("/contents"),
         api<Asset[]>("/assets"),
+        api<MediaCapabilities>("/assets/capabilities"),
         api<Channel[]>("/channels"),
         api<PublishJob[]>("/publishing/jobs"),
         api<KnowledgeDocument[]>("/knowledge/documents"),
@@ -1112,6 +1128,7 @@ export function ContentFlowApp() {
         styleSkills,
         contents,
         assets,
+        mediaCapabilities,
         channels,
         publishes,
         knowledge,
@@ -1434,6 +1451,7 @@ export function ContentFlowApp() {
               campaigns={scopedCampaigns}
               runs={scopedRuns}
               styleSkills={data.styleSkills}
+              mediaCapabilities={data.mediaCapabilities}
               role={session.role}
               onChanged={() => loadData()}
               flash={flash}
@@ -1453,6 +1471,7 @@ export function ContentFlowApp() {
               assets={scopedAssets}
               campaigns={data.campaigns}
               contents={scopedContents}
+              mediaCapabilities={data.mediaCapabilities}
               role={session.role}
               onChanged={() => loadData()}
               flash={flash}
@@ -1761,6 +1780,7 @@ function CampaignsView({
   campaigns,
   runs,
   styleSkills,
+  mediaCapabilities,
   role,
   onChanged,
   flash,
@@ -1768,6 +1788,7 @@ function CampaignsView({
   campaigns: Campaign[];
   runs: WorkflowRun[];
   styleSkills: StyleSkill[];
+  mediaCapabilities: MediaCapabilities;
   role: string;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
@@ -1778,21 +1799,25 @@ function CampaignsView({
   const [busyId, setBusyId] = useState("");
   const [error, setError] = useState("");
   const [expandedCampaignId, setExpandedCampaignId] = useState("");
+  const [imageSource, setImageSource] = useState<MediaSource | "">("");
 
   const canEdit = roleAtLeast(role, "editor");
 
   function closeForm() {
     setShowForm(false);
     setEditingCampaign(null);
+    setImageSource("");
   }
 
   function openCreate() {
     setEditingCampaign(null);
+    setImageSource("");
     setShowForm(true);
   }
 
   function openEdit(campaign: Campaign) {
     setEditingCampaign(campaign);
+    setImageSource(campaign.brief.image_source || "manual");
     setShowForm(true);
   }
 
@@ -2067,26 +2092,71 @@ function CampaignsView({
               />
               <small>这是本活动补充规则，不会修改已安装 Skill</small>
             </label>
-            <div className="form-grid">
-              <label>封面来源
-                <select
-                  name="image_source"
-                  defaultValue={editingCampaign?.brief.image_source || "manual"}
-                >
-                  <option value="manual">人工上传真实封面</option>
-                  <option value="generate">AI 生成图片</option>
-                  <option value="search">开放授权图库搜索</option>
-                  <option value="hybrid">搜索 + AI 生成，之后人工选择</option>
-                </select>
-              </label>
-              <label>图片搜索词（可选）
-                <input
-                  name="image_search_query"
-                  defaultValue={editingCampaign?.brief.image_search_query || ""}
-                  placeholder="留空则由内容 Agent 生成搜索词"
-                />
-              </label>
-            </div>
+            <fieldset className="media-source-fieldset">
+              <legend>封面怎么准备</legend>
+              <p className="field-help">
+                请选择本活动的默认方式。这不是强制上传：内容审核通过后，仍可在素材中心针对单条封面切换路线。
+              </p>
+              <div className="media-source-grid">
+                {([
+                  {
+                    value: "manual",
+                    title: "人工上传",
+                    description: "使用你有权发布的品牌图、实拍图或设计稿。",
+                    badge: "随时可用",
+                  },
+                  {
+                    value: "generate",
+                    title: "AI 生成",
+                    description: "根据内容 Agent 产出的视觉提示词生成封面。",
+                    badge: mediaCapabilities.image_generation_available ? "已配置" : "当前未配置",
+                  },
+                  {
+                    value: "search",
+                    title: "开放图库",
+                    description: "检索候选图，人工核验作者、许可和署名后选用。",
+                    badge: mediaCapabilities.image_search_available ? "已配置" : "当前未配置",
+                  },
+                  {
+                    value: "hybrid",
+                    title: "图库 + AI",
+                    description: "同时准备两类候选，最后由你明确选定。",
+                    badge: mediaCapabilities.image_generation_available && mediaCapabilities.image_search_available
+                      ? "已配置"
+                      : "部分未配置",
+                  },
+                ] as const).map((option) => (
+                  <label
+                    className={`media-source-option ${imageSource === option.value ? "selected" : ""}`}
+                    key={option.value}
+                  >
+                    <input
+                      type="radio"
+                      name="image_source"
+                      value={option.value}
+                      checked={imageSource === option.value}
+                      onChange={() => setImageSource(option.value)}
+                      required
+                    />
+                    <span>
+                      <strong>{option.title}</strong>
+                      <small>{option.description}</small>
+                    </span>
+                    <b>{option.badge}</b>
+                  </label>
+                ))}
+              </div>
+              {!imageSource ? (
+                <small className="field-prompt">请选择一种默认封面来源后再保存活动。</small>
+              ) : null}
+            </fieldset>
+            <label>图片搜索词（选择开放图库时使用，可选）
+              <input
+                name="image_search_query"
+                defaultValue={editingCampaign?.brief.image_search_query || ""}
+                placeholder="留空则由内容 Agent 结合主题自动生成搜索词"
+              />
+            </label>
             <label>产品事实<input name="product_facts" defaultValue={editingCampaign?.brief.product_facts?.join("，")} placeholder="已确认的功能、服务范围或业务事实" /><small>使用逗号分隔，生成和审核只以这些事实为依据</small></label>
             <div className="form-grid">
               <label>必含信息<input name="must_include" defaultValue={editingCampaign?.brief.must_include?.join("，")} placeholder="路线确认，候选地点" /><small>使用逗号分隔</small></label>
@@ -2487,6 +2557,7 @@ function AssetsView({
   campaigns,
   assets,
   contents,
+  mediaCapabilities,
   role,
   onChanged,
   flash,
@@ -2494,6 +2565,7 @@ function AssetsView({
   campaigns: Campaign[];
   assets: Asset[];
   contents: Content[];
+  mediaCapabilities: MediaCapabilities;
   role: string;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
@@ -2503,6 +2575,7 @@ function AssetsView({
   const [showUpload, setShowUpload] = useState(false);
   const [uploadTargetId, setUploadTargetId] = useState("");
   const [uploadKind, setUploadKind] = useState("image");
+  const [sourceBusyId, setSourceBusyId] = useState("");
   const canEdit = roleAtLeast(role, "editor");
   const contentMap = useMemo(
     () => Object.fromEntries(contents.map((item) => [item.id, item.title])),
@@ -2534,7 +2607,20 @@ function AssetsView({
   );
   const awaitingUpload = assets.filter((asset) => asset.status === "awaiting_upload");
   const awaitingSelection = assets.filter((asset) => asset.status === "awaiting_selection");
-  const needsAction = [...awaitingUpload, ...awaitingSelection].length;
+  const sourceChoiceAssets = assets.filter((asset) => (
+    asset.kind === "image"
+    && ["failed", "awaiting_upload", "awaiting_selection"].includes(asset.status)
+    && contentById[asset.content_item_id || ""]?.status === "approved"
+    && Number(asset.metadata_json.content_version || 1)
+      === contentVersionMap[asset.content_item_id || ""]
+    && !asset.metadata_json.candidate_group
+  ));
+  const sourceChoiceIds = new Set(sourceChoiceAssets.map((asset) => asset.id));
+  const otherAwaitingUpload = awaitingUpload.filter((asset) => !sourceChoiceIds.has(asset.id));
+  const otherAwaitingSelection = awaitingSelection.filter((asset) => !sourceChoiceIds.has(asset.id));
+  const needsAction = sourceChoiceAssets.length
+    + otherAwaitingUpload.length
+    + otherAwaitingSelection.length;
   const readyAssets = assets.filter((asset) => asset.status === "ready");
   const campaignForAsset = (asset: Asset) => {
     const content = contentById[asset.content_item_id || ""];
@@ -2557,6 +2643,90 @@ function AssetsView({
         block: "start",
       });
     }, 0);
+  }
+  function sourceOf(asset: Asset): Exclude<MediaSource, "hybrid"> {
+    const recorded = asset.metadata_json.media_source;
+    if (recorded === "manual" || recorded === "generate" || recorded === "search") {
+      return recorded;
+    }
+    if (["manual", "manual-upload"].includes(asset.provider)) return "manual";
+    if (asset.provider === "openverse") return "search";
+    return "generate";
+  }
+  async function changeSource(
+    asset: Asset,
+    source: Exclude<MediaSource, "hybrid">,
+  ) {
+    if (sourceOf(asset) === source) return;
+    if (
+      asset.status === "awaiting_selection"
+      && !window.confirm("切换路线会清除当前图库候选，确认继续？")
+    ) {
+      return;
+    }
+    setSourceBusyId(`${asset.id}-${source}`);
+    setError("");
+    try {
+      await api(`/assets/${asset.id}/source`, {
+        method: "POST",
+        body: { source },
+      });
+      flash(
+        source === "manual"
+          ? "已改为人工上传，你可以继续选择本机文件"
+          : source === "search"
+            ? "已改用开放图库，正在检索候选图片"
+            : "已改用 AI 生成，素材任务已经入队",
+      );
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setSourceBusyId("");
+    }
+  }
+  function sourceChooser(asset: Asset) {
+    const current = sourceOf(asset);
+    const options: Array<{
+      source: Exclude<MediaSource, "hybrid">;
+      label: string;
+      available: boolean;
+    }> = [
+      { source: "manual", label: "人工上传", available: true },
+      {
+        source: "generate",
+        label: mediaCapabilities.image_generation_available ? "AI 生成" : "AI 生成 · 未配置",
+        available: mediaCapabilities.image_generation_available,
+      },
+      {
+        source: "search",
+        label: mediaCapabilities.image_search_available ? "开放图库" : "开放图库 · 未配置",
+        available: mediaCapabilities.image_search_available,
+      },
+    ];
+    return (
+      <div className="asset-source-chooser">
+        <span>这条封面怎么准备</span>
+        <div role="group" aria-label="切换封面来源">
+          {options.map((option) => (
+            <Button
+              type="button"
+              kind={current === option.source ? "secondary" : "ghost"}
+              key={option.source}
+              disabled={current === option.source || !option.available}
+              busy={sourceBusyId === `${asset.id}-${option.source}`}
+              title={!option.available ? "需要管理员先配置对应素材服务" : undefined}
+              onClick={() => void changeSource(asset, option.source)}
+            >
+              {option.label}
+            </Button>
+          ))}
+        </div>
+        {!mediaCapabilities.image_generation_available ? (
+          <small>AI 生成入口已保留；配置真实图片生成 Provider 后即可选择。</small>
+        ) : null}
+      </div>
+    );
   }
   async function retry(asset: Asset) {
     try {
@@ -2638,7 +2808,7 @@ function AssetsView({
         </article>
         <article className={needsAction ? "asset-stage-lane asset-stage-action" : "asset-stage-lane"}>
           <span className="asset-stage-number">2</span>
-          <div><strong>等你操作</strong><small>上传真实文件，或核验并选用候选图</small></div>
+          <div><strong>等你操作</strong><small>先选素材路线，再上传文件或核验候选图</small></div>
           <b>{needsAction}</b>
         </article>
         <article className="asset-stage-lane">
@@ -2670,38 +2840,70 @@ function AssetsView({
           </div>
         </section>
       ) : null}
-      {awaitingUpload.length || awaitingSelection.length ? (
+      {needsAction ? (
         <section className="panel asset-action-panel">
           <div className="panel-heading">
-            <div><p className="eyebrow">Action required</p><h2>等你操作</h2><p>只处理下面列出的任务；没有列出时不需要上传。</p></div>
+            <div><p className="eyebrow">Action required</p><h2>选择素材准备方式</h2><p>人工上传不是必选项。你可以对每条封面单独选择人工上传、AI 生成或开放图库。</p></div>
           </div>
           <div className="asset-action-list">
-            {awaitingUpload.map((asset) => (
+            {sourceChoiceAssets.map((asset) => {
+              const currentSource = sourceOf(asset);
+              return (
+              <article className="asset-action-card asset-source-card" key={asset.id}>
+                <ProjectIdentity
+                  campaign={campaignForAsset(asset)}
+                  contentTitle={contentMap[asset.content_item_id || ""]}
+                />
+                <div className="asset-action-copy">
+                  <strong>
+                    {asset.status === "failed"
+                      ? "当前封面路线不可用，请重新选择"
+                      : currentSource === "search"
+                        ? "图库候选已经准备好，等待你核验"
+                        : "封面尚未就绪，请选择一种准备方式"}
+                  </strong>
+                  <p>
+                    {asset.error
+                      ? `最近错误：${asset.error}`
+                      : currentSource === "manual"
+                        ? "当前选择人工上传；你也可以直接改用 AI 生成或开放图库。"
+                        : "当前选择开放图库；选用前必须核验作者、许可和署名要求。"}
+                  </p>
+                </div>
+                <div className="asset-source-actions">
+                  {canEdit ? sourceChooser(asset) : null}
+                  {canEdit && currentSource === "manual" ? (
+                    <Button onClick={() => openUpload(asset.id)}>选择文件并上传</Button>
+                  ) : null}
+                  {currentSource === "search" && asset.status === "awaiting_selection" ? (
+                    <a className="button button-primary" href={`#asset-candidates-${asset.id}`}>查看并核验候选图</a>
+                  ) : null}
+                </div>
+              </article>
+              );
+            })}
+            {otherAwaitingUpload.map((asset) => (
               <article className="asset-action-card" key={asset.id}>
                 <ProjectIdentity
                   campaign={campaignForAsset(asset)}
                   contentTitle={contentMap[asset.content_item_id || ""]}
                 />
                 <div className="asset-action-copy">
-                  <strong>需要上传{asset.kind === "image" ? "真实封面图片" : asset.kind === "video" ? "真实视频" : "分镜 JSON"}</strong>
-                  <p>
-                    {asset.metadata_json.reason === "provider_configuration_required"
-                      ? "活动选择了 AI 图片，但当前没有可用图片 Provider；为保证发布内容真实可用，需要你补充文件。"
-                      : "该活动选择了人工真实素材，系统不会替你猜测品牌视觉或自动使用未授权图片。"}
-                  </p>
+                  <strong>需要上传{asset.kind === "video" ? "真实视频" : "分镜 JSON"}</strong>
+                  <p>这个任务不是封面图片，仍需按任务要求提供对应文件。</p>
                 </div>
                 {canEdit ? <Button onClick={() => openUpload(asset.id)}>查看要求并上传</Button> : null}
               </article>
             ))}
-            {awaitingSelection.map((asset) => (
+            {otherAwaitingSelection.map((asset) => (
               <article className="asset-action-card" key={asset.id}>
                 <ProjectIdentity
                   campaign={campaignForAsset(asset)}
                   contentTitle={contentMap[asset.content_item_id || ""]}
                 />
                 <div className="asset-action-copy">
-                  <strong>需要核验并选择候选图片</strong>
-                  <p>打开图片原始页面核对作者、许可与署名要求，再明确选用；系统不会自动替你接受许可风险。</p>
+                  <strong>混合路线候选等待选择</strong>
+                  <p>活动已同时准备图库与 AI 候选；核验来源后选定其中一张即可。</p>
                 </div>
                 <a className="button button-ghost" href={`#asset-candidates-${asset.id}`}>查看候选图</a>
               </article>
