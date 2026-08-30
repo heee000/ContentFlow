@@ -1,0 +1,163 @@
+name: Build public-test images
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Exact 40-character commit SHA with a successful ContentFlow CI run
+        required: true
+        type: string
+      public_origin:
+        description: Public HTTPS origin baked into the Web image, without a trailing slash
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: public-test-images-${{ inputs.release_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, attest, scan, and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: public-test-build
+
+    steps:
+      - name: Validate immutable release inputs
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          PUBLIC_ORIGIN: ${{ inputs.public_origin }}
+        run: |
+          if ! [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release_sha must be a full lowercase Git SHA" >&2
+            exit 1
+          fi
+          if ! [[ "${PUBLIC_ORIGIN}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+            echo "public_origin must be an HTTPS origin without path or credentials" >&2
+            exit 1
+          fi
+
+      - name: Require a successful CI run for the exact SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          count="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            --method GET \
+            -f head_sha="${RELEASE_SHA}" -f status=success -f per_page=1 \
+            --jq '.total_count')"
+          if [ "${count}" -lt 1 ]; then
+            echo "No successful ContentFlow CI run exists for ${RELEASE_SHA}" >&2
+            exit 1
+          fi
+
+      - name: Check out the exact release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+
+      - name: Log in to GHCR without persisting a repository credential
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Create isolated BuildKit builder
+        run: docker buildx create --name contentflow-public-test --driver docker-container --use
+
+      - name: Build and push backend and Web images with OCI attestations
+        id: images
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          PUBLIC_ORIGIN: ${{ inputs.public_origin }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          backend="ghcr.io/${owner}/contentflow-backend:sha-${RELEASE_SHA}"
+          web="ghcr.io/${owner}/contentflow-web:sha-${RELEASE_SHA}"
+          common_labels=(
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            --label "org.opencontainers.image.revision=${RELEASE_SHA}"
+          )
+          docker buildx build . \
+            --platform linux/amd64 \
+            --tag "${backend}" \
+            "${common_labels[@]}" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file dist/backend-metadata.json \
+            --push
+          docker buildx build web \
+            --platform linux/amd64 \
+            --tag "${web}" \
+            "${common_labels[@]}" \
+            --build-arg "NEXT_PUBLIC_CONTENTFLOW_API_BASE=${PUBLIC_ORIGIN}/api/v1" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file dist/web-metadata.json \
+            --push
+          backend_digest="$(jq -r '."containerimage.digest"' dist/backend-metadata.json)"
+          web_digest="$(jq -r '."containerimage.digest"' dist/web-metadata.json)"
+          if ! [[ "${backend_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || \
+             ! [[ "${web_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "BuildKit did not return immutable image digests" >&2
+            exit 1
+          fi
+          {
+            echo "CONTENTFLOW_RELEASE_SHA=${RELEASE_SHA}"
+            echo "CONTENTFLOW_BACKEND_IMAGE=ghcr.io/${owner}/contentflow-backend@${backend_digest}"
+            echo "CONTENTFLOW_WEB_IMAGE=ghcr.io/${owner}/contentflow-web@${web_digest}"
+            echo "CONTENTFLOW_PUBLIC_ORIGIN=${PUBLIC_ORIGIN}"
+          } > dist/release.env
+          echo "backend=${backend}" >> "${GITHUB_OUTPUT}"
+          echo "web=${web}" >> "${GITHUB_OUTPUT}"
+
+      - name: Scan backend image for fixed critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.images.outputs.backend }}
+          format: json
+          output: dist/backend-trivy.json
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL
+
+      - name: Scan Web image for fixed critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.images.outputs.web }}
+          format: json
+          output: dist/web-trivy.json
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL
+
+      - name: Upload immutable release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: contentflow-public-test-images-${{ inputs.release_sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release coordinates in the run summary
+        run: |
+          {
+            echo '## Public-test image release'
+            echo '```text'
+            cat dist/release.env
+            echo '```'
+            echo 'Deployment remains manual and requires the protected public-test environment.'
+          } >> "${GITHUB_STEP_SUMMARY}"

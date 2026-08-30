@@ -368,6 +368,14 @@ GitHub 用来“管理和交付”，不直接“运行产品”：
 
 ## 10. 参考资料
 
+## 10. 仓库实现进度（2026-08-31）
+
+- M1 仓库资产已实现：`deploy/public-test`、静态 Compose 门禁、R2 完整探针、BGE 固定缓存和加密备份/隔离恢复入口；仍待临时 Linux 主机实际签收。
+- M2 主体已实现：GHCR digest 构建、BuildKit OCI provenance/SBOM、Trivy Critical 门禁、成功 build Artifact 绑定和受保护 SSH 手工部署；独立镜像签名/部署时验签及真实 workflow run 待补。
+- M3-M5 尚未执行，当前仍不是公网已上线状态。外部资源准备和执行顺序以 `deploy/public-test/README.md` 为准。
+
+## 11. 参考资料
+
 - [GitHub Pages 是静态站点托管服务](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages)
 - [GitHub Container Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
 - [Vercel 上的 Next.js](https://vercel.com/docs/frameworks/full-stack/nextjs)

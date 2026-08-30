@@ -1723,3 +1723,28 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 当前适配器会发送 `dimensions=1024`，数据库结构可兼容支持缩短维度的模型；切换模型仍必须重建全部知识向量，禁止混用。
 - 当前 Embedding 与文本共用 `CONTENTFLOW_MODEL_API_BASE/KEY`。若文本继续 DeepSeek、Embedding 使用其他服务，先增加独立的供应商中立 Embedding Base/Key 配置和安全校验，不要覆盖文本 Provider 配置。
 - API 后备优先验证 `text-embedding-3-small`；官方价 $0.02/百万输入 Token。价格低不等于中文 RAG 已签收，仍需检索金标、时延、限流、账单和失败恢复证据。
+
+## 21.37 公网测试部署资产与受控交付增量交接
+
+### 已实现
+
+1. `deploy/public-test` 已包含独立 Compose、Caddy、无密钥 env 模板、部署/备份/隔离恢复脚本和操作手册。公网栈只发布 Caddy 80/443，不运行 MinIO；API、Worker、Web、PostgreSQL 和维护工具均为内部网络，API/Worker 使用同一不可变后端 digest。
+2. `scripts/validate_public_test_deployment.py` 渲染 maintenance profile 后 fail-closed 检查所有镜像 digest、端口、Provider、HTTPS、CORS、注册、release SHA 和 Caddy 路由；现有 CI 已接入该检查。
+3. OpenAI-compatible Embedding 可使用独立 `EMBEDDING_API_BASE/KEY`，未设置时保持与文本共用 `MODEL_API_BASE/KEY` 的兼容行为。固定 BGE 缓存有 prepare/offline verify manifest；S3 conformance 覆盖单段、multipart、100 MiB、Metadata、读取和精确删除。
+4. 公网 PostgreSQL 使用 restic 客户端加密到独立 R2，保留 7 日/4 周；每次已有环境部署前备份，验证恢复只创建随机临时数据库。业务 R2 与备份 R2 的 Bucket/Token 不得复用。
+5. 公网注册保持关闭。`contentflow-bootstrap-admin` 从 TTY 读取密码，在空库创建首个 workspace/admin，再按 slug 创建第二 admin；拒绝非空首建、已有邮箱和注册开启状态，并写审计。
+6. `build-images.yml` 要求 exact SHA 已有成功 CI，向 GHCR 推送 amd64 镜像、OCI provenance/SBOM、Trivy Critical 报告和 digest Artifact。`deploy-public-test.yml` 仅手工触发、受 Environment 批准，从指定 build run Artifact 读取镜像坐标，以预置 known_hosts 严格 SSH，远端通过备份、迁移、readiness 和 Worker heartbeat 后才更新 current symlink。
+7. 本地最终验证为 Ruff 通过；后端 `245 passed, 7 skipped, 145 subtests passed`、覆盖率 80.96%；11 个 YAML、公网 Compose 和 4 个 shell 语法通过；Node 24.19.0 锁文件重建后的 ESLint、2 项 vinext 渲染测试、HTTPS Next 构建和 npm audit 通过。Node 22.11.0 低于项目 engines 并漏装 rolldown Windows 可选绑定，只记录为本机运行时问题，未改锁文件。
+
+### 尚未签收
+
+- 尚未创建 Hetzner/后备 Lightsail 主机、Primary IPv4、DNS、R2 Bucket/Token 或 GitHub Environment；没有执行真实 GHCR build/deploy workflow。
+- Caddy ACME、R2 完整矩阵、restic init/备份/月度恢复、BGE 冷缓存下载、4 GiB 峰值、镜像回退和主机丢失恢复都只有仓库实现，必须在目标 Linux 主机留证后才能签收。
+- 微信仍需把目标 Worker 固定出口 IPv4 加白名单，并从两个客户端网络验证同一出口和“不公开发布”草稿链路；`auto_publish=false` 不变。
+- 镜像当前具备 BuildKit OCI attestation 和扫描报告，但独立签名、注册表保留、防篡改部署验签仍是后续门槛。
+
+### 继续接手规则
+
+- 用户下一步只需提供外部资源或受限部署入口，不需要重新设计拓扑。优先按 `deploy/public-test/README.md` 的资源清单创建主机、域名和双 R2 Bucket。
+- 不把本机 `.env`、账号文档、数据库、MinIO 或 BGE cache 直接上传。目标环境从 `env.example` 新建密钥，平台凭据在 Web 重新录入。
+- 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；所有提交只显式暂存本轮文件。

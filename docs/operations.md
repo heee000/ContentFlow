@@ -275,7 +275,23 @@ npm audit --audit-level=moderate
 
 升级 Python 依赖后必须重新运行 `uv lock` 和漏洞审计；升级前端依赖后必须更新 `package-lock.json` 并从空 `node_modules` 执行 `npm ci`。不要未经依赖链审查直接运行 `npm audit fix --force`。工作流文件存在不等于远程门禁已经启用：仓库管理员仍需在 GitHub 受保护分支上要求后端和前端检查通过后才能合并。
 
-CI 还会生成 CycloneDX、可复现源码归档和 SHA-256 清单；非 PR 运行在三条低权限门禁通过后发布 SLSA/CycloneDX 签名证明。下载后的离线验证与 `gh attestation verify` 命令见 [软件供应链证据](supply_chain.md)。分支保护除后端/前端外还应要求 `SBOM and reproducible source evidence`；证明 Job 只在非 PR 运行，不能设为 PR 必需检查。当前没有签名 OCI 镜像，不得用源码证明替代镜像扫描、签名和部署时验签。
+CI 还会生成 CycloneDX、可复现源码归档和 SHA-256 清单；非 PR 运行在三条低权限门禁通过后发布 SLSA/CycloneDX 签名证明。下载后的离线验证与 `gh attestation verify` 命令见 [软件供应链证据](supply_chain.md)。分支保护除后端/前端外还应要求 `SBOM and reproducible source evidence`；证明 Job 只在非 PR 运行，不能设为 PR 必需检查。公网镜像工作流另生成 BuildKit OCI provenance/SBOM、Critical 漏洞报告和 digest Artifact，但目前仍没有独立镜像签名与部署时密码学验签，不能用源码证明代替。
+
+## 受控公网测试运维
+
+公网测试使用 `deploy/public-test/compose.yml`，不得直接把本地 `docker-compose.yml` 暴露到互联网。提交前运行：
+
+```powershell
+uv run --locked python scripts/validate_public_test_deployment.py
+```
+
+校验器会渲染 maintenance profile 并拒绝未固定 digest、服务器现场 build、非 Caddy 端口、MinIO、开放注册、Mock/Hash、HTTP 外部端点、通配 CORS、API/Worker 镜像不一致和缺少 release SHA。
+
+公网首次管理员不通过临时开放注册创建。目标数据库迁移完成后，在服务器 TTY 使用 `contentflow-bootstrap-admin bootstrap-workspace` 和 `add-admin` 交互输入两个不同账户的密码；第一条只接受空数据库，第二条拒绝已有邮箱，两条都要求注册关闭并写审计。
+
+R2 上线前使用 `contentflow-s3-conformance` 跑完整 256 KiB、9 MiB multipart 和 100 MiB 边界矩阵。探针只删除自己记录的随机前缀对象，不执行 bucket-wide list/delete。BGE 缓存通过 `contentflow-prepare-embedding-cache prepare` 下载固定 revision，再以 `verify` 强制 offline 载入和归一化探测。
+
+PostgreSQL 公网备份使用 restic 客户端加密和独立 R2 Token；`backup.sh` 保留 7 日/4 周，`verify-backup.sh` 只恢复到随机 `contentflow_verify_*` 数据库。详细初始化、GitHub Environment/SSH、恢复和真实验收步骤见[公网测试部署手册](../deploy/public-test/README.md)与[备份策略](../deploy/public-test/backup-policy.md)。
 
 ### 租约耗尽与权限竞态补充
 

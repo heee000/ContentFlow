@@ -570,3 +570,15 @@
 - Embedding 边界：不因为“云部署”就自动改 API。Hetzner 最低推荐档已经是 4 GiB，本地 BGE 不增加套餐费用，且保留当前中文向量行为与数据边界。API 仅在 2 GiB 后备主机、持续 OOM、多 Worker 或真实检索评测更优时启用；优先验证 $0.02/百万 Token 的 `text-embedding-3-small` 1024 维路径。
 - 代码缺口：当前 OpenAI-compatible Embedding 和文本生成共用 `MODEL_API_BASE/KEY`。进入 API 后备前必须增加独立、供应商中立的 Embedding Base/Key，并为模型切换建立全量重索引/索引代际，禁止混合不同模型向量。
 - 存储边界：R2 官方声明 S3 兼容且 Standard 免费额度为 10 GB-month、100 万 Class A、1000 万 Class B和免费出口，但 ContentFlow 仍需真实验证 HeadBucket、上传/Metadata、读取、删除、分段和上限；通过前不能写成 R2 已签收。
+
+### CF-20260831-03：公网计划只有文档，缺少可执行交付面
+
+- 状态：仓库内 M1 和 M2 主体已实现并完成本地静态/定向验证；云主机、DNS、真实 R2、GHCR 构建、SSH 部署、微信固定出口和灾备演练仍待外部环境签收，不能写成已上线。
+- 问题与影响：本地 Compose 会发布 PostgreSQL/API/Web/MinIO 端口并在服务器现场 build，不适合直接公网运行；文本与 Embedding 只能共用一个 Base/Key；固定 BGE 缓存、R2 操作矩阵、加密异地备份、不可变镜像和手工批准部署都只有计划，没有可执行入口。
+- 公网栈：新增 `deploy/public-test`，仅 Caddy 发布 80/443，同源代理 Web/API/health，不公开 metrics；API/Worker 强制相同 digest，PostgreSQL/Caddy/restic 固定第三方 digest，移除 MinIO，设置健康检查、日志轮转、资源上限、非提权和明确命名卷。静态校验器通过 Compose JSON 拒绝端口、现场 build、弱运行模式、HTTP Provider、通配 CORS、非固定镜像和 release SHA 缺失；CI 新增同一门禁。
+- 模型与缓存：增加独立 `CONTENTFLOW_EMBEDDING_API_BASE/KEY`，未设置时向后兼容 `MODEL_API_BASE/KEY`；两条路径都继续执行生产 HTTPS 校验。新增固定 BGE revision 缓存 prepare/verify 命令，写入模型/revision/1024 维 manifest，并用 offline 加载和归一化向量复验；API health 返回 release SHA 便于对照部署制品。
+- 存储与灾备：新增只操作唯一随机前缀的 S3 conformance，覆盖 HeadBucket、单段、9 MiB multipart、100 MiB 上限、SHA-256 Metadata、读取和精确删除。公网备份使用独立 R2 Bucket/Token 和 restic 客户端加密；dump 先经 `pg_restore --list`，再抽样检查与 7 日/4 周 retention；验证只创建随机临时数据库。
+- 账号安全：公网注册保持硬关闭，没有引入临时开关。新增交互式 offline bootstrap CLI，密码只由 TTY getpass 读取；首个工作区只允许空库创建，第二管理员必须指定 workspace slug、拒绝已有邮箱，PostgreSQL advisory lock 串行化并写系统审计。
+- 供应链与部署：新增手工 image workflow，要求同 SHA 既有成功 CI，构建/推送 GHCR amd64 镜像，记录 OCI provenance/SBOM、Trivy 可修复 Critical 门禁和 digest Artifact。部署 workflow 只能从指定成功 build run 下载坐标，通过受保护 Environment 和预置 SSH known_hosts 部署；远端先验配置/磁盘/BGE/备份、再迁移、readiness 与 Worker heartbeat，失败不更新 current symlink，也不宣称数据库迁移可自动回滚。
+- 本地验证：Ruff 全仓通过；隔离真实 `.env` 后后端 `245 passed, 7 skipped, 145 subtests passed`，分支覆盖率 80.96%；11 个 YAML、最终公网 Compose 和 4 个 POSIX shell 脚本语法通过。前端首次用不满足 engines 的 Node 22.11.0 时 vinext 暴露 npm 可选原生绑定缺失，未删除锁文件或强制修复；改用满足要求的随附 Node 24.19.0 从同一 `package-lock.json` 执行 `npm ci` 后，ESLint、2 项渲染测试、HTTPS Next 生产构建和 moderate audit 全部通过，0 vulnerability。
+- 剩余边界：BuildKit attestation 尚不是独立签名与部署时验签；R2、restic、Caddy TLS、GHCR 和 SSH workflow 未在目标主机执行；Prometheus/Grafana 暂未纳入公网栈；单机 PostgreSQL/BGE 的峰值/OOM/磁盘仍需真实耐久证据。

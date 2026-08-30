@@ -11,9 +11,11 @@ from unittest.mock import patch
 
 from contentflow.embeddings import (
     LocalBGEM3EmbeddingProvider,
+    OpenAICompatibleEmbeddingProvider,
     _LocalSentenceTransformerRuntime,
     build_embedding_provider,
 )
+from contentflow.embedding_cache import MANIFEST_NAME, prepare_or_verify
 from contentflow.settings import Settings
 
 
@@ -175,6 +177,45 @@ class LocalEmbeddingTest(unittest.TestCase):
                     embedding_provider="bge-m3-local",
                     **overrides,
                 ).validate_runtime()
+
+    def test_openai_compatible_provider_prefers_independent_embedding_api(self):
+        settings = Settings(
+            database_url="sqlite:///test.db",
+            embedding_provider="openai-compatible",
+            model_api_base="https://text.example/v1",
+            model_api_key="text-key",
+            embedding_api_base="https://embeddings.example/v1",
+            embedding_api_key="embedding-key",
+            embedding_model="embedding-model",
+        )
+        settings.validate_runtime()
+        provider = build_embedding_provider(settings)
+        self.assertIsInstance(provider, OpenAICompatibleEmbeddingProvider)
+        self.assertEqual(provider.endpoint, "https://embeddings.example/v1/embeddings")
+        self.assertEqual(provider.api_key, "embedding-key")
+
+    def test_cache_prepare_writes_pinned_manifest_and_offline_verify_reads_it(self):
+        class FakeProvider:
+            def encode_many(self, texts):
+                return [[1.0] + [0.0] * 1023 for _ in texts]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                database_url="sqlite:///test.db",
+                embedding_provider="bge-m3-local",
+                local_embedding_cache_dir=Path(temp_dir),
+            )
+            with patch(
+                "contentflow.embedding_cache.build_embedding_provider",
+                return_value=FakeProvider(),
+            ):
+                prepared = prepare_or_verify(settings, offline=False)
+                verified = prepare_or_verify(settings, offline=True)
+            self.assertEqual(prepared, Path(temp_dir).resolve() / MANIFEST_NAME)
+            self.assertEqual(verified, prepared)
+            manifest = prepared.read_text(encoding="utf-8")
+            self.assertIn(settings.local_embedding_revision, manifest)
+            self.assertIn('"dimensions": 1024', manifest)
 
 
 if __name__ == "__main__":

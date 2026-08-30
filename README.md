@@ -139,7 +139,7 @@ docker compose --profile observability up --build -d
 
 ## 配置真实 AI Provider
 
-文本与 Embedding 可以使用显式配置的 OpenAI-compatible 端点，不预设云厂商或模型：
+文本与 Embedding 可以使用显式配置的 OpenAI-compatible 端点，不预设云厂商或模型。两者可继续共用 `MODEL_API_*`，也可让 Embedding 使用独立端点：
 
 ```dotenv
 CONTENTFLOW_TEXT_PROVIDER=openai-compatible
@@ -148,6 +148,8 @@ CONTENTFLOW_MODEL_API_BASE=https://models.example.com/v1
 CONTENTFLOW_MODEL_API_KEY=...
 CONTENTFLOW_TEXT_MODEL=configured-text-model
 CONTENTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS=120
+CONTENTFLOW_EMBEDDING_API_BASE=https://embeddings.example.com/v1
+CONTENTFLOW_EMBEDDING_API_KEY=...
 CONTENTFLOW_EMBEDDING_MODEL=configured-embedding-model
 ```
 
@@ -272,7 +274,17 @@ gh attestation verify .\contentflow-source-<commit>.tar.gz --repo heee000/Conten
 gh attestation verify .\contentflow-source-<commit>.tar.gz --repo heee000/ContentFlow --signer-workflow heee000/ContentFlow/.github/workflows/ci.yml --source-digest <commit> --predicate-type https://cyclonedx.org/bom
 ```
 
-完整的本地生成、哈希核对、证明验证和边界说明见 [软件供应链证据](docs/supply_chain.md)。当前签名对象是源码归档，不是 OCI 镜像；镜像扫描/签名、注册表保留和部署时验签仍需后续生产签收。
+完整的本地生成、哈希核对、证明验证和边界说明见 [软件供应链证据](docs/supply_chain.md)。源码证明之外，受控公网工作流还会为 OCI 镜像生成 BuildKit provenance/SBOM、执行 Critical 漏洞门禁并记录不可变 digest；镜像签名、注册表保留和部署时密码学验签仍需后续生产签收。
+
+## 受控公网测试
+
+固定 IPv4 单机、Caddy 同源 HTTPS、GHCR 不可变镜像、R2 双 Bucket、本地 BGE 固定缓存、加密 PostgreSQL 备份和人工批准部署的完整入口见 [公网测试部署手册](deploy/public-test/README.md)。规划与成本依据见 [公网测试部署实现计划](docs/public_test_deployment_plan.md)。仓库资产可静态验证：
+
+```powershell
+uv run --locked python scripts/validate_public_test_deployment.py
+```
+
+这些资产不代表目标云环境已经上线；固定 IP、DNS、R2、真实模型、微信白名单、跨网络草稿和恢复演练仍必须取得真实证据。
 
 
 ## 备份与隔离恢复校验

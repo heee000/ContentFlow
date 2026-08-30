@@ -92,10 +92,13 @@ class Settings(BaseSettings):
     embedding_provider: str = "hash"
     image_provider: str = "mock"
     video_provider: str = "mock"
+    release_sha: str = "development"
     model_api_base: str | None = None
     model_api_key: str | None = None
     text_model: str | None = None
     model_request_timeout_seconds: int = Field(default=120, ge=10, le=300)
+    embedding_api_base: str | None = None
+    embedding_api_key: str | None = None
     embedding_model: str | None = None
     embedding_dimensions: int = 1024
     local_embedding_model: str = "BAAI/bge-m3"
@@ -193,6 +196,14 @@ class Settings(BaseSettings):
             self.secret_key,
         ]
         return tuple(dict.fromkeys(key for key in candidates if key))
+
+    @property
+    def resolved_embedding_api_base(self) -> str | None:
+        return self.embedding_api_base or self.model_api_base
+
+    @property
+    def resolved_embedding_api_key(self) -> str | None:
+        return self.embedding_api_key or self.model_api_key
 
     def validate_runtime(self) -> None:
         if self.production and (
@@ -310,19 +321,12 @@ class Settings(BaseSettings):
                     "CONTENTFLOW_LOCAL_EMBEDDING_DEVICE must be auto, cpu, mps, "
                     "cuda, or cuda:<index>"
                 )
-        uses_openai_compatible = (
-            self.text_provider == "openai-compatible"
-            or self.embedding_provider == "openai-compatible"
-        )
-        if uses_openai_compatible:
+        if self.text_provider == "openai-compatible":
             required = {
                 "CONTENTFLOW_MODEL_API_BASE": self.model_api_base,
                 "CONTENTFLOW_MODEL_API_KEY": self.model_api_key,
+                "CONTENTFLOW_TEXT_MODEL": self.text_model,
             }
-            if self.text_provider == "openai-compatible":
-                required["CONTENTFLOW_TEXT_MODEL"] = self.text_model
-            if self.embedding_provider == "openai-compatible":
-                required["CONTENTFLOW_EMBEDDING_MODEL"] = self.embedding_model
             missing = [name for name, value in required.items() if not value]
             if missing:
                 raise ValueError(
@@ -332,6 +336,32 @@ class Settings(BaseSettings):
             self._validate_external_api_base(
                 self.model_api_base or "",
                 setting_name="CONTENTFLOW_MODEL_API_BASE",
+            )
+        if self.embedding_provider == "openai-compatible":
+            required = {
+                (
+                    "CONTENTFLOW_EMBEDDING_API_BASE or "
+                    "CONTENTFLOW_MODEL_API_BASE"
+                ): self.resolved_embedding_api_base,
+                (
+                    "CONTENTFLOW_EMBEDDING_API_KEY or "
+                    "CONTENTFLOW_MODEL_API_KEY"
+                ): self.resolved_embedding_api_key,
+                "CONTENTFLOW_EMBEDDING_MODEL": self.embedding_model,
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise ValueError(
+                    "OpenAI-compatible embedding configuration missing: "
+                    + ", ".join(missing)
+                )
+            self._validate_external_api_base(
+                self.resolved_embedding_api_base or "",
+                setting_name=(
+                    "CONTENTFLOW_EMBEDDING_API_BASE"
+                    if self.embedding_api_base
+                    else "CONTENTFLOW_MODEL_API_BASE"
+                ),
             )
         uses_http_media = self.image_provider == "http" or self.video_provider == "http"
         if uses_http_media:

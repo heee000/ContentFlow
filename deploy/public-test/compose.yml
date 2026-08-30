@@ -1,0 +1,231 @@
+name: contentflow-public-test
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-backend-environment: &backend-environment
+  CONTENTFLOW_ENVIRONMENT: production
+  CONTENTFLOW_RELEASE_SHA: ${CONTENTFLOW_RELEASE_SHA:?Set the deployed 40-character Git SHA}
+  CONTENTFLOW_DATABASE_URL: postgresql+psycopg://contentflow:${POSTGRES_PASSWORD:?Set a URL-safe PostgreSQL password}@postgres:5432/contentflow
+  CONTENTFLOW_SECRET_KEY: ${CONTENTFLOW_SECRET_KEY:?Set a unique application signing key}
+  CONTENTFLOW_CREDENTIAL_ENCRYPTION_KEY: ${CONTENTFLOW_CREDENTIAL_ENCRYPTION_KEY:?Set a separate credential encryption key}
+  CONTENTFLOW_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS: '${CONTENTFLOW_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS:-[]}'
+  CONTENTFLOW_ALLOW_REGISTRATION: "false"
+  CONTENTFLOW_ALLOW_MOCK_PROVIDERS: "false"
+  CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS: "true"
+  CONTENTFLOW_METRICS_ENABLED: "true"
+  CONTENTFLOW_METRICS_BEARER_TOKEN: ${CONTENTFLOW_METRICS_BEARER_TOKEN:?Set a separate metrics bearer token}
+  CONTENTFLOW_TRUSTED_PROXY_HOPS: "1"
+  CONTENTFLOW_STORAGE_BACKEND: s3
+  CONTENTFLOW_S3_ENDPOINT_URL: ${CONTENTFLOW_S3_ENDPOINT_URL:?Set the HTTPS R2 S3 endpoint}
+  CONTENTFLOW_S3_REGION: ${CONTENTFLOW_S3_REGION:-auto}
+  CONTENTFLOW_S3_BUCKET: ${CONTENTFLOW_S3_BUCKET:?Set the business-object bucket}
+  CONTENTFLOW_S3_ACCESS_KEY: ${CONTENTFLOW_S3_ACCESS_KEY:?Set the business-object access key}
+  CONTENTFLOW_S3_SECRET_KEY: ${CONTENTFLOW_S3_SECRET_KEY:?Set the business-object secret key}
+  CONTENTFLOW_TEXT_PROVIDER: openai-compatible
+  CONTENTFLOW_MODEL_API_BASE: ${CONTENTFLOW_MODEL_API_BASE:?Set the HTTPS text-model API base}
+  CONTENTFLOW_MODEL_API_KEY: ${CONTENTFLOW_MODEL_API_KEY:?Set the text-model API key}
+  CONTENTFLOW_TEXT_MODEL: ${CONTENTFLOW_TEXT_MODEL:?Set the text model}
+  CONTENTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS: ${CONTENTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS:-120}
+  CONTENTFLOW_EMBEDDING_PROVIDER: ${CONTENTFLOW_EMBEDDING_PROVIDER:-bge-m3-local}
+  CONTENTFLOW_EMBEDDING_API_BASE: ${CONTENTFLOW_EMBEDDING_API_BASE:-}
+  CONTENTFLOW_EMBEDDING_API_KEY: ${CONTENTFLOW_EMBEDDING_API_KEY:-}
+  CONTENTFLOW_EMBEDDING_MODEL: ${CONTENTFLOW_EMBEDDING_MODEL:-}
+  CONTENTFLOW_EMBEDDING_DIMENSIONS: "1024"
+  CONTENTFLOW_LOCAL_EMBEDDING_MODEL: BAAI/bge-m3
+  CONTENTFLOW_LOCAL_EMBEDDING_REVISION: 5617a9f61b028005a4858fdac845db406aefb181
+  CONTENTFLOW_LOCAL_EMBEDDING_DEVICE: cpu
+  CONTENTFLOW_LOCAL_EMBEDDING_CACHE_DIR: /home/contentflow/.cache/huggingface
+  CONTENTFLOW_LOCAL_EMBEDDING_OFFLINE: "true"
+  CONTENTFLOW_LOCAL_EMBEDDING_BATCH_SIZE: ${CONTENTFLOW_LOCAL_EMBEDDING_BATCH_SIZE:-4}
+  CONTENTFLOW_IMAGE_PROVIDER: manual
+  CONTENTFLOW_VIDEO_PROVIDER: manual
+  CONTENTFLOW_IMAGE_SEARCH_PROVIDER: openverse
+  CONTENTFLOW_OPENVERSE_API_BASE: https://api.openverse.org/v1
+  CONTENTFLOW_IMAGE_SEARCH_DOWNLOAD_ALLOWED_HOSTS: '["upload.wikimedia.org"]'
+  CONTENTFLOW_PUBLIC_BASE_URL: https://${CONTENTFLOW_DOMAIN:?Set the public domain}
+  CONTENTFLOW_CORS_ORIGINS: '["https://${CONTENTFLOW_DOMAIN}"]'
+  CONTENTFLOW_WORKER_HEARTBEAT_SECONDS: "10"
+  CONTENTFLOW_WORKER_STALE_SECONDS: "45"
+  CONTENTFLOW_WORKER_QUEUE_STALL_SECONDS: "300"
+
+services:
+  postgres:
+    image: pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: contentflow
+      POSTGRES_USER: contentflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a URL-safe PostgreSQL password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose: ["5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contentflow -d contentflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: *default-logging
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
+  api:
+    image: ${CONTENTFLOW_BACKEND_IMAGE:?Set an immutable backend image digest}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 18
+      start_period: 20s
+    logging: *default-logging
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  worker:
+    image: ${CONTENTFLOW_BACKEND_IMAGE:?Set an immutable backend image digest}
+    restart: unless-stopped
+    stop_grace_period: 10m
+    command: ["contentflow-worker"]
+    environment: *backend-environment
+    volumes:
+      - embedding_model_cache:/home/contentflow/.cache/huggingface
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *default-logging
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits:
+          memory: 2600M
+
+  web:
+    image: ${CONTENTFLOW_WEB_IMAGE:?Set an immutable web image digest}
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_CONTENTFLOW_API_BASE: https://${CONTENTFLOW_DOMAIN:?Set the public domain}/api/v1
+    depends_on:
+      api:
+        condition: service_healthy
+    expose: ["3000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging: *default-logging
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  caddy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    environment:
+      CONTENTFLOW_DOMAIN: ${CONTENTFLOW_DOMAIN:?Set the public domain}
+      CONTENTFLOW_ACME_EMAIL: ${CONTENTFLOW_ACME_EMAIL:?Set the ACME contact email}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    logging: *default-logging
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  embedding-bootstrap:
+    profiles: ["maintenance"]
+    image: ${CONTENTFLOW_BACKEND_IMAGE:?Set an immutable backend image digest}
+    environment:
+      CONTENTFLOW_EMBEDDING_PROVIDER: bge-m3-local
+      CONTENTFLOW_EMBEDDING_DIMENSIONS: "1024"
+      CONTENTFLOW_LOCAL_EMBEDDING_MODEL: BAAI/bge-m3
+      CONTENTFLOW_LOCAL_EMBEDDING_REVISION: 5617a9f61b028005a4858fdac845db406aefb181
+      CONTENTFLOW_LOCAL_EMBEDDING_DEVICE: cpu
+      CONTENTFLOW_LOCAL_EMBEDDING_CACHE_DIR: /home/contentflow/.cache/huggingface
+      CONTENTFLOW_LOCAL_EMBEDDING_OFFLINE: "false"
+    command: ["contentflow-prepare-embedding-cache", "prepare"]
+    volumes:
+      - embedding_model_cache:/home/contentflow/.cache/huggingface
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+
+  backup-db:
+    profiles: ["maintenance"]
+    image: pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+    environment:
+      PGHOST: postgres
+      PGUSER: contentflow
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set a URL-safe PostgreSQL password}
+      PGDATABASE: contentflow
+    volumes:
+      - backup_staging:/backup
+      - backup_restore:/restore
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+
+  restic:
+    profiles: ["maintenance"]
+    image: restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+    environment:
+      RESTIC_REPOSITORY: s3:${CONTENTFLOW_BACKUP_S3_ENDPOINT_URL:?Set the backup R2 endpoint}/${CONTENTFLOW_BACKUP_S3_BUCKET:?Set the backup bucket}/contentflow-postgres
+      RESTIC_PASSWORD: ${CONTENTFLOW_BACKUP_REPOSITORY_PASSWORD:?Set the backup repository encryption password}
+      AWS_ACCESS_KEY_ID: ${CONTENTFLOW_BACKUP_S3_ACCESS_KEY:?Set the backup-only access key}
+      AWS_SECRET_ACCESS_KEY: ${CONTENTFLOW_BACKUP_S3_SECRET_KEY:?Set the backup-only secret key}
+      AWS_DEFAULT_REGION: ${CONTENTFLOW_BACKUP_S3_REGION:-auto}
+    volumes:
+      - backup_staging:/backup:ro
+      - backup_restore:/restore
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  postgres_data:
+    name: contentflow-public-test-postgres
+  embedding_model_cache:
+    name: contentflow-public-test-bge-cache
+  caddy_data:
+    name: contentflow-public-test-caddy-data
+  caddy_config:
+    name: contentflow-public-test-caddy-config
+  backup_staging:
+    name: contentflow-public-test-backup-staging
+  backup_restore:
+    name: contentflow-public-test-backup-restore

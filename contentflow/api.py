@@ -224,12 +224,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "name": settings.app_name,
             "version": "0.2.0",
+            "release_sha": settings.release_sha,
             "docs": "/docs",
         }
 
     @application.get("/health/live")
     def liveness():
-        return {"status": "ok"}
+        return {"status": "ok", "release_sha": settings.release_sha}
 
     @application.get("/health/ready")
     def readiness():
@@ -237,7 +238,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session.execute(text("SELECT 1"))
         storage = build_object_storage(settings)
         storage.check()
-        return {"status": "ready", "database": "ok", "storage": "ok"}
+        return {
+            "status": "ready",
+            "database": "ok",
+            "storage": "ok",
+            "release_sha": settings.release_sha,
+        }
 
     @application.get("/metrics", include_in_schema=False)
     def prometheus_metrics(request: Request):

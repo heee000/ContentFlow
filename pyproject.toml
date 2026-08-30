@@ -56,8 +56,11 @@ target-version = "py311"
 
 [project.scripts]
 contentflow = "contentflow.cli:main"
+contentflow-bootstrap-admin = "contentflow.bootstrap_admin:main"
 contentflow-media-conformance = "contentflow.media_conformance:main"
 contentflow-migrate = "contentflow.migrate:main"
+contentflow-prepare-embedding-cache = "contentflow.embedding_cache:main"
+contentflow-s3-conformance = "contentflow.s3_conformance:main"
 contentflow-worker = "contentflow.worker:main"
 
 [tool.ruff.lint]

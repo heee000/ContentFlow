@@ -17,6 +17,8 @@ web/.openai/
 web/.git/
 npm-debug.log*
 *.log
+/deploy/public-test/release.env
+/deploy/public-test/release-success.txt
 
 # Local platform credentials; never commit.
 /平台账密.txt

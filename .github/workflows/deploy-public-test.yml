@@ -1,0 +1,181 @@
+name: Deploy public test
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Exact 40-character release commit SHA
+        required: true
+        type: string
+      image_build_run_id:
+        description: Successful Build public-test images workflow run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: public-test-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Backup, migrate, deploy, and verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: public-test
+
+    steps:
+      - name: Validate immutable deployment inputs
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          IMAGE_BUILD_RUN_ID: ${{ inputs.image_build_run_id }}
+          DEPLOY_PATH: ${{ secrets.PUBLIC_TEST_DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${IMAGE_BUILD_RUN_ID}" =~ ^[0-9]+$ ]]
+          [[ "${DEPLOY_PATH}" =~ ^/[A-Za-z0-9._/-]+$ ]]
+          [ "${DEPLOY_PATH}" != "/" ]
+
+      - name: Require successful CI for the exact release SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          count="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            --method GET \
+            -f head_sha="${RELEASE_SHA}" -f status=success -f per_page=1 \
+            --jq '.total_count')"
+          test "${count}" -ge 1
+
+      - name: Check out exact deployment assets
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          persist-credentials: false
+
+      - name: Download the successful image-build evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: contentflow-public-test-images-${{ inputs.release_sha }}
+          path: dist
+          run-id: ${{ inputs.image_build_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify release coordinates from the build artifact
+        id: release
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test -s dist/backend-trivy.json
+          test -s dist/web-trivy.json
+          source dist/release.env
+          test "${CONTENTFLOW_RELEASE_SHA}" = "${RELEASE_SHA}"
+          backend_digest="${CONTENTFLOW_BACKEND_IMAGE##*@}"
+          web_digest="${CONTENTFLOW_WEB_IMAGE##*@}"
+          [[ "${backend_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${web_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "backend_image=${CONTENTFLOW_BACKEND_IMAGE}" >> "${GITHUB_OUTPUT}"
+          echo "web_image=${CONTENTFLOW_WEB_IMAGE}" >> "${GITHUB_OUTPUT}"
+          echo "backend_digest=${backend_digest}" >> "${GITHUB_OUTPUT}"
+          echo "web_digest=${web_digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify checkout identity and package release assets
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          tar -czf "${RUNNER_TEMP}/contentflow-release.tar.gz" \
+            deploy/public-test scripts/validate_public_test_deployment.py
+          cd "${RUNNER_TEMP}"
+          sha256sum contentflow-release.tar.gz > contentflow-release.tar.gz.sha256
+
+      - name: Configure strict SSH host verification
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PUBLIC_TEST_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.PUBLIC_TEST_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 "${HOME}/.ssh"
+          umask 077
+          printf '%s\n' "${SSH_PRIVATE_KEY}" > "${HOME}/.ssh/contentflow_deploy"
+          printf '%s\n' "${SSH_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+
+      - name: Create an isolated remote release directory
+        env:
+          SSH_HOST: ${{ secrets.PUBLIC_TEST_SSH_HOST }}
+          SSH_USER: ${{ secrets.PUBLIC_TEST_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.PUBLIC_TEST_DEPLOY_PATH }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          ssh -i "${HOME}/.ssh/contentflow_deploy" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" sh -s -- "${DEPLOY_PATH}" "${RELEASE_SHA}" <<'REMOTE'
+          set -eu
+          deploy_path=$1
+          release_sha=$2
+          mkdir -p "${deploy_path}/shared" "${deploy_path}/releases/${release_sha}"
+          test -f "${deploy_path}/shared/.env"
+          REMOTE
+
+      - name: Transfer and verify release assets
+        env:
+          SSH_HOST: ${{ secrets.PUBLIC_TEST_SSH_HOST }}
+          SSH_USER: ${{ secrets.PUBLIC_TEST_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.PUBLIC_TEST_DEPLOY_PATH }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          scp -i "${HOME}/.ssh/contentflow_deploy" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "${RUNNER_TEMP}/contentflow-release.tar.gz" \
+            "${RUNNER_TEMP}/contentflow-release.tar.gz.sha256" \
+            "${SSH_USER}@${SSH_HOST}:${DEPLOY_PATH}/releases/${RELEASE_SHA}/"
+          ssh -i "${HOME}/.ssh/contentflow_deploy" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" sh -s -- "${DEPLOY_PATH}" "${RELEASE_SHA}" <<'REMOTE'
+          set -eu
+          release_dir="$1/releases/$2"
+          cd "$release_dir"
+          sha256sum -c contentflow-release.tar.gz.sha256
+          tar -xzf contentflow-release.tar.gz
+          chmod 750 deploy/public-test/*.sh
+          REMOTE
+
+      - name: Run protected remote deployment
+        env:
+          SSH_HOST: ${{ secrets.PUBLIC_TEST_SSH_HOST }}
+          SSH_USER: ${{ secrets.PUBLIC_TEST_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.PUBLIC_TEST_DEPLOY_PATH }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          BACKEND_IMAGE: ${{ steps.release.outputs.backend_image }}
+          WEB_IMAGE: ${{ steps.release.outputs.web_image }}
+        run: |
+          ssh -i "${HOME}/.ssh/contentflow_deploy" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" sh -s -- \
+            "${DEPLOY_PATH}" "${RELEASE_SHA}" "${BACKEND_IMAGE}" "${WEB_IMAGE}" <<'REMOTE'
+          set -eu
+          deploy_path=$1
+          release_sha=$2
+          backend=$3
+          web=$4
+          release_dir="${deploy_path}/releases/${release_sha}"
+          "${release_dir}/deploy/public-test/deploy.sh" \
+            "${deploy_path}/shared/.env" "$backend" "$web" "$release_sha"
+          ln -sfn "$release_dir" "${deploy_path}/current"
+          REMOTE
+
+      - name: Record promoted release
+        run: |
+          {
+            echo '## Public-test deployment promoted'
+            echo "- Commit: ${{ inputs.release_sha }}"
+            echo "- Backend: ${{ steps.release.outputs.backend_digest }}"
+            echo "- Web: ${{ steps.release.outputs.web_digest }}"
+            echo '- Pre-existing deployments are backed up before migration.'
+            echo '- Database migrations are not represented as automatically reversible.'
+          } >> "${GITHUB_STEP_SUMMARY}"

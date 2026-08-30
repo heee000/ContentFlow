@@ -207,14 +207,14 @@ def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
         return HashEmbeddingProvider(settings.embedding_dimensions)
     if settings.embedding_provider == "openai-compatible":
         if (
-            not settings.model_api_base
-            or not settings.model_api_key
+            not settings.resolved_embedding_api_base
+            or not settings.resolved_embedding_api_key
             or not settings.embedding_model
         ):
             raise ValueError("OpenAI 兼容 Embedding 缺少 API Base、API Key 或模型名")
         return OpenAICompatibleEmbeddingProvider(
-            api_base=settings.model_api_base,
-            api_key=settings.model_api_key,
+            api_base=settings.resolved_embedding_api_base,
+            api_key=settings.resolved_embedding_api_key,
             model=settings.embedding_model,
             dimensions=settings.embedding_dimensions,
         )

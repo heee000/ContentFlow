@@ -273,6 +273,44 @@ class RuntimeSettingsTest(unittest.TestCase):
         )
         settings.validate_runtime()
 
+    def test_embedding_api_can_be_configured_independently(self):
+        settings = production_settings(
+            embedding_provider="openai-compatible",
+            embedding_api_base="https://embeddings.example/v1",
+            embedding_api_key="embedding-key",
+            embedding_model="configured-embedding-model",
+        )
+        settings.validate_runtime()
+        self.assertEqual(
+            settings.resolved_embedding_api_base,
+            "https://embeddings.example/v1",
+        )
+        self.assertEqual(settings.resolved_embedding_api_key, "embedding-key")
+
+    def test_embedding_api_keeps_shared_model_endpoint_compatibility(self):
+        settings = production_settings(
+            embedding_provider="openai-compatible",
+            model_api_base="https://models.example/v1",
+            model_api_key="shared-key",
+            embedding_model="configured-embedding-model",
+        )
+        settings.validate_runtime()
+        self.assertEqual(
+            settings.resolved_embedding_api_base,
+            "https://models.example/v1",
+        )
+        self.assertEqual(settings.resolved_embedding_api_key, "shared-key")
+
+    def test_independent_embedding_api_requires_safe_https_url(self):
+        settings = production_settings(
+            embedding_provider="openai-compatible",
+            embedding_api_base="http://embeddings.example/v1",
+            embedding_api_key="embedding-key",
+            embedding_model="configured-embedding-model",
+        )
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            settings.validate_runtime()
+
     def test_production_live_provider_api_bases_require_safe_https_urls(self):
         base = {
             "text_provider": "openai-compatible",

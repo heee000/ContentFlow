@@ -83,6 +83,9 @@ jobs:
       - name: Lint Python
         run: uv run --locked ruff check .
 
+      - name: Fail-closed validate public-test deployment assets
+        run: uv run --locked python scripts/validate_public_test_deployment.py
+
       - name: Validate Prometheus configuration and rules
         run: |
           metrics_token_file="${RUNNER_TEMP}/contentflow_metrics_bearer_token"
