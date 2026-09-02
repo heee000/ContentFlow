@@ -668,3 +668,11 @@
 - 解决方案：仅把传递依赖锁定结果从 `fast-uri 3.1.5` 更新到同一兼容主版本的 `3.1.7`；不新增直接依赖、不跨主版本、不运行 `npm audit fix --force`，也不修改审计门槛。
 - 本地验证：更新后 `npm audit --audit-level=moderate` 为 `0 vulnerabilities`。用满足项目 engines 的随附 Node `24.19.0` 从锁文件重建依赖后，ESLint、Vinext/Sites 构建、2 项服务端渲染测试和 Next.js 16.2.12/TypeScript 生产构建通过。本机默认 Node `22.11.0` 低于项目要求的 `22.13.0`，会跳过 Rolldown Windows 可选绑定；该运行时噪声没有通过改锁文件掩盖。
 - 证据边界：失败运行 `33655246050` 只作为问题发现和后端集成通过证据，不能当作本阶段最终签收；必须以包含 `3.1.7` 锁文件的后续提交重新跑完四个 Job，才能记录成功 Run、Artifact 和 attestation。
+
+### CF-20260903-06：Prometheus 规则单测跨组求值顺序未声明
+
+- 状态：确定性修复已实现；固定 Prometheus 镜像的远程 promtool 复验待提交后签收。
+- 发现方式：安全修复提交 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 的 CI `33656868446` 中，前端全部门禁和 SBOM 成功；后端的 Prometheus 配置与 13 条规则语法成功，但 `ContentFlowHighHTTP5xxRate` 在第 13 分钟偶发未触发，后续 PostgreSQL/MinIO 测试因此被失败关闭。
+- 根因：测试同时包含 `contentflow-recording` 与 `contentflow-alerts` 两个规则组，后者消费前者生成的记录指标，但测试文件没有声明同一求值时刻的组顺序。此前把断言从 12 分钟移到 13 分钟只扩大了余量，没有消除跨组顺序不确定性。
+- 解决方案：在 Prometheus 单测顶层增加 `group_eval_order`，明确 `contentflow-recording` 先于 `contentflow-alerts`。不改告警表达式、持续时间、阈值或生产配置，不用放宽期望掩盖问题。
+- 证据边界：本机 Docker 服务未运行，无法用固定容器镜像本地执行 promtool；YAML 改动必须由远程固定 digest 的 Prometheus `v3.13.1-distroless` 验证。失败运行 `33656868446` 只作为前端安全修复成功和规则时序缺口的发现证据，不是完整签收。

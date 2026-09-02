@@ -3,6 +3,10 @@ rule_files:
 
 evaluation_interval: 1m
 
+group_eval_order:
+  - contentflow-recording
+  - contentflow-alerts
+
 tests:
   - name: sustained operational failures trigger bounded alerts
     interval: 1m

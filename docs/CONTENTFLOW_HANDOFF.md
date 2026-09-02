@@ -1804,4 +1804,5 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 1. 分页实现提交 `f4172f20b1edd45f7d63848113223161bc7ccfc4` 已用 John Wang 身份普通推送；手工 CI `33655246050` 的后端 PostgreSQL/pgvector、MinIO、安全门禁与供应链证据 Job 成功，前端 lint/test/build 成功，但依赖审计失败，所以该 Run 不是本阶段最终签收。
 2. 失败原因是新披露公告覆盖锁文件中的传递依赖 `fast-uri 3.1.5`：四条高危主机混淆/SSRF 公告要求离开 `3.0.0 - 3.1.5`。上游 `ajv 8.20.0` 的范围为 `^3.0.1`，因此只将锁定版本更新到兼容的 `3.1.7`；没有增加直接依赖、跨主版本、使用 force 修复或降低 `moderate` 审计门槛。
 3. 本地 `npm audit --audit-level=moderate` 已回到 0 漏洞。用符合 engines 的随附 Node 24.19.0 重新 `npm ci` 后，ESLint、Vinext/Sites 构建、2 项 SSR 测试和 Next.js/TypeScript 生产构建通过。默认 Node 22.11.0 会因低于仓库要求跳过 Rolldown Windows 原生可选包，接手时不要按错误提示删除锁文件。
-4. 下一步必须先提交并普通推送 `web/package-lock.json` 与本记录，再触发新 CI；只有四个 Job 全成功后，才能把新 Run、PostgreSQL/MinIO 测试数量、覆盖率、Artifact 摘要和 SLSA/CycloneDX attestation 补写为最终证据。
+4. `web/package-lock.json` 与首轮记录已经由提交 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 普通推送。只有包含后续 Prometheus 确定性修复的 CI 四个 Job 全成功后，才能把新 Run、PostgreSQL/MinIO 测试数量、覆盖率、Artifact 摘要和 SLSA/CycloneDX attestation 补写为最终证据。
+5. 修复提交 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 的 CI `33656868446` 已证明 fast-uri 修复有效：前端 install/lint/test/build/audit 与 SBOM 成功；但 Prometheus 单测随后暴露跨规则组求值顺序未声明。测试现应以 `group_eval_order` 固定 `contentflow-recording` 先于 `contentflow-alerts`，不得继续只增加 alert `eval_time`，也不得改生产阈值让 CI 变绿。本机 Docker 未运行，最终以固定 Prometheus digest 的新远程 CI 为准。
