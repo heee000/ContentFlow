@@ -35,6 +35,8 @@ from contentflow.worker import (
     handle_publish_dispatch,
     handle_publish_reconcile,
     mark_domain_failure,
+    publish_reconciliation_job_key,
+    schedule_pending_publish_reconciliations,
 )
 
 
@@ -191,6 +193,65 @@ class WorkerIntegrationTest(unittest.TestCase):
                 "channel_id": channel.id,
                 "content_id": content.id,
             }
+
+    def test_reconciliation_sweep_skips_active_jobs_before_limit(self):
+        fixtures = [
+            self._create_publish_fixture(
+                status="submitted",
+                external_id=f"publish-fairness-{index}",
+            )
+            for index in range(3)
+        ]
+        oldest = datetime.now(timezone.utc) - timedelta(minutes=3)
+        with db.SessionLocal() as session:
+            for index, fixture in enumerate(fixtures):
+                publish_job = session.get(PublishJob, fixture["publish_job_id"])
+                self.assertIsNotNone(publish_job)
+                publish_job.updated_at = oldest + timedelta(minutes=index)
+                if index < 2:
+                    session.add(
+                        Job(
+                            workspace_id=self.workspace_id,
+                            job_type="publish.reconcile",
+                            status="queued",
+                            payload_json={
+                                "publish_job_id": publish_job.id,
+                                "lookup_external_id": publish_job.external_id,
+                            },
+                            run_at=datetime.now(timezone.utc),
+                            idempotency_key=publish_reconciliation_job_key(
+                                publish_job.id
+                            ),
+                        )
+                    )
+            session.commit()
+
+        with db.SessionLocal() as session:
+            self.assertEqual(
+                schedule_pending_publish_reconciliations(
+                    session,
+                    settings=self.settings,
+                    limit=1,
+                ),
+                1,
+            )
+            session.commit()
+
+        with db.SessionLocal() as session:
+            recovered = session.scalar(
+                select(Job).where(
+                    Job.idempotency_key
+                    == publish_reconciliation_job_key(fixtures[2]["publish_job_id"])
+                )
+            )
+            self.assertIsNotNone(recovered)
+            self.assertEqual(recovered.status, "queued")
+            with self.assertRaisesRegex(ValueError, "batch is invalid"):
+                schedule_pending_publish_reconciliations(
+                    session,
+                    settings=self.settings,
+                    limit=0,
+                )
 
     def test_immediate_publish_enqueues_now_and_is_idempotent(self):
         fixture = self._create_publish_fixture(status="scheduled")
@@ -733,6 +794,9 @@ class WorkerIntegrationTest(unittest.TestCase):
             reconciliation_job.last_error = "obsolete reconciliation result"
             session.commit()
 
+        # Normal dispatch requeues immediately; this direct database fixture
+        # represents recovery at the next bounded maintenance sweep.
+        self.worker._next_publish_reconciliation_sweep_at = 0.0
         self.assertFalse(self.worker.run_once())
         with db.SessionLocal() as session:
             reconciliation_job = session.get(Job, reconciliation_job_id)

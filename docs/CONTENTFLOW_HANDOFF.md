@@ -65,7 +65,7 @@ ContentFlow 面向营销内容生产，把一份活动 Brief 和品牌/产品知
 |---|---|---|
 | Web | Next.js 16.2.12、React 19.2.8、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
 | API | FastAPI 0.115+、Pydantic | REST API 前缀默认 `/api/v1` |
-| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`c1d2e3f4a5b6` |
+| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`d2e3f4a5b6c7` |
 | 隔离测试数据库 | SQLite | 仅在测试显式指定 URL 时使用，不是默认生产运行库 |
 | 生产数据库 | PostgreSQL 16 + pgvector | 迁移创建 1024 维向量表与 HNSW 索引 |
 | 异步任务 | 数据库 Job 队列 + 独立 Python Worker | 不依赖 Redis/Celery |
@@ -786,11 +786,11 @@ npm run build
 
 1. `ChannelConnector` 增加显式对账能力契约；微信公众号调用官方 `POST /cgi-bin/freepublish/get`，只有响应包含 `article_id` 才返回 published，其余成功响应均保持 pending。
 2. `publish.dispatch` 得到 submitted 后，在同一领域事务中保存远程响应并创建幂等 `publish.reconcile:{publish_job_id}` Job；队列任务完成发生在下一次提交，缩小“平台已接收、本地未记录”的崩溃窗口。
-3. Worker 启动每轮领取前扫描微信公众号 submitted 任务并补建对账 Job；PostgreSQL 使用 `FOR UPDATE OF publish_jobs SKIP LOCKED`，多 Worker 不会围绕同一 PublishJob 重复补偿。
+3. Worker 启动时及此后默认每 60 秒扫描微信公众号 submitted 任务并补建对账 Job；扫描在 `LIMIT` 前排除已有活动对账 Job，避免旧任务占满批次并饿死后续缺失项。PostgreSQL 使用 `FOR UPDATE OF publish_jobs SKIP LOCKED`，多 Worker 不会围绕同一 PublishJob 重复补偿。
 4. `publish.reconcile` 支持 pending 退避、最终 article_id 收敛、最大尝试耗尽转人工，以及 queued/checked/auto/stale_ignored 审计。
 5. 自动查询改为两阶段事务：远程 HTTP 前释放 PublishJob 行锁，返回后重新加锁并比较状态与 `publish_id`。人工或其他事务已先提交时，迟到结果只审计、不覆盖。
 6. reviewer 可在 submitted 或 reconciliation_required 时人工接管；人工处置同时终结自动对账 Job、清除租约，并保持原 publish.dispatch Job 与 PublishJob 的一致状态。
-7. 新增 `CONTENTFLOW_PUBLISH_RECONCILIATION_INITIAL_DELAY_SECONDS` 和 `CONTENTFLOW_PUBLISH_RECONCILIATION_MAX_ATTEMPTS`，已接入 `.env.example` 与 API/Worker Compose 环境。
+7. `CONTENTFLOW_PUBLISH_RECONCILIATION_INITIAL_DELAY_SECONDS`、`CONTENTFLOW_PUBLISH_RECONCILIATION_MAX_ATTEMPTS`、`CONTENTFLOW_PUBLISH_RECONCILIATION_SWEEP_POLL_SECONDS` 和 `CONTENTFLOW_PUBLISH_RECONCILIATION_SWEEP_BATCH_SIZE` 已接入 `.env.example`；分别控制单任务首次查询、最大尝试、恢复扫描频率和单批补建上限。
 8. 自动 published 会把仍 running/failed 的原 publish.dispatch Job 收敛为 succeeded；人工确认未发布后再次提交新 `publish_id` 时，旧终态对账 Job 会清空旧结果、租约和尝试次数，写 `publish.reconciliation_requeued` 后重新 queued。
 
 #### 验证证据
@@ -1913,3 +1913,22 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 该改动只减少日级存储计划的到期查询，不改变普通 Job 领取频率，也不改变发布自动对账的即时建任务路径。最多会给存储核对增加一个检查间隔的发现延迟；生产可结合 Worker 副本数与工作区规模调整，但不得低于 5 秒。
 - 公网部署继续冻结；本轮没有读取 `.env`、账号资料或受保护知识文件，没有调用平台、创建草稿/素材、发布或创建云资源。
 - 下一轮继续审查 Worker 维护查询、数据生命周期、前端历史读取和真实运维证据；FORCE RLS 与数据库角色拆分仍等待单独高影响授权。
+
+## 21.45 发布对账恢复扫描公平性与第三十三轮复审增量交接
+
+### 本轮实现
+
+1. 复查 `schedule_pending_publish_reconciliations()` 确认两个真实问题：每次默认 1 秒队列轮询都会执行全局 submitted 查询；查询先取最老 100 条再由 Python 判断是否已有任务，因此前 100 条活动对账可永久挡住后续缺失任务。
+2. 查询现在通过 `publish.reconcile:{publish_job_id}` 唯一键外连接 Job，在数据库 `LIMIT` 前排除 queued/retry/running 对账任务；无 Job 或旧 Job 已 succeeded/failed 的记录才进入有界候选集。终态 Job 仍按既有协议原位重置，活动 Job 不重复创建。
+3. 新增默认 60 秒、范围 5–3600 秒的 `CONTENTFLOW_PUBLISH_RECONCILIATION_SWEEP_POLL_SECONDS`，以及默认 100、范围 1–1000 的 `CONTENTFLOW_PUBLISH_RECONCILIATION_SWEEP_BATCH_SIZE`。正常发布仍在保存 submitted 结果的同一领域事务中即时创建对账 Job；周期扫描只是恢复兜底，因此默认最多一分钟的恢复延迟不会推迟正常路径。
+4. Worker 使用单调时钟独立节流发布恢复扫描，与存储计划、普通队列轮询互不耦合。每个进程启动后立即扫描一次，跨进程仍由 PostgreSQL `FOR UPDATE SKIP LOCKED` 与 Job 唯一幂等键保证正确性。
+5. Alembic head 更新为 `d2e3f4a5b6c7`，新增 `publish_jobs(status, updated_at, id)` 恢复扫描索引；ORM、迁移升降级、备份/恢复脚本和公网隔离恢复契约同步，public 表数仍为 30。
+6. 配置透传复核发现，上一阶段已经写入 `.env.example` 的存储配额/调度参数未被本地 Compose 显式传给 API/Worker。当前本地两服务和公网共享 backend environment 已同步存储边界与发布恢复参数，公网 env 模板给出无秘密默认值；契约测试防止以后再次出现“文档可配置、容器实际忽略”。
+
+### 当前验证与边界
+
+- Ruff 全仓、Alembic 单 head、SQLite 公平性、连续 Worker 节流、设置上下界、全部迁移、Compose 参数透传与公网恢复契约均通过；本阶段完整定向为 `81 passed, 10 skipped, 49 subtests passed`，本机全量为 `290 passed, 13 skipped, 177 subtests passed`、分支覆盖率 80.77%。13 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例；`uv lock --check`、`pip check`、Python 漏洞审计、两份 PowerShell 备份脚本语法、公网 fail-closed 渲染、前端 ESLint、Vinext/Sites 构建、2 项 SSR 渲染测试、Next.js/TypeScript 生产构建和 npm moderate 审计 0 漏洞均通过。真实 PostgreSQL 的“活动任务位于批次前方、后续缺失项仍被选中”用例已加入远程测试集，远程证据待本阶段提交后更新。
+- 恢复扫描只处理具备确定 `external_id` 的微信公众号 submitted 任务；不为抖音等不具备可靠查询键的平台做模糊匹配，不调用发布接口，也不改变人工接管与最大尝试语义。
+- 普通 `CREATE INDEX` 在大表可能产生锁等待、WAL 与额外空间；个人/低数据量可随常规迁移升级，企业生产应在副本测量并安排维护窗口或改用受控在线索引流程。
+- 公网部署继续冻结；本轮未读取 `.env`、平台账密或受保护知识文件，未调用平台、创建素材/草稿、发布或创建云资源。
+- 下一轮优先审查 Worker 在数据库瞬断时依赖进程退出/容器重启的恢复与退避证据，并继续保留数据生命周期、数据库纵深隔离、企业 IAM 和真实外部异常矩阵。

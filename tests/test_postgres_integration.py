@@ -478,6 +478,61 @@ def test_postgres_serializes_concurrent_audit_chain_appends(
     assert entries[1].previous_hash == entries[0].entry_hash
 
 
+def test_postgres_reconciliation_sweep_skips_active_jobs_before_limit(
+    postgres_harness: PostgresHarness,
+):
+    fixtures = [
+        _create_publish_fixture(
+            postgres_harness,
+            status="submitted",
+            external_id=f"postgres-fairness-{index}",
+        )
+        for index in range(3)
+    ]
+    oldest = datetime.now(timezone.utc) - timedelta(minutes=3)
+    with postgres_harness.sessions() as session:
+        for index, fixture in enumerate(fixtures):
+            publish_job = session.get(PublishJob, fixture["publish_job_id"])
+            assert publish_job is not None
+            publish_job.updated_at = oldest + timedelta(minutes=index)
+            if index < 2:
+                session.add(
+                    Job(
+                        workspace_id=fixture["workspace_id"],
+                        job_type="publish.reconcile",
+                        status="queued",
+                        payload_json={
+                            "publish_job_id": publish_job.id,
+                            "lookup_external_id": publish_job.external_id,
+                        },
+                        run_at=datetime.now(timezone.utc),
+                        idempotency_key=f"publish.reconcile:{publish_job.id}",
+                    )
+                )
+        session.commit()
+
+    with postgres_harness.sessions() as session:
+        assert (
+            schedule_pending_publish_reconciliations(
+                session,
+                settings=postgres_harness.settings,
+                limit=1,
+            )
+            == 1
+        )
+        session.commit()
+
+    with postgres_harness.sessions() as session:
+        recovered = session.scalar(
+            select(Job).where(
+                Job.idempotency_key
+                == f"publish.reconcile:{fixtures[2]['publish_job_id']}"
+            )
+        )
+        assert recovered is not None
+        assert recovered.status == "queued"
+
+
 def test_postgres_skip_locked_idempotency_and_terminal_convergence(
     postgres_harness: PostgresHarness,
 ):

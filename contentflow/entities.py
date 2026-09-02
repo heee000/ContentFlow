@@ -759,6 +759,12 @@ class PublishJob(TimestampMixin, Base):
             "updated_at",
             "id",
         ),
+        Index(
+            "ix_publish_jobs_reconciliation_sweep",
+            "status",
+            "updated_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

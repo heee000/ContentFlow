@@ -159,6 +159,12 @@ class Settings(BaseSettings):
     worker_queue_stall_seconds: int = Field(default=300, ge=10, le=86_400)
     publish_reconciliation_initial_delay_seconds: int = Field(default=15, ge=1, le=3600)
     publish_reconciliation_max_attempts: int = Field(default=20, ge=1, le=100)
+    publish_reconciliation_sweep_poll_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=3600,
+    )
+    publish_reconciliation_sweep_batch_size: int = Field(default=100, ge=1, le=1000)
 
     @field_validator(
         "cors_origins",

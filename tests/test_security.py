@@ -469,6 +469,19 @@ class RuntimeSettingsTest(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 Settings(**values)
 
+    def test_publish_reconciliation_sweep_is_bounded(self):
+        settings = Settings()
+        self.assertEqual(settings.publish_reconciliation_sweep_poll_seconds, 60)
+        self.assertEqual(settings.publish_reconciliation_sweep_batch_size, 100)
+        for values in (
+            {"publish_reconciliation_sweep_poll_seconds": 4},
+            {"publish_reconciliation_sweep_poll_seconds": 3601},
+            {"publish_reconciliation_sweep_batch_size": 0},
+            {"publish_reconciliation_sweep_batch_size": 1001},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Settings(**values)
+
     def test_development_live_provider_may_use_local_http_endpoint(self):
         Settings(
             database_url="sqlite:///contentflow-test.db",

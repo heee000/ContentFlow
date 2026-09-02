@@ -185,7 +185,7 @@ class JobQueueLeaseTest(unittest.TestCase):
             self.assertEqual(node.status, "stopped")
             self.assertIsNotNone(node.stopped_at)
 
-    def test_idle_worker_throttles_storage_reconciliation_sweeps(self):
+    def test_idle_worker_throttles_maintenance_sweeps(self):
         settings = Settings(
             database_url="sqlite://",
             secret_key="storage-sweep-throttle-test-secret",
@@ -201,11 +201,18 @@ class JobQueueLeaseTest(unittest.TestCase):
         with patch(
             "contentflow.worker.schedule_due_storage_reconciliations",
             return_value=0,
-        ) as schedule_sweep:
+        ) as storage_sweep, patch(
+            "contentflow.worker.schedule_pending_publish_reconciliations",
+            return_value=0,
+        ) as publish_sweep:
             self.assertFalse(worker.run_once())
             self.assertFalse(worker.run_once())
 
-        schedule_sweep.assert_called_once_with(
+        storage_sweep.assert_called_once_with(
+            ANY,
+            settings=settings,
+        )
+        publish_sweep.assert_called_once_with(
             ANY,
             settings=settings,
         )

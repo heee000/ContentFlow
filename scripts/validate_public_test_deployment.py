@@ -91,6 +91,22 @@ def validate_document(document: dict, *, caddyfile: str) -> list[str]:
     for key, value in expected.items():
         if str(environment.get(key, "")).lower() != value:
             errors.append(f"{key} must be {value}")
+    for key in (
+        "CONTENTFLOW_WORKSPACE_STORAGE_MAX_BYTES",
+        "CONTENTFLOW_WORKSPACE_STORAGE_MAX_OBJECTS",
+        "CONTENTFLOW_STORAGE_RECONCILE_INTERVAL_HOURS",
+        "CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_BATCH_SIZE",
+        "CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_POLL_SECONDS",
+        "CONTENTFLOW_PUBLISH_RECONCILIATION_INITIAL_DELAY_SECONDS",
+        "CONTENTFLOW_PUBLISH_RECONCILIATION_MAX_ATTEMPTS",
+        "CONTENTFLOW_PUBLISH_RECONCILIATION_SWEEP_POLL_SECONDS",
+        "CONTENTFLOW_PUBLISH_RECONCILIATION_SWEEP_BATCH_SIZE",
+    ):
+        value = str(environment.get(key) or "")
+        if not value.isdigit() or int(value) <= 0:
+            errors.append(f"{key} must be explicitly passed as a positive integer")
+    if str(environment.get("CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_ENABLED", "")).lower() != "true":
+        errors.append("public-test storage reconciliation schedule must be enabled")
     if environment.get("CONTENTFLOW_EMBEDDING_PROVIDER") in {"hash", "mock"}:
         errors.append("public-test stack must not use hash/mock embeddings")
     for key in (

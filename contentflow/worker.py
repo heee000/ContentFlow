@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import literal, or_, select
 from sqlalchemy.orm import Session
 
 from . import db
@@ -670,21 +670,32 @@ def schedule_pending_publish_reconciliations(
     session: Session,
     *,
     settings: Settings,
-    limit: int = 100,
+    limit: int | None = None,
 ) -> int:
+    batch_size = (
+        settings.publish_reconciliation_sweep_batch_size if limit is None else limit
+    )
+    if not 1 <= batch_size <= 1000:
+        raise ValueError("publish reconciliation sweep batch is invalid")
+    reconciliation_key = literal("publish.reconcile:") + PublishJob.id
     query = (
         select(PublishJob)
         .join(
             ChannelConnection,
             ChannelConnection.id == PublishJob.channel_id,
         )
+        .outerjoin(Job, Job.idempotency_key == reconciliation_key)
         .where(
             PublishJob.status == "submitted",
             PublishJob.external_id.is_not(None),
             ChannelConnection.platform == "wechat",
+            or_(
+                Job.id.is_(None),
+                Job.status.in_(("succeeded", "failed")),
+            ),
         )
-        .order_by(PublishJob.updated_at.asc())
-        .limit(limit)
+        .order_by(PublishJob.updated_at.asc(), PublishJob.id.asc())
+        .limit(batch_size)
     )
     if session.bind and session.bind.dialect.name == "postgresql":
         query = query.with_for_update(of=PublishJob, skip_locked=True)
@@ -1433,6 +1444,7 @@ class Worker:
         self._stop_event = stop_event or threading.Event()
         self._shutdown_signal: int | None = None
         self._next_storage_reconciliation_sweep_at = 0.0
+        self._next_publish_reconciliation_sweep_at = 0.0
 
     @property
     def stop_requested(self) -> bool:
@@ -1460,10 +1472,15 @@ class Worker:
                         settings=self.settings,
                     )
                 )
-            scheduled_reconciliations = schedule_pending_publish_reconciliations(
-                session,
-                settings=self.settings,
-            )
+            scheduled_reconciliations = 0
+            if monotonic_now >= self._next_publish_reconciliation_sweep_at:
+                self._next_publish_reconciliation_sweep_at = monotonic_now + (
+                    self.settings.publish_reconciliation_sweep_poll_seconds
+                )
+                scheduled_reconciliations = schedule_pending_publish_reconciliations(
+                    session,
+                    settings=self.settings,
+                )
             if scheduled_storage_reconciliations or scheduled_reconciliations:
                 session.commit()
             if scheduled_storage_reconciliations:

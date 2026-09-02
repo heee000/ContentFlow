@@ -120,6 +120,14 @@ class MigrationTest(unittest.TestCase):
                         indexes[index_name]["column_names"],
                         ["workspace_id", "updated_at", "id"],
                     )
+                publish_indexes = {
+                    item["name"]: item["column_names"]
+                    for item in inspect(engine).get_indexes("publish_jobs")
+                }
+                self.assertEqual(
+                    publish_indexes["ix_publish_jobs_reconciliation_sweep"],
+                    ["status", "updated_at", "id"],
+                )
                 asset_columns = {
                     item["name"] for item in inspect(engine).get_columns("assets")
                 }
