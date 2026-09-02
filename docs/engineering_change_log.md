@@ -627,7 +627,7 @@
 
 ### CF-20260903-01：高增长运营集合会无界读取工作区全表
 
-- 状态：实现、迁移和本地专项验证完成；远程 PostgreSQL/MinIO CI 待本阶段提交后签收。
+- 状态：实现、迁移、本地专项验证和远程 PostgreSQL/MinIO/供应链签收完成。
 - 问题与影响：活动、内容、素材、发布和知识等列表没有统一上限；Job 虽硬限制 200，但无法继续读取。数据增长后会放大数据库扫描、序列化、网络和浏览器内存，并让旧记录不可达。
 - 根因：各 Router 独立实现 `order_by(...).all()`，没有共享页长、稳定次序、游标校验和响应元数据契约。
 - 解决方案：新增 `contentflow.pagination`。七类运营集合默认 100、最大 200（Run 保持既有最大 100），按 `updated_at DESC, id DESC` 做 keyset；游标是版本化、严格结构、URL-safe 的不透明载荷，畸形/超长/无时区增量输入返回 422。响应数组不变，以 `X-ContentFlow-Next-Cursor`、`X-ContentFlow-Page-Limit` 和 `X-ContentFlow-Sync-Time` 承载控制信息，并由 CORS 显式暴露。
@@ -662,7 +662,7 @@
 
 ### CF-20260903-05：远程审计在本地验证后新命中 fast-uri 高危公告
 
-- 状态：兼容范围内的锁文件修复和本地前端复验完成；修复提交的远程 CI 仍需重新签收。
+- 状态：兼容范围内的锁文件修复、本地前端复验和后续完整远程 CI 签收完成。
 - 发现方式：实现提交 `f4172f20b1edd45f7d63848113223161bc7ccfc4` 的首次手工 CI `33655246050` 中，后端 PostgreSQL/pgvector、MinIO、安全门禁与供应链证据任务成功，前端 lint、渲染测试和生产构建也成功；最后的 `npm audit --audit-level=moderate` 新命中 `fast-uri 3.0.0 - 3.1.5` 的四条高危主机混淆/SSRF 公告，因此整次运行正确失败，来源证明任务被跳过。
 - 根因：`ajv 8.20.0` 通过 `^3.0.1` 引入 `fast-uri`，锁文件固定在刚被公告覆盖的 `3.1.5`。这不是业务代码缺陷或 CI 网络故障，也不应通过降低审计级别规避。
 - 解决方案：仅把传递依赖锁定结果从 `fast-uri 3.1.5` 更新到同一兼容主版本的 `3.1.7`；不新增直接依赖、不跨主版本、不运行 `npm audit fix --force`，也不修改审计门槛。
@@ -671,8 +671,14 @@
 
 ### CF-20260903-06：Prometheus 规则单测跨组求值顺序未声明
 
-- 状态：确定性修复已实现；固定 Prometheus 镜像的远程 promtool 复验待提交后签收。
+- 状态：确定性修复已实现，并由固定 Prometheus 镜像和完整远程 CI 签收。
 - 发现方式：安全修复提交 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 的 CI `33656868446` 中，前端全部门禁和 SBOM 成功；后端的 Prometheus 配置与 13 条规则语法成功，但 `ContentFlowHighHTTP5xxRate` 在第 13 分钟偶发未触发，后续 PostgreSQL/MinIO 测试因此被失败关闭。
 - 根因：测试同时包含 `contentflow-recording` 与 `contentflow-alerts` 两个规则组，后者消费前者生成的记录指标，但测试文件没有声明同一求值时刻的组顺序。此前把断言从 12 分钟移到 13 分钟只扩大了余量，没有消除跨组顺序不确定性。
 - 解决方案：在 Prometheus 单测顶层增加 `group_eval_order`，明确 `contentflow-recording` 先于 `contentflow-alerts`。不改告警表达式、持续时间、阈值或生产配置，不用放宽期望掩盖问题。
-- 证据边界：本机 Docker 服务未运行，无法用固定容器镜像本地执行 promtool；YAML 改动必须由远程固定 digest 的 Prometheus `v3.13.1-distroless` 验证。失败运行 `33656868446` 只作为前端安全修复成功和规则时序缺口的发现证据，不是完整签收。
+- 验证：本机 Docker 服务未运行，因此没有伪称本地 promtool 通过；远程 CI `33657538096` 使用固定 digest 的 Prometheus `v3.13.1-distroless` 成功完成配置、13 条规则和规则单测，随后继续跑完 PostgreSQL/MinIO 全量测试。失败运行 `33656868446` 只保留为前端安全修复成功和规则时序缺口的发现证据。
+
+### 本阶段远程交付证据
+
+- 实现提交 `f4172f20b1edd45f7d63848113223161bc7ccfc4`、依赖安全修复 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 和 Prometheus 确定性修复 `19eb1773f367362e8a288dfbbd59103f95a47bd5` 均以 John Wang 身份普通推送，未使用 force 或 force-with-lease。
+- [ContentFlow CI #33657538096](https://github.com/heee000/ContentFlow/actions/runs/33657538096) 绑定提交 `19eb1773f367362e8a288dfbbd59103f95a47bd5`，四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 后端为 `266 passed, 152 subtests passed`，分支覆盖率 82.05%；Prometheus 配置/规则/规则单测、Python 依赖审计、前端 lint/test/build/audit、可复现源码与 SBOM 均通过。
+- 供应链 Artifact `9857357210` 名为 `contentflow-supply-chain-19eb1773f367362e8a288dfbbd59103f95a47bd5`，摘要 `sha256:d0c52084bdbf96afaefaa80c9c28e08007c75201a337f2d642245b9109625122`；SLSA 来源证明和 Python/前端 CycloneDX attestation 均已发布并反向验证。

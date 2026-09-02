@@ -1793,7 +1793,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 
 ### 当前验证与边界
 
-- Ruff 全仓、锁文件、单 Alembic head、PowerShell 语法、公网部署校验和差异检查通过；隔离真实 `.env` 的全量后端为 `258 passed, 8 skipped, 152 subtests passed`、分支覆盖率 81.15%。8 项跳过只因本机未启动 PostgreSQL/MinIO，不能冒充外部服务签收。前端 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js/TypeScript 生产构建、moderate 依赖审计 0 漏洞均通过。远程 PostgreSQL/MinIO CI 必须在提交后继续签收，未完成前不得填写成功 Run URL。
+- Ruff 全仓、锁文件、单 Alembic head、PowerShell 语法、公网部署校验和差异检查通过；隔离真实 `.env` 的全量后端为 `258 passed, 8 skipped, 152 subtests passed`、分支覆盖率 81.15%。8 项本地跳过只因未启动 PostgreSQL/MinIO；真实外部服务已由本阶段远程 CI 单独签收。前端 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js/TypeScript 生产构建、moderate 依赖审计 0 漏洞均通过。
 - 仍未分页的低频/父级集合包括审计、成员、工作区、风格 Skill、内容修订、发布证据和部分 Prompt/Eval 聚合；超过 2000 条的 Web 历史浏览、虚拟列表和服务端搜索仍需实现。
 - 前端单文件仍大，活动期仍有 8 路增量请求。下一阶段应拆分领域 query hooks/components，先做视图感知轮询和 Playwright 请求预算，再评估带恢复游标的 SSE/Inbox。
 - FORCE RLS 与 owner/migrator/API/Worker 角色拆分没有实施。它会改变数据库权限并可能导致 API/Worker 全面失去访问，必须在用户明确授权后以备份、回滚、分批迁移和跨租户负向测试执行；不得偷偷借分页阶段带入。
@@ -1806,3 +1806,4 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 3. 本地 `npm audit --audit-level=moderate` 已回到 0 漏洞。用符合 engines 的随附 Node 24.19.0 重新 `npm ci` 后，ESLint、Vinext/Sites 构建、2 项 SSR 测试和 Next.js/TypeScript 生产构建通过。默认 Node 22.11.0 会因低于仓库要求跳过 Rolldown Windows 原生可选包，接手时不要按错误提示删除锁文件。
 4. `web/package-lock.json` 与首轮记录已经由提交 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 普通推送。只有包含后续 Prometheus 确定性修复的 CI 四个 Job 全成功后，才能把新 Run、PostgreSQL/MinIO 测试数量、覆盖率、Artifact 摘要和 SLSA/CycloneDX attestation 补写为最终证据。
 5. 修复提交 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 的 CI `33656868446` 已证明 fast-uri 修复有效：前端 install/lint/test/build/audit 与 SBOM 成功；但 Prometheus 单测随后暴露跨规则组求值顺序未声明。测试现应以 `group_eval_order` 固定 `contentflow-recording` 先于 `contentflow-alerts`，不得继续只增加 alert `eval_time`，也不得改生产阈值让 CI 变绿。本机 Docker 未运行，最终以固定 Prometheus digest 的新远程 CI 为准。
+6. 最终提交 `19eb1773f367362e8a288dfbbd59103f95a47bd5` 的 [ContentFlow CI #33657538096](https://github.com/heee000/ContentFlow/actions/runs/33657538096) 四个 Job 全部成功：固定 Prometheus digest 的配置/13 条规则/规则单测通过；PostgreSQL/pgvector 与 MinIO 后端为 `266 passed, 152 subtests passed`、覆盖率 82.05%；前端审计、Python 审计、可复现源码、SBOM、SLSA 与双 CycloneDX attestation 全部签收。Artifact `9857357210` 摘要为 `sha256:d0c52084bdbf96afaefaa80c9c28e08007c75201a337f2d642245b9109625122`。
