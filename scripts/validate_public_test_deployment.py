@@ -6,7 +6,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from contentflow.migrate import HEAD_REVISION, MINIMUM_PUBLIC_TABLE_COUNT
+from contentflow.migrate import validate_public_restore_contract
 
 
 IMMUTABLE_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
@@ -116,23 +116,6 @@ def validate_document(document: dict, *, caddyfile: str) -> list[str]:
     return errors
 
 
-def validate_backup_contract(script: str) -> list[str]:
-    errors: list[str] = []
-    expected_revision = f'test "$revision" = "{HEAD_REVISION}"'
-    expected_table_count = (
-        f'test "$tables" -ge {MINIMUM_PUBLIC_TABLE_COUNT}'
-    )
-    if expected_revision not in script:
-        errors.append(
-            "public-test restore must require the current Alembic head"
-        )
-    if expected_table_count not in script:
-        errors.append(
-            "public-test restore table threshold does not match the current schema"
-        )
-    return errors
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Render and fail-closed validate the public-test Compose stack."
@@ -164,7 +147,7 @@ def main() -> int:
         caddyfile=args.caddyfile.read_text(encoding="utf-8"),
     )
     errors.extend(
-        validate_backup_contract(
+        validate_public_restore_contract(
             args.verify_backup.read_text(encoding="utf-8")
         )
     )

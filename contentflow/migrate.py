@@ -45,6 +45,22 @@ AUDIT_CHAIN_COLUMNS = {
 }
 
 
+def validate_public_restore_contract(script: str) -> list[str]:
+    """Keep public restore guards synchronized with the current schema."""
+    errors: list[str] = []
+    expected_revision = f'test "$revision" = "{HEAD_REVISION}"'
+    expected_table_count = (
+        f'test "$tables" -ge {MINIMUM_PUBLIC_TABLE_COUNT}'
+    )
+    if expected_revision not in script:
+        errors.append("public-test restore must require the current Alembic head")
+    if expected_table_count not in script:
+        errors.append(
+            "public-test restore table threshold does not match the current schema"
+        )
+    return errors
+
+
 def _alembic_config(connection: Connection) -> Config:
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     config.attributes["connection"] = connection

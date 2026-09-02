@@ -608,3 +608,11 @@
 - 状态：仓库门槛已同步；当前 head 的真实联合恢复仍待独立演练。
 - 解决方案：本地备份/恢复默认 revision 更新为 `6d4e8f9a0b1c`，最低 public 表数更新为 28；公网隔离恢复不再只检查 revision 非空，而是要求精确等于当前 head。部署静态验证器从 `contentflow.migrate` 读取当前常量并校验恢复脚本文本，新增迁移时若忘记同步将让 CI 失败。PowerShell 语法、2 项恢复契约、部署静态验证器和差异检查通过。
 - 剩余边界：脚本门槛正确不等于当前 28 表 PostgreSQL+对象联合恢复已经发生；PITR、异地不可变副本和 RPO/RTO 演练继续保持未签收。
+
+### CF-20260902-04：远程 CI 暴露 Linux 导入差异与新披露前端依赖漏洞
+
+- 状态：修复和本地定向验证完成，等待修复提交的远程 CI 复验。
+- 发现方式：实现提交 `52811bb64560751b500aba7bdd529b8982710627` 的首次手工 CI `33648030752` 中，Python 收集阶段在 Linux 找不到未安装的 `scripts` 命名空间；前端 lint、测试和生产构建通过，但 `npm audit` 命中新披露的 Browserslist 高危公告。
+- 根因：恢复契约测试直接导入仓库维护脚本，本地 Windows 测试路径偶然可见，正式 Python 包配置却只安装 `contentflow*`；前端锁文件仍固定 `browserslist 4.28.2`，而审计源要求高于 `4.28.6`。
+- 解决方案：把恢复门槛校验移入正式安装的 `contentflow.migrate.validate_public_restore_contract`，部署脚本与测试共用同一实现，不把整个 `scripts/` 目录加入生产包；仅更新锁文件中的 Browserslist 及其浏览器数据库依赖到兼容安全版本 `4.28.8`。
+- 验证：相关 Ruff 检查通过，迁移/审计/恢复契约 `19 passed`；`npm audit --audit-level=moderate` 为 `0 vulnerabilities`。本机沙箱首次重跑因系统临时目录 ACL 无法创建 SQLite 文件而失败，提升为普通宿主用户权限后同一测试集通过；该权限噪声没有作为代码失败处理。
