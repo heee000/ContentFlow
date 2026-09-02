@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from contentflow import db
 from contentflow.entities import (
+    Job,
     StorageObjectAllocation,
     User,
     Workspace,
@@ -30,6 +31,7 @@ from contentflow.storage_ledger import (
     delete_storage_allocation,
     reconcile_workspace_storage,
     request_storage_deletion,
+    schedule_due_storage_reconciliations,
 )
 
 
@@ -138,6 +140,110 @@ def test_ledger_preserves_the_complete_object_storage_protocol(
         assert storage.workspace_uri_prefix(ledger_harness.workspace_id) == (
             ledger_harness.storage.workspace_uri_prefix(ledger_harness.workspace_id)
         )
+
+
+def test_scheduler_queues_report_only_reconciliation_once_per_interval(
+    ledger_harness: LedgerHarness,
+):
+    now = datetime.now(timezone.utc)
+    settings = ledger_harness.settings.model_copy(
+        update={
+            "storage_reconcile_schedule_enabled": True,
+            "storage_reconcile_interval_hours": 24,
+        }
+    )
+    with ledger_harness.sessions() as session:
+        usage = session.get(WorkspaceStorageUsage, ledger_harness.workspace_id)
+        assert usage is not None
+        usage.last_reconciled_at = now - timedelta(hours=25)
+        session.commit()
+
+    with ledger_harness.sessions() as session:
+        assert (
+            schedule_due_storage_reconciliations(
+                session,
+                settings=settings,
+                now=now,
+            )
+            == 1
+        )
+        session.commit()
+        job = session.scalar(
+            select(Job).where(Job.job_type == "storage.reconcile")
+        )
+        assert job is not None
+        first_job_id = job.id
+        first_run_id = job.payload_json["run_id"]
+        assert job.payload_json["trigger"] == "scheduled"
+        assert job.payload_json["delete_orphans"] is False
+
+    with ledger_harness.sessions() as session:
+        assert (
+            schedule_due_storage_reconciliations(
+                session,
+                settings=settings,
+                now=now + timedelta(hours=1),
+            )
+            == 0
+        )
+        job = session.get(Job, first_job_id)
+        assert job is not None
+        job.status = "failed"
+        session.commit()
+
+    with ledger_harness.sessions() as session:
+        assert (
+            schedule_due_storage_reconciliations(
+                session,
+                settings=settings,
+                now=now + timedelta(hours=23),
+            )
+            == 0
+        )
+        assert (
+            schedule_due_storage_reconciliations(
+                session,
+                settings=settings,
+                now=now + timedelta(hours=25),
+            )
+            == 1
+        )
+        session.commit()
+        jobs = list(session.scalars(select(Job).where(Job.job_type == "storage.reconcile")))
+        assert len(jobs) == 1
+        assert jobs[0].id == first_job_id
+        assert jobs[0].status == "queued"
+        assert jobs[0].attempts == 0
+        assert jobs[0].payload_json["run_id"] != first_run_id
+
+
+def test_scheduler_can_be_disabled_without_query_side_effects(
+    ledger_harness: LedgerHarness,
+):
+    settings = ledger_harness.settings.model_copy(
+        update={"storage_reconcile_schedule_enabled": False}
+    )
+    with ledger_harness.sessions() as session:
+        usage = session.get(WorkspaceStorageUsage, ledger_harness.workspace_id)
+        assert usage is not None
+        usage.last_reconciled_at = None
+        assert schedule_due_storage_reconciliations(session, settings=settings) == 0
+        assert session.scalar(select(Job)) is None
+
+
+def test_scheduler_rejects_an_invalid_explicit_batch(
+    ledger_harness: LedgerHarness,
+):
+    with ledger_harness.sessions() as session:
+        with pytest.raises(
+            ValueError,
+            match="storage reconciliation schedule batch is invalid",
+        ):
+            schedule_due_storage_reconciliations(
+                session,
+                settings=ledger_harness.settings,
+                limit=0,
+            )
 
 
 def test_legacy_delete_registration_refreshes_same_session_usage_counters(
@@ -389,6 +495,8 @@ def test_delete_failure_stays_charged_and_retry_releases_quota(
             mime_type=stored.mime_type,
         )
         allocation_id = allocation.id
+        delete_requested_at = allocation.delete_requested_at
+        assert delete_requested_at is not None
         session.commit()
 
     failing_storage = _FailingOnceDeleteStorage(ledger_harness.storage)
@@ -409,6 +517,10 @@ def test_delete_failure_stays_charged_and_retry_releases_quota(
             assert allocation is not None and usage is not None
             assert allocation.status == "delete_pending"
             assert allocation.delete_attempts == 1
+            assert (
+                allocation.delete_requested_at.replace(tzinfo=timezone.utc)
+                == delete_requested_at
+            )
             assert "injected object-store outage" in allocation.last_error
             assert (usage.used_bytes, usage.used_objects) == (8, 1)
         assert ledger_harness.storage.read(stored.uri) == b"12345678"
@@ -429,6 +541,10 @@ def test_delete_failure_stays_charged_and_retry_releases_quota(
         assert allocation is not None and usage is not None
         assert allocation.status == "deleted"
         assert allocation.delete_attempts == 1
+        assert (
+            allocation.delete_requested_at.replace(tzinfo=timezone.utc)
+            == delete_requested_at
+        )
         assert (usage.used_bytes, usage.used_objects) == (0, 0)
 
 

@@ -294,6 +294,7 @@ class AdministrationTest(unittest.TestCase):
             self.assertIsNotNone(job)
             self.assertEqual(job.payload_json["workspace_id"], self.primary_workspace_id)
             self.assertIsNotNone(job.payload_json["scan_started_at"])
+            self.assertEqual(job.payload_json["trigger"], "manual")
 
     def test_worker_health_reports_tenant_scoped_queue_and_global_capacity(self):
         now = datetime.now(timezone.utc)

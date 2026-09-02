@@ -70,7 +70,10 @@ from ..schemas import (
     WorkerHealthResponse,
     WorkerQueueHealthResponse,
 )
-from ..storage_ledger import new_reconciliation_run_id, pending_storage_counts
+from ..storage_ledger import (
+    enqueue_storage_reconciliation,
+    pending_storage_counts,
+)
 
 
 router = APIRouter(prefix="/admin", tags=["administration"])
@@ -1305,39 +1308,15 @@ def reconcile_storage(
             )
         return active_job
 
-    run_id = new_reconciliation_run_id()
     requested_at = datetime.now(timezone.utc)
-    job_payload = {
-        "workspace_id": principal.workspace_id,
-        "run_id": run_id,
-        "scan_started_at": requested_at.isoformat(),
-        "storage_cursor": None,
-        "delete_orphans": payload.delete_orphans,
-    }
-    entry_key = f"storage.reconcile:{principal.workspace_id}:entry"
-    entry_query = select(Job).where(Job.idempotency_key == entry_key)
-    if session.bind and session.bind.dialect.name == "postgresql":
-        entry_query = entry_query.with_for_update()
-    job = session.scalar(entry_query)
-    if job is None:
-        job = enqueue_job(
-            session,
-            job_type="storage.reconcile",
-            payload=job_payload,
-            workspace_id=principal.workspace_id,
-            idempotency_key=entry_key,
-            max_attempts=settings.worker_max_attempts,
-        )
-    else:
-        job.status = "queued"
-        job.payload_json = job_payload
-        job.result_json = {}
-        job.attempts = 0
-        job.max_attempts = settings.worker_max_attempts
-        job.run_at = requested_at
-        job.locked_by = None
-        job.locked_at = None
-        job.last_error = None
+    job, run_id, _created = enqueue_storage_reconciliation(
+        session,
+        settings=settings,
+        workspace_id=principal.workspace_id,
+        delete_orphans=payload.delete_orphans,
+        trigger="manual",
+        requested_at=requested_at,
+    )
     record_audit(
         session,
         action="storage.reconcile_requested",

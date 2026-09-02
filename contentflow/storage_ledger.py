@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import BinaryIO
 
-from sqlalchemy import event, func, select, update
+from sqlalchemy import case, event, exists, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from .audit import record_audit
@@ -39,6 +39,7 @@ CHARGED_STATUSES = (
     "missing",
     "integrity_error",
 )
+ACTIVE_RECONCILIATION_STATUSES = ("queued", "retry", "running")
 
 
 class StorageQuotaExceeded(RuntimeError):
@@ -58,7 +59,12 @@ class StorageDeletionError(RuntimeError):
 
 
 def create_workspace_storage_usage(session: Session, workspace_id: str) -> None:
-    session.add(WorkspaceStorageUsage(workspace_id=workspace_id))
+    session.add(
+        WorkspaceStorageUsage(
+            workspace_id=workspace_id,
+            last_reconciled_at=datetime.now(timezone.utc),
+        )
+    )
 
 
 def _delete_rollback_objects(session: Session) -> None:
@@ -107,7 +113,10 @@ def _usage_for_update(
         usage_query.execution_options(populate_existing=True)
     )
     if usage is None:
-        usage = WorkspaceStorageUsage(workspace_id=workspace_id)
+        usage = WorkspaceStorageUsage(
+            workspace_id=workspace_id,
+            last_reconciled_at=datetime.now(timezone.utc),
+        )
         session.add(usage)
         session.flush()
     return usage
@@ -367,6 +376,139 @@ def build_ledgered_object_storage(
     )
 
 
+def enqueue_storage_reconciliation(
+    session: Session,
+    *,
+    settings: Settings,
+    workspace_id: str,
+    delete_orphans: bool,
+    trigger: str,
+    requested_at: datetime | None = None,
+) -> tuple[Job, str, bool]:
+    if trigger not in {"manual", "scheduled"}:
+        raise ValueError("storage reconciliation trigger is invalid")
+    requested_at = requested_at or datetime.now(timezone.utc)
+    run_id = new_reconciliation_run_id()
+    payload = {
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "scan_started_at": requested_at.isoformat(),
+        "storage_cursor": None,
+        "delete_orphans": delete_orphans,
+        "trigger": trigger,
+    }
+    entry_key = f"storage.reconcile:{workspace_id}:entry"
+    entry_query = select(Job).where(Job.idempotency_key == entry_key)
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        entry_query = entry_query.with_for_update()
+    job = session.scalar(entry_query)
+    if job is not None and job.status in ACTIVE_RECONCILIATION_STATUSES:
+        existing_run_id = str((job.payload_json or {}).get("run_id") or "")
+        return job, existing_run_id, False
+    if job is None:
+        job = enqueue_job(
+            session,
+            job_type="storage.reconcile",
+            payload=payload,
+            workspace_id=workspace_id,
+            idempotency_key=entry_key,
+            max_attempts=settings.worker_max_attempts,
+        )
+    else:
+        job.status = "queued"
+        job.payload_json = payload
+        job.result_json = {}
+        job.attempts = 0
+        job.max_attempts = settings.worker_max_attempts
+        job.run_at = requested_at
+        job.locked_by = None
+        job.locked_at = None
+        job.last_error = None
+    return job, run_id, True
+
+
+def schedule_due_storage_reconciliations(
+    session: Session,
+    *,
+    settings: Settings,
+    limit: int | None = None,
+    now: datetime | None = None,
+) -> int:
+    if not settings.storage_reconcile_schedule_enabled:
+        return 0
+    batch_size = (
+        settings.storage_reconcile_schedule_batch_size if limit is None else limit
+    )
+    if not 1 <= batch_size <= 200:
+        raise ValueError("storage reconciliation schedule batch is invalid")
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=settings.storage_reconcile_interval_hours)
+    recent_or_active_job = exists(
+        select(Job.id).where(
+            Job.workspace_id == Workspace.id,
+            Job.job_type == "storage.reconcile",
+            or_(
+                Job.status.in_(ACTIVE_RECONCILIATION_STATUSES),
+                Job.updated_at > cutoff,
+            ),
+        )
+    ).correlate(Workspace)
+    query = (
+        select(Workspace.id)
+        .join(
+            WorkspaceStorageUsage,
+            WorkspaceStorageUsage.workspace_id == Workspace.id,
+        )
+        .where(
+            or_(
+                WorkspaceStorageUsage.last_reconciled_at.is_(None),
+                WorkspaceStorageUsage.last_reconciled_at <= cutoff,
+            ),
+            ~recent_or_active_job,
+        )
+        .order_by(
+            case(
+                (WorkspaceStorageUsage.last_reconciled_at.is_(None), 0),
+                else_=1,
+            ),
+            WorkspaceStorageUsage.last_reconciled_at.asc(),
+            Workspace.id.asc(),
+        )
+        .limit(batch_size)
+    )
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update(of=Workspace, skip_locked=True)
+    workspace_ids = list(session.scalars(query))
+    scheduled = 0
+    for workspace_id in workspace_ids:
+        job, run_id, created = enqueue_storage_reconciliation(
+            session,
+            settings=settings,
+            workspace_id=workspace_id,
+            delete_orphans=False,
+            trigger="scheduled",
+            requested_at=now,
+        )
+        if not created:
+            continue
+        scheduled += 1
+        record_audit(
+            session,
+            action="storage.reconcile_scheduled",
+            entity_type="workspace",
+            entity_id=workspace_id,
+            workspace_id=workspace_id,
+            actor_user_id=None,
+            metadata={
+                "run_id": run_id,
+                "job_id": job.id,
+                "interval_hours": settings.storage_reconcile_interval_hours,
+                "delete_orphans": False,
+            },
+        )
+    return scheduled
+
+
 def request_storage_deletion(
     session: Session,
     *,
@@ -383,6 +525,7 @@ def request_storage_deletion(
 ) -> tuple[StorageObjectAllocation, Job | None]:
     if not is_workspace_storage_uri(settings, workspace_id, storage_uri):
         raise ValueError("object URI is not managed by this workspace")
+    requested_at = datetime.now(timezone.utc)
     allocation_query = select(StorageObjectAllocation).where(
         StorageObjectAllocation.workspace_id == workspace_id,
         StorageObjectAllocation.storage_uri == storage_uri,
@@ -415,6 +558,7 @@ def request_storage_deletion(
             size_bytes=verified_size,
             size_verified=bool(verified_size),
             mime_type=mime_type,
+            delete_requested_at=requested_at,
         )
         session.add(allocation)
         session.flush()
@@ -427,6 +571,7 @@ def request_storage_deletion(
         return allocation, None
     elif allocation.status in {"active", "missing", "integrity_error"}:
         allocation.status = "delete_pending"
+        allocation.delete_requested_at = requested_at
         allocation.last_error = None
     elif allocation.status == "deleted":
         pass
@@ -434,6 +579,8 @@ def request_storage_deletion(
         raise StorageLedgerInvariantError(
             f"allocation in status {allocation.status} cannot be deleted"
         )
+    elif allocation.delete_requested_at is None:
+        allocation.delete_requested_at = requested_at
     job = enqueue_job(
         session,
         job_type="storage.delete",
@@ -671,6 +818,7 @@ def reconcile_workspace_storage(
                 "scan_started_at": scan_started_at.isoformat(),
                 "storage_cursor": next_cursor,
                 "delete_orphans": delete_orphans,
+                "trigger": str(payload.get("trigger") or "manual"),
             },
             workspace_id=workspace_id,
             idempotency_key=f"storage.reconcile:{run_id}:{cursor_digest}",

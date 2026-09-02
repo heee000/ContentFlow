@@ -1013,6 +1013,23 @@ class MigrationTest(unittest.TestCase):
                         ("shared_legacy", 4, 1, "integrity_error"),
                     ],
                 )
+                usage_indexes = {
+                    item["name"]
+                    for item in inspect(engine).get_indexes(
+                        "workspace_storage_usage"
+                    )
+                }
+                self.assertIn(
+                    "ix_workspace_storage_usage_reconciliation_due",
+                    usage_indexes,
+                )
+                allocation_columns = {
+                    item["name"]
+                    for item in inspect(engine).get_columns(
+                        "storage_object_allocations"
+                    )
+                }
+                self.assertIn("delete_requested_at", allocation_columns)
                 engine.dispose()
 
                 command.downgrade(config, "9a7b2c3d4e5f")

@@ -65,6 +65,11 @@ class Workspace(TimestampMixin, Base):
 class WorkspaceStorageUsage(TimestampMixin, Base):
     __tablename__ = "workspace_storage_usage"
     __table_args__ = (
+        Index(
+            "ix_workspace_storage_usage_reconciliation_due",
+            "last_reconciled_at",
+            "workspace_id",
+        ),
         CheckConstraint("used_bytes >= 0", name="used_bytes_non_negative"),
         CheckConstraint("used_objects >= 0", name="used_objects_non_negative"),
         CheckConstraint("reserved_bytes >= 0", name="reserved_bytes_non_negative"),
@@ -165,6 +170,9 @@ class StorageObjectAllocation(TimestampMixin, Base):
     )
     delete_attempts: Mapped[int] = mapped_column(
         Integer, default=0, server_default=text("0"), nullable=False
+    )
+    delete_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
     )
     last_error: Mapped[str | None] = mapped_column(Text)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

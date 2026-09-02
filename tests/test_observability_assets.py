@@ -39,7 +39,7 @@ def test_alert_rules_have_bounded_operations_contracts():
         "contentflow-alerts",
     }
     alerts = [rule for group in groups for rule in group["rules"] if "alert" in rule]
-    assert len(alerts) == 8
+    assert len(alerts) == 11
     assert {rule["labels"]["severity"] for rule in alerts} == {
         "warning",
         "critical",
@@ -58,6 +58,9 @@ def test_alert_rules_have_bounded_operations_contracts():
         assert forbidden_label not in all_expressions
     assert "max(contentflow_queue_oldest_ready_age_seconds)" in all_expressions
     assert "sum(rate(contentflow_http_requests_total" in all_expressions
+    assert "contentflow_storage_allocations" in all_expressions
+    assert "contentflow_storage_reconciliation_overdue_workspaces" in all_expressions
+    assert "contentflow_storage_delete_pending_oldest_age_seconds" in all_expressions
 
 
 def test_grafana_assets_are_immutable_and_use_safe_global_aggregation():
@@ -89,7 +92,7 @@ def test_grafana_assets_are_immutable_and_use_safe_global_aggregation():
     )
     assert dashboard["uid"] == "contentflow-operations"
     assert dashboard["editable"] is False
-    assert len(dashboard["panels"]) == 11
+    assert len(dashboard["panels"]) == 14
     expressions = [
         target["expr"] for panel in dashboard["panels"] for target in panel["targets"]
     ]
@@ -100,6 +103,14 @@ def test_grafana_assets_are_immutable_and_use_safe_global_aggregation():
     assert "max by (status) (contentflow_queue_jobs)" in expressions
     assert "max by (status) (contentflow_workflow_runs)" in expressions
     assert "max by (status) (contentflow_prompt_eval_runs)" in expressions
+    assert "max by (status) (contentflow_storage_allocations)" in expressions
+    assert (
+        "max(contentflow_storage_reconciliation_overdue_workspaces)" in expressions
+    )
+    assert "max(contentflow_storage_reconciliation_failed_jobs)" in expressions
+    assert (
+        "max(contentflow_storage_delete_pending_oldest_age_seconds)" in expressions
+    )
     assert any(
         "sum by (route, status_class)" in expression for expression in expressions
     )

@@ -94,9 +94,9 @@ flowchart TB
 - `LocalObjectStorage`：开发环境；路径必须位于配置根目录
 - `S3ObjectStorage`：生产环境；支持 MinIO 与兼容 S3 服务；新对象保存完整 SHA-256 元数据，读取时校验长度和内容完整性，旧对象兼容校验键中的哈希前缀
 
-持久写入不再由各业务表分别估算配额。`LedgeredObjectStorage` 先在数据库中锁定工作区并通过条件更新原子预留字节/对象数，物理键包含 allocation UUID；写入完成后把预留转为正式用量，事务回滚监听器删除未提交对象。知识、素材、脚本证据、脚本包和人工导出均使用该入口。对象替换或包过期创建 `storage.delete` Job，删除失败保持计费并重试，成功后才原子释放用量。
+持久写入不再由各业务表分别估算配额。`LedgeredObjectStorage` 先在数据库中锁定工作区并通过条件更新原子预留字节/对象数，物理键包含 allocation UUID；写入完成后把预留转为正式用量，事务回滚监听器删除未提交对象。知识、素材、脚本证据、脚本包和人工导出均使用该入口。对象替换或包过期创建 `storage.delete` Job，首次进入队列时固定 `delete_requested_at`；删除失败保持计费并重试且不重置积压年龄，成功后才原子释放用量。
 
-`storage.reconcile` 按当前后端分页扫描工作区前缀，释放过期预留、补齐旧对象大小、识别缺失/大小异常和超过宽限期的孤儿。固定扫描开始水位避免并发新写入被误判；管理员可只核对或明确确认后清理孤儿。迁移发现同一旧 URI 被多条实体引用时标为 `shared_legacy` 完整性异常并禁止自动删除。删除登记还会验证 URI 属于当前工作区，而不只验证同一根目录或 Bucket。
+`storage.reconcile` 按当前后端分页扫描工作区前缀，释放过期预留、补齐旧对象大小、识别缺失/大小异常和超过宽限期的孤儿。固定扫描开始水位避免并发新写入被误判；任一 Worker 会按配置周期挑选到期工作区，PostgreSQL 以工作区 `SKIP LOCKED` 和固定入口幂等键避免多副本重复，失败后按周期冷却。自动任务永远是只报告模式；只有管理员明确确认才能清理孤儿。迁移发现同一旧 URI 被多条实体引用时标为 `shared_legacy` 完整性异常并禁止自动删除。删除登记还会验证 URI 属于当前工作区，而不只验证同一根目录或 Bucket。`last_reconciled_at + workspace_id` 索引让有界调度不依赖全表排序。
 
 知识文件限制 20MB，模型生成素材下载限制 100MB。下载接口先校验工作区权限，再代理返回本地或 S3 对象。列表对账验证存在性和大小，读取路径执行 SHA-256 完整性检查；当前尚无全量内容哈希巡检、跨旧/新存储后端联合扫描或 S3 历史版本成本计量。
 
@@ -119,10 +119,10 @@ flowchart TB
 
 - `/metrics` 默认关闭且不进入 OpenAPI；启用后要求独立 Bearer Token，生产环境会拒绝关闭指标或复用应用密钥。
 - 每个 API 进程维护独立 Registry，记录按固定 method、完整 FastAPI 模板 route 和状态类别聚合的请求数、延迟直方图与并发数；未知方法统一为 `OTHER`，不会把原始资源 ID 写入标签。
-- 抓取时从 PostgreSQL 汇总 Job、最长就绪等待、Worker active/stale/stopped、Workflow/Eval 状态和发布人工对账数量。业务状态只使用固定集合，未知值聚合为 `unknown`，不暴露 workspace、用户或对象标识。
+- 抓取时从 PostgreSQL 汇总 Job、最长就绪等待、Worker active/stale/stopped、Workflow/Eval、发布人工对账，以及存储用量/状态、核对超期/失败和删除积压。业务状态只使用固定集合，未知值聚合为 `unknown`，不暴露 workspace、用户、对象 URI 或任务标识。
 - 数据库 Gauge 在每个 API 副本上表示同一个全局数据库视图；多副本查询应使用 `max` 去重。HTTP Counter/Histogram 则按实例用 `sum(rate(...))` 聚合。
 - 可选 Compose `observability` profile 使用固定摘要的 Prometheus 3.13.1 distroless 与 Grafana 13.1.0，Token/管理员密码经 Compose secrets 注入；Prometheus 不映射宿主端口，Grafana 默认仅绑定 loopback。
-- 仓库提供 5 条 recording rules、8 条 alerting rules、7 类故障 promtool 行为测试和 11 面板只读 Grafana Dashboard。当前仍没有企业 Alertmanager receiver、HA/remote-write、OpenTelemetry Trace、日志关联、Provider 成本、数据库慢查询或对象存储深度信号。
+- 仓库提供 5 条 recording rules、11 条 alerting rules 和 14 面板只读 Grafana Dashboard；新增规则覆盖存储完整性异常、核对超期/失败和删除积压。当前仍没有企业 Alertmanager receiver、HA/remote-write、OpenTelemetry Trace、日志关联、Provider 成本、数据库慢查询、对象存储请求错误率或历史版本成本信号。
 
 ## 9. 前端
 
@@ -132,4 +132,4 @@ flowchart TB
 
 运营集合使用 `(workspace_id, updated_at, id)`，低频控制面使用创建时间或业务序号加 ID 的组合索引和 keyset cursor；成员/工作区连接查询按 Membership 排序键翻页，内容修订、Prompt 版本/Eval 套件和审计使用严格序列游标。每次列表查询最多读取 `limit + 1` 行，响应仍是兼容旧客户端的 JSON 数组，下一页位置、页长和服务端同步水位放在响应头。Prompt/Eval 摘要嵌套列表固定最多 100 条，完整记录走独立分页端点。Web 初次加载有界追页，达到 2000 条客户端安全上限时显式提示；后台只增量刷新活动、运行、内容、素材、发布和队列，不再每 2.5/15 秒重复加载知识、渠道、成员、Prompt 和审计等静态控制面。分页扫描期间发生的更新由带 2 秒重叠窗口的下一轮同步收敛；后台页数超过上限时保留旧水位并要求人工全量刷新，避免静默跳过。
 
-所有当前面向用户的可增长集合都已有服务端上限和继续游标，但这仍不是完整历史/实时数据层：Web 会自动追页至 2000 条后停止，尚无按域继续加载、服务端搜索/导出、虚拟列表或可分享筛选。脚本发布证据按尝试限制数量和累计字节；素材版本已从 JSON 元数据提升为可索引列，并对每个内容版本设置数量上限；工作区对象则有统一字节/数量预留、删除和人工触发的孤儿巡检。仍缺业务实体通用删除/保留/归档、周期调度和对象历史版本成本治理。`contentflow-app.tsx` 仍是大型单文件，增量轮询在活动期间仍会并行请求 8 个轻量接口。下一阶段应完成领域级历史浏览与存储生命周期，再引入 query hooks、SSE/事件 Inbox、浏览器请求预算和断线恢复测试。
+所有当前面向用户的可增长集合都已有服务端上限和继续游标，但这仍不是完整历史/实时数据层：Web 会自动追页至 2000 条后停止，尚无按域继续加载、服务端搜索/导出、虚拟列表或可分享筛选。脚本发布证据按尝试限制数量和累计字节；素材版本已从 JSON 元数据提升为可索引列，并对每个内容版本设置数量上限；工作区对象则有统一字节/数量预留、可重试删除和自动只读巡检。仍缺业务实体通用删除/保留/归档、全对象内容哈希抽检、跨后端 inventory 和对象历史版本成本治理。`contentflow-app.tsx` 仍是大型单文件，增量轮询在活动期间仍会并行请求 8 个轻量接口。下一阶段应完成领域级历史浏览与存储生命周期，再引入 query hooks、SSE/事件 Inbox、浏览器请求预算和断线恢复测试。

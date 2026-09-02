@@ -26,6 +26,7 @@ from contentflow.entities import (
     KnowledgeDocument,
     PublishJob,
     User,
+    WorkspaceStorageUsage,
     WorkflowRun,
 )
 from contentflow.settings import Settings
@@ -82,6 +83,32 @@ class WorkerIntegrationTest(unittest.TestCase):
         self.client.__exit__(None, None, None)
         db.engine.dispose()
         self.temp_dir.cleanup()
+
+    def test_worker_runs_due_storage_reconciliation_in_report_only_mode(self):
+        stale_at = datetime.now(timezone.utc) - timedelta(hours=25)
+        with db.SessionLocal() as session:
+            usage = session.get(WorkspaceStorageUsage, self.workspace_id)
+            self.assertIsNotNone(usage)
+            self.assertIsNotNone(usage.last_reconciled_at)
+            usage.last_reconciled_at = stale_at
+            session.commit()
+
+        self.assertTrue(self.worker.run_once())
+
+        with db.SessionLocal() as session:
+            job = session.scalar(
+                select(Job).where(Job.job_type == "storage.reconcile")
+            )
+            self.assertIsNotNone(job)
+            self.assertEqual(job.status, "succeeded")
+            self.assertEqual(job.payload_json["trigger"], "scheduled")
+            self.assertFalse(job.payload_json["delete_orphans"])
+            usage = session.get(WorkspaceStorageUsage, self.workspace_id)
+            self.assertIsNotNone(usage)
+            self.assertGreater(
+                usage.last_reconciled_at.replace(tzinfo=timezone.utc),
+                stale_at,
+            )
 
     def _create_publish_fixture(
         self,

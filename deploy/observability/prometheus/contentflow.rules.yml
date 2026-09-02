@@ -86,6 +86,36 @@ groups:
           summary: ContentFlow publish jobs require manual reconciliation
           description: One or more publish jobs have required manual reconciliation for five minutes.
           runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#发布自动对账与人工处置
+      - alert: ContentFlowStorageIntegrityAnomaly
+        expr: sum(contentflow_storage_allocations{status=~"missing|integrity_error"}) > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: contentflow
+        annotations:
+          summary: ContentFlow storage ledger has integrity anomalies
+          description: One or more managed objects are missing or have a physical size mismatch.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#工作区存储账本与对账
+      - alert: ContentFlowStorageReconciliationOverdue
+        expr: (max(contentflow_storage_reconciliation_scheduler_enabled) == 1 and max(contentflow_storage_reconciliation_overdue_workspaces) > 0) or max(contentflow_storage_reconciliation_failed_jobs) > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: contentflow
+        annotations:
+          summary: ContentFlow storage reconciliation is overdue or failed
+          description: At least one workspace is overdue for reconciliation, or a reconciliation job exhausted retries.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#工作区存储账本与对账
+      - alert: ContentFlowStorageDeleteBacklog
+        expr: max(contentflow_storage_delete_pending_oldest_age_seconds) > 86400
+        for: 15m
+        labels:
+          severity: warning
+          service: contentflow
+        annotations:
+          summary: ContentFlow storage deletion backlog exceeds one day
+          description: The oldest managed object pending physical deletion has remained queued for more than one day.
+          runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#工作区存储账本与对账
       - alert: ContentFlowPrometheusRuleEvaluationFailure
         expr: increase(prometheus_rule_evaluation_failures_total[5m]) > 0
         for: 2m

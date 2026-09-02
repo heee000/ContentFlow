@@ -452,6 +452,20 @@ class RuntimeSettingsTest(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 Settings(asset_max_items_per_content_version=invalid)
 
+    def test_storage_reconciliation_schedule_is_bounded(self):
+        settings = Settings()
+        self.assertTrue(settings.storage_reconcile_schedule_enabled)
+        self.assertEqual(settings.storage_reconcile_interval_hours, 24)
+        self.assertEqual(settings.storage_reconcile_schedule_batch_size, 25)
+        for values in (
+            {"storage_reconcile_interval_hours": 0},
+            {"storage_reconcile_interval_hours": 30 * 24 + 1},
+            {"storage_reconcile_schedule_batch_size": 0},
+            {"storage_reconcile_schedule_batch_size": 201},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Settings(**values)
+
     def test_development_live_provider_may_use_local_http_endpoint(self):
         Settings(
             database_url="sqlite:///contentflow-test.db",

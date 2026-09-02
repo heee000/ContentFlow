@@ -773,3 +773,34 @@
 - 实现提交 `69786faad32e3fc231ac6a53ceaa9289972a84f1` 与跨平台修复提交 `1496cc9aaf9ab02753dd2e87377cb7a30debcef1` 均以 `John Wang <182348029+heee000@users.noreply.github.com>` 普通推送到 `codex/enterprise-media-runtime`，未使用 force 或 force-with-lease。
 - [ContentFlow CI #33679198143](https://github.com/heee000/ContentFlow/actions/runs/33679198143) 四个 Job 全部成功：真实 PostgreSQL/pgvector 与 MinIO 后端为 `292 passed, 167 subtests passed`，分支覆盖率 81.62%；Prometheus 配置/规则/规则单测、Python/npm 审计、前端 lint/test/两套生产构建、可复现源码与 SBOM 均通过。
 - 供应链 Artifact `9865599206` 名为 `contentflow-supply-chain-1496cc9aaf9ab02753dd2e87377cb7a30debcef1`，摘要 `sha256:5d438a812060e07e0a2d3bfa2bfa3c2f1292c96da3e84becd105daa254639be3`；SLSA 来源证明和 Python/前端 CycloneDX attestations 已发布并反向验证。
+
+## 2026-09-03 自动存储核对与运维闭环阶段
+
+### CF-20260903-16：存储核对只能人工触发，异常可能长期静默
+
+- 状态：自动只读调度、Worker 接入与多副本去重已实现；真实 PostgreSQL 并发仍待本阶段远程 CI 绑定提交签收。
+- 问题与影响：统一账本能发现缺失、大小漂移和孤儿，但必须管理员主动点击。若长期不操作，损坏对象、过期预留和孤儿候选会持续存在；若直接让多个 Worker 定时建 Job，又会产生重复任务和失败热循环。
+- 解决方案：任一 Worker 在领取普通任务前调用有界到期扫描。默认每 24 小时、每轮 25 个工作区；PostgreSQL 对 Workspace 使用 `FOR UPDATE SKIP LOCKED`，每个工作区复用固定入口幂等键。活动任务不重复，终态失败按核对周期冷却后才允许计划重启；管理员仍可立即人工重启。新工作区把创建时间作为首个周期起点，迁移旧工作区的空水位会逐批进入首次巡检。
+- 安全边界：所有自动任务固定 `delete_orphans=false`，只能核对和修正账本计量，不能删除孤儿。人工删除路径、二次确认和 409 升级保护保持不变；公网部署冻结期间没有调用外部平台或创建云资源。
+- 涉及文件：`contentflow/storage_ledger.py`、`worker.py`、`routers/admin.py`、`settings.py`、`.env.example` 及存储/Worker/PostgreSQL 测试。
+
+### CF-20260903-17：存储异常没有指标、告警和统一处置入口
+
+- 状态：低基数 Prometheus 指标、三类告警、promtool 行为场景、Grafana 面板和 runbook 已实现；固定 Prometheus 镜像验证待远程 CI。
+- 问题与影响：管理员页面只在有人打开时可见，无法让缺失/完整性错误、核对超期/失败和删除积压主动进入运维流程。
+- 解决方案：数据库 collector 聚合 allocation 固定状态、used/reserved 字节与对象数、unverified 数、调度开关、超期工作区、失败核对 Job 和最老 `delete_pending` 时长。标签只包含受控的 `status/state`，不包含 workspace、对象 URI 或 Job ID；多 API 副本继续用 `max` 去重。
+- 告警与看板：新增 `ContentFlowStorageIntegrityAnomaly`、`ContentFlowStorageReconciliationOverdue` 和 `ContentFlowStorageDeleteBacklog`，分别约束 5/15/15 分钟持续时间；Grafana 从 11 扩为 14 个只读面板，展示 allocation 状态、核对健康和最老删除积压。runbook 明确先核对、再备份、最后人工确认删除，告警恢复不等于历史 Bucket/备份副本已清理。
+- 涉及文件：`contentflow/observability.py`、Prometheus 规则/行为测试、Grafana Dashboard、可观测资产测试、`deploy/observability/README.md` 与 `docs/operations.md`。
+
+### CF-20260903-18：到期调度缺少索引、删除积压缺少稳定时间语义
+
+- 状态：向前迁移、模型索引和恢复契约同步已实现。
+- 问题与影响：按 `last_reconciled_at` 找到最久未核对的工作区如果没有索引，工作区规模增加后会全表排序；若以 allocation 的 `updated_at` 计算删除积压，每次失败重试都会刷新时间并延后告警。只改模型又会让既有数据库、备份校验和公网恢复脚本与运行时声明不一致。
+- 解决方案：新增迁移 `c1d2e3f4a5b6`，增加 `(last_reconciled_at, workspace_id)` 索引和专用 `delete_requested_at`。新删除请求只写一次时间，失败重试不重置；既有 `delete_pending` 记录用迁移时可获得的 `updated_at` 保守回填。迁移不改写已发布的 `b0c1d2e3f4a5` 历史，`HEAD_REVISION`、本地备份/恢复和公网隔离恢复校验同步；public 表门槛仍为 30。
+- 边界：普通 `CREATE INDEX` 在大生产表上仍可能产生锁等待、WAL 和额外空间；正式目标库必须先在副本测量并安排维护窗口，不能把 SQLite/CI 时间当作容量结论。
+
+### 本阶段验证与交付边界
+
+- Ruff、锁文件、公网部署 fail-closed 校验和 Alembic 单 head 通过；本机全量为 `286 passed, 12 skipped, 171 subtests passed`、分支覆盖率 80.75%。12 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例，其中包含本阶段双 Worker 调度去重；Prometheus 固定镜像、真实 PostgreSQL `SKIP LOCKED` 与 MinIO 结果将在提交并跑完远程 CI 后补写。
+- 本轮没有读取或修改 `.env`、平台账密、模型缓存、备份或运行数据，没有调用微信公众号/其他平台，也没有恢复公网部署。`knowledge/北京周末 CityWalk 路线助手产品资料.txt` 继续保持未跟踪且禁止读取、修改、暂存或提交。
+- 只显式暂存本阶段文件，使用 John Wang 身份普通推送；不使用 force 或 force-with-lease。

@@ -33,6 +33,18 @@ tests:
         values: 600x20
       - series: contentflow_publish_reconciliation_required
         values: 1x20
+      - series: contentflow_storage_allocations{status="missing"}
+        values: 1x20
+      - series: contentflow_storage_allocations{status="integrity_error"}
+        values: 0x20
+      - series: contentflow_storage_reconciliation_scheduler_enabled
+        values: 1x20
+      - series: contentflow_storage_reconciliation_overdue_workspaces
+        values: 1x20
+      - series: contentflow_storage_reconciliation_failed_jobs
+        values: 0x20
+      - series: contentflow_storage_delete_pending_oldest_age_seconds
+        values: 90000x20
     alert_rule_test:
       - eval_time: 12m
         alertname: ContentFlowAPIDown
@@ -106,3 +118,33 @@ tests:
               summary: ContentFlow publish jobs require manual reconciliation
               description: One or more publish jobs have required manual reconciliation for five minutes.
               runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#发布自动对账与人工处置
+      - eval_time: 12m
+        alertname: ContentFlowStorageIntegrityAnomaly
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: critical
+            exp_annotations:
+              summary: ContentFlow storage ledger has integrity anomalies
+              description: One or more managed objects are missing or have a physical size mismatch.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#工作区存储账本与对账
+      - eval_time: 17m
+        alertname: ContentFlowStorageReconciliationOverdue
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: warning
+            exp_annotations:
+              summary: ContentFlow storage reconciliation is overdue or failed
+              description: At least one workspace is overdue for reconciliation, or a reconciliation job exhausted retries.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#工作区存储账本与对账
+      - eval_time: 17m
+        alertname: ContentFlowStorageDeleteBacklog
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: warning
+            exp_annotations:
+              summary: ContentFlow storage deletion backlog exceeds one day
+              description: The oldest managed object pending physical deletion has remained queued for more than one day.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#工作区存储账本与对账

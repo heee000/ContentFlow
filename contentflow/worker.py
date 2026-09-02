@@ -61,6 +61,7 @@ from .storage_ledger import (
     delete_storage_allocation,
     reconcile_workspace_storage,
     request_storage_deletion,
+    schedule_due_storage_reconciliations,
 )
 from .workflow_service import execute_workflow_run
 
@@ -1445,12 +1446,24 @@ class Worker:
 
         expired_job_refs: list[tuple[str, str]] = []
         with self.session_factory() as session:
+            scheduled_storage_reconciliations = (
+                schedule_due_storage_reconciliations(
+                    session,
+                    settings=self.settings,
+                )
+            )
             scheduled_reconciliations = schedule_pending_publish_reconciliations(
                 session,
                 settings=self.settings,
             )
-            if scheduled_reconciliations:
+            if scheduled_storage_reconciliations or scheduled_reconciliations:
                 session.commit()
+            if scheduled_storage_reconciliations:
+                logger.info(
+                    "storage reconciliation jobs queued count=%s",
+                    scheduled_storage_reconciliations,
+                )
+            if scheduled_reconciliations:
                 logger.info(
                     "publish reconciliation jobs queued count=%s",
                     scheduled_reconciliations,

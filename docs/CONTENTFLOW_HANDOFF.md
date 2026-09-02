@@ -65,7 +65,7 @@ ContentFlow 面向营销内容生产，把一份活动 Brief 和品牌/产品知
 |---|---|---|
 | Web | Next.js 16.2.12、React 19.2.8、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
 | API | FastAPI 0.115+、Pydantic | REST API 前缀默认 `/api/v1` |
-| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`b0c1d2e3f4a5` |
+| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`c1d2e3f4a5b6` |
 | 隔离测试数据库 | SQLite | 仅在测试显式指定 URL 时使用，不是默认生产运行库 |
 | 生产数据库 | PostgreSQL 16 + pgvector | 迁移创建 1024 维向量表与 HNSW 索引 |
 | 异步任务 | 数据库 Job 队列 + 独立 Python Worker | 不依赖 Redis/Celery |
@@ -1870,3 +1870,28 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 存储核对仍由管理员手动发起，缺少周期调度、Prometheus 指标、告警到人、百万对象查询/扫描预算和目标环境故障注入。Local 枚举适合开发，不是生产大规模方案。
 - FORCE RLS 与数据库角色拆分继续等待明确高影响授权；公网部署继续冻结。本轮没有创建云资源、调用平台 API、创建素材/草稿或公开发布。
 - 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。所有提交只显式暂存本轮文件，使用 John Wang 身份普通推送，不使用 force。
+
+## 21.43 自动存储核对、主动告警与第三十一轮复审增量交接
+
+### 本轮实现
+
+1. Worker 在每次领取普通任务前执行有界到期选择；默认每 24 小时、每轮最多 25 个工作区，可通过三项 `CONTENTFLOW_STORAGE_RECONCILE_*` 配置启停和调节。新工作区从创建时间开始计算，迁移旧工作区空水位进入首次扫描。
+2. PostgreSQL 对 Workspace 使用 `FOR UPDATE SKIP LOCKED`，每个工作区复用 `storage.reconcile:{workspace_id}:entry` 幂等入口。活动任务不会重复，终态失败按周期冷却，人工管理员仍能立即重启；多 Worker 并发测试要求总计只创建一个任务。
+3. 自动任务固定 `delete_orphans=false` 且写入 `trigger=scheduled`；人工任务写 `trigger=manual`。自动计划不会删除孤儿，不改变现有二次确认、只读核对和 409 请求升级保护。
+4. Prometheus 新增 allocation 固定状态、used/reserved 字节与对象、unverified、调度开关、超期工作区、终态失败和最老待删除时长。没有 workspace、对象 URI、Job ID 等高基数/敏感标签。
+5. 告警增加存储完整性、核对超期/失败和删除超过一天三类规则；Grafana 只读看板从 11 增至 14 个面板。运维手册说明核对、备份、人工删除和告警恢复边界。
+6. Alembic head 更新为 `c1d2e3f4a5b6`，新增 `(last_reconciled_at, workspace_id)` 调度索引和不受失败重试刷新影响的 `delete_requested_at`；既有待删记录以旧 `updated_at` 保守回填，不改写已发布迁移。备份、恢复和公网隔离恢复默认 head 同步，public 表门槛保持 30。
+
+### 当前验证与待签收
+
+- Ruff、锁文件、公网部署 fail-closed 校验和 Alembic 单 head 通过；设置上下界、SQLite 迁移升降级、存储计划周期/禁用/冷却、Worker 自动执行、管理 API、指标低基数、Prometheus/Grafana 资产和公网恢复契约均已回归。本机全量为 `286 passed, 12 skipped, 171 subtests passed`、分支覆盖率 80.75%。12 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例；远程固定 Prometheus/PostgreSQL/pgvector/MinIO CI 结果必须绑定本阶段提交后再补写，不能预填成功数字。
+- 本机 Docker/WSL 约束不变；Prometheus 规则行为和真实 PostgreSQL `SKIP LOCKED` 并发以远程 CI 为最终签收。本地 SQLite 通过不能冒充生产并发结论。
+- 公网部署继续按用户要求冻结。本轮未读取 `.env`/账号资料，未调用微信公众号或其他平台，未创建素材、草稿、发布或云资源。
+
+### 继续保留的边界
+
+- 自动核对只遍历当前配置后端并检查存在性/大小；没有全对象哈希抽检、跨旧/新 Bucket inventory、S3 版本历史或云账单核对。百万对象吞吐、分页预算和目标后端故障注入未验证。
+- 没有业务实体通用保留、归档、合法删除、legal hold 和备份删除传播。自动删除继续被明确禁止，不能因已有调度和告警就放开。
+- 三条规则仍未接入真实 Alertmanager receiver/值班系统；看板和规则是可交付配置，不是“告警到人”生产签收。
+- FORCE RLS、数据库角色拆分仍需用户单独授权；不得随存储阶段偷偷实施。前端历史体验、模块化、SSE/Inbox、OIDC/MFA/SCIM/KMS、PITR/异地和真实平台异常矩阵继续在成熟度记录中保留。
+- 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、平台账密、模型缓存、备份和运行数据同样排除。提交只显式暂存本轮文件，使用 John Wang 身份普通推送，不使用 force。

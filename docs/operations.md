@@ -152,14 +152,14 @@ python -m alembic history
 .\scripts\verify_backup.ps1 -BackupPath <path> -ExpectedAlembicRevision <revision> -MinimumPublicTableCount <count>
 ```
 
-正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `b0c1d2e3f4a5`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
+正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `c1d2e3f4a5b6`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
 
 `verify_backup.ps1` 默认校验 dump 哈希、至少 30 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
 
 真正灾难恢复时仍必须恢复到新的 PostgreSQL 数据库和空 bucket，完成应用验收后再切换流量。不要未经演练直接对当前 `contentflow` 库执行 `pg_restore --clean`。
 
-- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `b0c1d2e3f4a5` 又增加工作区存储用量与对象分配两张表；持久 PostgreSQL 迁移与 30 表联合恢复需由当前 CI/恢复演练重新签收，旧证据不等于 PITR 或异地灾备。
-- 从大数据量旧版本升级到 `b0c1d2e3f4a5` 会先回填 `assets.content_version` 和分页索引，再分批扫描知识、素材、发布证据与发布包 URI 建立统一账本。旧对象大小无法确认时标为未验证并阻止新增写入；同一 URI 被多条旧记录引用时标为 `integrity_error` 且禁止自动删除。当前自动迁移适合个人测试/低数据量环境；企业生产必须先在副本测量扫描、索引空间、WAL 和锁等待，并在维护窗口由独立迁移任务执行，不能依赖多副本 API 同时启动迁移。
+- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `c1d2e3f4a5b6` 又增加工作区存储用量、对象分配两张表及到期调度索引；持久 PostgreSQL 迁移与 30 表联合恢复需由当前 CI/恢复演练重新签收，旧证据不等于 PITR 或异地灾备。
+- 从大数据量旧版本升级到 `c1d2e3f4a5b6` 会先回填 `assets.content_version` 和分页索引，再分批扫描知识、素材、发布证据与发布包 URI 建立统一账本，最后创建到期调度索引。旧对象大小无法确认时标为未验证并阻止新增写入；同一 URI 被多条旧记录引用时标为 `integrity_error` 且禁止自动删除。当前自动迁移适合个人测试/低数据量环境；企业生产必须先在副本测量扫描、索引空间、WAL 和锁等待，并在维护窗口由独立迁移任务执行，不能依赖多副本 API 同时启动迁移。
 - 运营列表调用方应保存 `X-ContentFlow-Next-Cursor` 原样继续读取，不得解析或构造游标。增量同步使用上次响应的 `X-ContentFlow-Sync-Time` 并保留短重叠窗口；收到 422 游标错误应丢弃游标并从第一页重载。`updated_after` 必须包含时区。
 - MinIO/S3 生产 bucket 应启用版本控制、生命周期、服务端加密和不可变保留策略。
 - `CONTENTFLOW_SECRET_KEY`、当前/历史凭据加密密钥必须单独备份到集中密钥管理系统；丢失后访问令牌和已加密平台凭据无法恢复。
@@ -180,15 +180,20 @@ CONTENTFLOW_STORAGE_RESERVATION_TTL_MINUTES=60
 CONTENTFLOW_STORAGE_CLEANUP_BATCH_SIZE=100
 CONTENTFLOW_STORAGE_DELETE_MAX_ATTEMPTS=20
 CONTENTFLOW_STORAGE_ORPHAN_GRACE_SECONDS=86400
+CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_ENABLED=true
+CONTENTFLOW_STORAGE_RECONCILE_INTERVAL_HOURS=24
+CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_BATCH_SIZE=25
 ```
 
 - 管理员在“团队与审计 → 对象存储配额与一致性”查看计费容量、对象数、预留、未验证旧对象、待删除、缺失和完整性异常；API 分别为 `GET /api/v1/admin/storage/usage` 与有界分页的 `GET /api/v1/admin/storage/objects`。
 - “核对账本”调用 `POST /api/v1/admin/storage/reconcile`，由 Worker 分页扫描当前配置的存储后端，释放过期预留、补全旧对象大小、发现已验证对象缺失或大小变化，并报告超过宽限期的孤儿候选。巡检跨页携带固定开始水位，扫描期间的新写入不会被误判缺失。
+- 任一 Worker 每次领取普通任务前都会尝试为到期工作区安排一次自动核对；默认每 24 小时、每轮最多 25 个工作区。PostgreSQL 使用工作区行锁和 `SKIP LOCKED`，同一工作区使用固定入口幂等键，多 Worker 只会创建一个任务；终态失败在一个周期内冷却，不会空转重入。新工作区从创建时间开始计算首个周期，升级后 `last_reconciled_at` 为空的旧工作区会逐批完成首次核对。
+- 自动任务始终写入 `delete_orphans=false`，只报告和修复账本计量，绝不会自动删除孤儿。禁用自动计划只需设置 `CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_ENABLED=false`；这不会终止已经入队的任务，也不应作为长期规避异常的手段。
 - “清理孤儿对象”必须再次确认并发送 `delete_orphans=true`；只删除超过宽限期且不在账本中的对象。若已有仅核对任务运行，请等待完成后再发起清理，接口会返回 409 而不会悄悄降级请求。
 - 迁移发现多个旧数据库记录共享同一 URI 时，会保留一个 `shared_legacy` 隔离项并禁止自动删除。应先定位所有引用、复制为独立对象并更新引用，再由维护流程清理；不要直接改账本状态或手工删原对象。
 - 删除登记再次校验 URI 位于当前工作区前缀，不能用同 Bucket 或同本地根目录中的其他工作区对象创建删除任务。账本 API 不返回真实 `storage_uri`，降低路径与 Bucket key 暴露。
 
-当前对账只扫描“当前配置的”存储后端；从 local/旧 Bucket 迁移到新 Bucket 时，旧后端必须在独立维护窗口单独清点。列表对账只验证存在性与大小，读取路径仍执行 SHA-256 校验，但尚无周期性全对象内容哈希巡检。启用 S3/MinIO 版本控制后，逻辑删除可能只创建 delete marker，历史版本容量与云账单不计入 ContentFlow 工作区配额，必须由 Bucket 生命周期、Object Lock/保留策略和云成本告警治理。
+当前对账只扫描“当前配置的”存储后端；从 local/旧 Bucket 迁移到新 Bucket 时，旧后端必须在独立维护窗口单独清点。自动计划只解决定期存在性/大小核对，不等于周期性全对象内容哈希巡检。读取路径仍执行 SHA-256 校验。启用 S3/MinIO 版本控制后，逻辑删除可能只创建 delete marker，历史版本容量与云账单不计入 ContentFlow 工作区配额，必须由 Bucket 生命周期、Object Lock/保留策略和云成本告警治理。
 
 ## 监控基线与告警建议
 
@@ -204,7 +209,7 @@ docker compose exec prometheus /bin/promtool check rules /etc/prometheus/content
 docker compose exec prometheus /bin/promtool test rules /etc/prometheus/contentflow.rules.test.yml
 ```
 
-Grafana secret preflight 会检查管理员密码长度且不允许与指标 Token 相同。抓取配置、5 条 recording rules、8 条 alerting rules、promtool 行为场景和 11 面板 Dashboard 均位于 `deploy/observability/`，由只读 provisioning 加载。以下是规则采用的核心 PromQL，阈值仍需在目标环境压测后校准：
+Grafana secret preflight 会检查管理员密码长度且不允许与指标 Token 相同。抓取配置、5 条 recording rules、11 条 alerting rules、promtool 行为场景和 14 面板 Dashboard 均位于 `deploy/observability/`，由只读 provisioning 加载。以下是规则采用的核心 PromQL，阈值仍需在目标环境压测后校准：
 
 ```promql
 # 5 分钟 5xx 比例
@@ -222,9 +227,17 @@ max(contentflow_worker_nodes{state="active"}) < 1
 max(contentflow_queue_oldest_ready_age_seconds) > 300
 max(contentflow_publish_reconciliation_required) > 0
 up{job="contentflow-api"} == 0
+
+# 存储账本异常、到期核对和删除积压
+sum(contentflow_storage_allocations{status=~"missing|integrity_error"}) > 0
+max(contentflow_storage_reconciliation_overdue_workspaces) > 0
+max(contentflow_storage_reconciliation_failed_jobs) > 0
+max(contentflow_storage_delete_pending_oldest_age_seconds) > 86400
 ```
 
-HTTP Counter/Histogram 来自各 API 进程，应按实例聚合。队列、Worker、Workflow/Eval 与发布对账 Gauge 都读取同一 PostgreSQL 全局视图，多 API 副本会重复暴露相同值，因此告警和看板使用 `max`，不能跨副本求和。
+HTTP Counter/Histogram 来自各 API 进程，应按实例聚合。队列、Worker、Workflow/Eval、发布对账和存储 Gauge 都读取同一 PostgreSQL 全局视图，多 API 副本会重复暴露相同值，因此告警和看板使用 `max`，不能跨副本求和。所有存储标签都是固定 `status/state` 集合，不得加入 workspace、对象 URI 或任务 ID。
+
+存储告警处置顺序：先在 Grafana 判断是 `missing/integrity_error`、核对超期/失败，还是 `delete_pending` 超过一天；再到管理页核对对象状态和最近审计。完整性异常必须确认物理对象与业务引用，不能直接改数据库状态；核对失败可在根因修复后由管理员重新点“核对账本”，终态入口任务会原位重置。孤儿删除必须先完成只读核对和备份，再由管理员显式确认；自动调度永远不会替你执行删除。告警恢复只能说明数据库当前聚合恢复，不等于旧 Bucket、历史版本或备份副本已清理。
 
 可选 profile 已提供单机 Prometheus、规则和 Grafana 看板，但没有配置占位 Alertmanager receiver，避免把不存在的通知人伪装成闭环。生产仍需接入企业 Alertmanager/托管告警平台，完成 HA/remote-write/长期保留、SLO/错误预算、通知升级、静默权限、值班日历与故障演练；还需用 OpenTelemetry 和专用 Exporter 补齐 Provider/平台耗时与费用、数据库池/慢查询、对象存储错误、Trace 与集中日志关联。
 

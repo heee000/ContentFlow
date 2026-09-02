@@ -12,7 +12,12 @@ from sqlalchemy import select
 
 from contentflow import db
 from contentflow.api import create_app
-from contentflow.entities import Job, WorkerNode
+from contentflow.entities import (
+    Job,
+    StorageObjectAllocation,
+    WorkerNode,
+    WorkspaceStorageUsage,
+)
 from contentflow.settings import Settings
 
 
@@ -98,6 +103,37 @@ class ObservabilityTest(unittest.TestCase):
         self.assertEqual(listed.status_code, 200, listed.text)
         now = datetime.now(timezone.utc)
         with db.SessionLocal() as session:
+            usage = session.scalar(select(WorkspaceStorageUsage))
+            self.assertIsNotNone(usage)
+            usage.used_bytes = 12
+            usage.used_objects = 1
+            usage.last_reconciled_at = now - timedelta(days=2)
+            session.add(
+                StorageObjectAllocation(
+                    workspace_id=usage.workspace_id,
+                    owner_type="metrics_test",
+                    owner_id="metrics-object",
+                    category="metrics",
+                    filename="metrics.bin",
+                    status="delete_pending",
+                    storage_uri="file:///metrics-workspace/metrics.bin",
+                    checksum="a" * 64,
+                    size_bytes=12,
+                    size_verified=True,
+                    mime_type="application/octet-stream",
+                    delete_requested_at=now - timedelta(days=2),
+                    updated_at=now - timedelta(days=2),
+                )
+            )
+            session.add(
+                Job(
+                    workspace_id=usage.workspace_id,
+                    job_type="storage.reconcile",
+                    status="failed",
+                    run_at=now - timedelta(days=1),
+                    idempotency_key="metrics-storage-reconcile-failed",
+                )
+            )
             session.add(
                 WorkerNode(
                     id="metrics-worker",
@@ -139,6 +175,39 @@ class ObservabilityTest(unittest.TestCase):
         self.assertIn('contentflow_worker_nodes{state="active"} 1.0', body)
         self.assertIn('contentflow_worker_nodes{state="stale"} 1.0', body)
         self.assertIn("contentflow_publish_reconciliation_required 0.0", body)
+        self.assertIn(
+            'contentflow_storage_allocations{status="delete_pending"} 1.0',
+            body,
+        )
+        self.assertIn(
+            'contentflow_storage_usage_bytes{state="used"} 12.0',
+            body,
+        )
+        self.assertIn(
+            "contentflow_storage_reconciliation_scheduler_enabled 1.0",
+            body,
+        )
+        self.assertIn(
+            "contentflow_storage_reconciliation_overdue_workspaces 1.0",
+            body,
+        )
+        self.assertIn(
+            "contentflow_storage_reconciliation_failed_jobs 1.0",
+            body,
+        )
+        self.assertIn(
+            "contentflow_storage_delete_pending_oldest_age_seconds",
+            body,
+        )
+        oldest_delete_age = next(
+            float(line.rsplit(" ", 1)[1])
+            for line in body.splitlines()
+            if line.startswith(
+                "contentflow_storage_delete_pending_oldest_age_seconds "
+            )
+        )
+        self.assertGreater(oldest_delete_age, 47 * 60 * 60)
+        self.assertNotIn("metrics-workspace", body)
 
         schema = self.client.get("/openapi.json").json()
         self.assertNotIn("/metrics", schema["paths"])

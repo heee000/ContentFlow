@@ -80,6 +80,9 @@ class Settings(BaseSettings):
         ge=60 * 60,
         le=30 * 24 * 60 * 60,
     )
+    storage_reconcile_schedule_enabled: bool = True
+    storage_reconcile_interval_hours: int = Field(default=24, ge=1, le=30 * 24)
+    storage_reconcile_schedule_batch_size: int = Field(default=25, ge=1, le=200)
     publish_evidence_max_bytes: int = Field(
         default=10 * 1024 * 1024,
         gt=0,

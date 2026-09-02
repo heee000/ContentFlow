@@ -7,7 +7,7 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
@@ -51,6 +51,7 @@ from contentflow.storage_ledger import (
     LedgeredObjectStorage,
     StorageQuotaExceeded,
     create_workspace_storage_usage,
+    schedule_due_storage_reconciliations,
 )
 from contentflow.worker import (
     handle_publish_reconcile,
@@ -351,6 +352,71 @@ def test_postgres_serializes_concurrent_storage_quota_reservations(
         assert (usage.reserved_bytes, usage.reserved_objects) == (0, 0)
         assert len(allocations) == 1
         assert allocations[0].status == "active"
+
+
+def test_postgres_schedules_one_storage_reconciliation_across_workers(
+    postgres_harness: PostgresHarness,
+):
+    suffix = uuid.uuid4().hex
+    now = datetime.now(timezone.utc)
+    with postgres_harness.sessions() as session:
+        user = User(
+            email=f"storage-schedule-{suffix}@example.com",
+            password_hash="not-used-by-this-test",
+            display_name="Storage Schedule Owner",
+        )
+        session.add(user)
+        session.flush()
+        workspace = Workspace(
+            name=f"Storage Schedule {suffix}",
+            slug=f"storage-schedule-{suffix}",
+            created_by=user.id,
+        )
+        session.add(workspace)
+        session.flush()
+        create_workspace_storage_usage(session, workspace.id)
+        usage = session.get(WorkspaceStorageUsage, workspace.id)
+        assert usage is not None
+        usage.last_reconciled_at = now - timedelta(hours=2)
+        session.commit()
+        workspace_id = workspace.id
+
+    settings = postgres_harness.settings.model_copy(
+        update={
+            "storage_reconcile_schedule_enabled": True,
+            "storage_reconcile_interval_hours": 1,
+            "storage_reconcile_schedule_batch_size": 10,
+        }
+    )
+    barrier = Barrier(2)
+
+    def sweep() -> int:
+        with postgres_harness.sessions() as session:
+            barrier.wait(timeout=10)
+            count = schedule_due_storage_reconciliations(
+                session,
+                settings=settings,
+                now=now,
+            )
+            session.commit()
+            return count
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        counts = list(executor.map(lambda _index: sweep(), range(2)))
+    assert sum(counts) == 1
+
+    with postgres_harness.sessions() as session:
+        jobs = list(
+            session.scalars(
+                select(Job).where(
+                    Job.workspace_id == workspace_id,
+                    Job.job_type == "storage.reconcile",
+                )
+            )
+        )
+        assert len(jobs) == 1
+        assert jobs[0].payload_json["trigger"] == "scheduled"
+        assert jobs[0].payload_json["delete_orphans"] is False
 
 
 def test_postgres_serializes_concurrent_audit_chain_appends(
