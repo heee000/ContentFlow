@@ -505,10 +505,12 @@ class ScriptPublishFlowTest(unittest.TestCase):
         self.assertEqual(rebuilt.status_code, 202, rebuilt.text)
         self.assertEqual(rebuilt.json()["status"], "scheduled")
         self.assertFalse(rebuilt.json()["script_package_available"])
-        with self.assertRaises(FileNotFoundError):
-            storage.read(old_package_uri)
+        self.assertTrue(storage.read(old_package_uri).startswith(b"PK"))
 
         self.assertTrue(self.worker.run_once())
+        self.assertTrue(self.worker.run_once())
+        with self.assertRaises(FileNotFoundError):
+            storage.read(old_package_uri)
         current = next(
             item
             for item in self.client.get(

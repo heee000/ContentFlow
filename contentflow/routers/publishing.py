@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -33,9 +32,9 @@ from ..schemas import (
     PublishReconcileRequest,
     PublishScheduleRequest,
 )
+from ..storage_ledger import request_storage_deletion
 
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/publishing", tags=["publishing"])
 Db = Annotated[Session, Depends(get_db)]
 Reviewer = Annotated[Principal, Depends(require_role("reviewer"))]
@@ -574,20 +573,33 @@ def create_script_package(
         },
     )
     if isinstance(expired_package_uri, str):
-        session.commit()
-        try:
-            build_object_storage(settings).delete(expired_package_uri)
-        except Exception:
-            logger.exception("failed to delete expired script package")
-            record_audit(
-                session,
-                action="publish.script_package_cleanup_failed",
-                entity_type="publish_job",
-                entity_id=job.id,
-                workspace_id=principal.workspace_id,
-                actor_user_id=principal.user_id,
-                metadata={"expired_attempt_replaced": True},
-            )
+        _allocation, cleanup_job = request_storage_deletion(
+            session,
+            settings=settings,
+            workspace_id=principal.workspace_id,
+            storage_uri=expired_package_uri,
+            owner_type="publish_job",
+            owner_id=(
+                f"{job.id}:{response_json.get('script_attempt_id') or 'legacy-attempt'}"
+            ),
+            category="script-publish",
+            filename=expired_package_uri.rsplit("/", 1)[-1] or "script-package.zip",
+            size_bytes=response_json.get("size_bytes"),
+            checksum=response_json.get("package_sha256"),
+            mime_type="application/zip",
+        )
+        record_audit(
+            session,
+            action="publish.script_package_cleanup_requested",
+            entity_type="publish_job",
+            entity_id=job.id,
+            workspace_id=principal.workspace_id,
+            actor_user_id=principal.user_id,
+            metadata={
+                "cleanup_job_id": cleanup_job.id if cleanup_job is not None else None,
+                "shared_legacy_object_retained": cleanup_job is None,
+            },
+        )
     return job
 
 

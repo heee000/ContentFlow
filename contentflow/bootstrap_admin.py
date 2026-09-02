@@ -13,6 +13,7 @@ from .routers.auth import make_slug
 from .schemas import RegisterRequest
 from .security import hash_password
 from .settings import Settings
+from .storage_ledger import create_workspace_storage_usage
 
 
 def _lock_bootstrap(session, settings: Settings) -> None:
@@ -71,6 +72,7 @@ def bootstrap_workspace_admin(
         )
         session.add(workspace)
         session.flush()
+        create_workspace_storage_usage(session, workspace.id)
         session.add(
             Membership(
                 workspace_id=workspace.id,

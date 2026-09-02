@@ -569,3 +569,49 @@ class WorkerHealthResponse(BaseModel):
     issues: list[str]
     thresholds: dict[str, int]
     queue: WorkerQueueHealthResponse
+
+
+class StorageUsageResponse(BaseModel):
+    used_bytes: int
+    used_objects: int
+    reserved_bytes: int
+    reserved_objects: int
+    unverified_objects: int
+    max_bytes: int
+    max_objects: int
+    delete_pending_objects: int
+    missing_objects: int
+    integrity_error_objects: int
+    abandoned_reservations: int
+    last_reconciled_at: datetime | None
+
+
+class StorageObjectAllocationResponse(ORMModel):
+    id: str
+    owner_type: str
+    owner_id: str
+    category: str
+    filename: str
+    status: Literal[
+        "reserved",
+        "active",
+        "delete_pending",
+        "missing",
+        "integrity_error",
+        "deleted",
+        "abandoned",
+    ]
+    checksum: str | None
+    size_bytes: int
+    size_verified: bool
+    mime_type: str | None
+    reserved_until: datetime | None
+    delete_attempts: int
+    last_error: str | None
+    deleted_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class StorageReconcileRequest(BaseModel):
+    delete_orphans: bool = False

@@ -62,6 +62,114 @@ class Workspace(TimestampMixin, Base):
     )
 
 
+class WorkspaceStorageUsage(TimestampMixin, Base):
+    __tablename__ = "workspace_storage_usage"
+    __table_args__ = (
+        CheckConstraint("used_bytes >= 0", name="used_bytes_non_negative"),
+        CheckConstraint("used_objects >= 0", name="used_objects_non_negative"),
+        CheckConstraint("reserved_bytes >= 0", name="reserved_bytes_non_negative"),
+        CheckConstraint(
+            "reserved_objects >= 0", name="reserved_objects_non_negative"
+        ),
+        CheckConstraint(
+            "unverified_objects >= 0", name="unverified_objects_non_negative"
+        ),
+    )
+
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    used_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    used_objects: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    reserved_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    reserved_objects: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    unverified_objects: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+
+class StorageObjectAllocation(TimestampMixin, Base):
+    __tablename__ = "storage_object_allocations"
+    __table_args__ = (
+        UniqueConstraint("storage_uri", name="uq_storage_allocation_uri"),
+        CheckConstraint("size_bytes >= 0", name="size_bytes_non_negative"),
+        CheckConstraint("delete_attempts >= 0", name="delete_attempts_non_negative"),
+        CheckConstraint(
+            "status IN ('reserved', 'active', 'delete_pending', 'missing', "
+            "'integrity_error', 'deleted', 'abandoned')",
+            name="status",
+        ),
+        CheckConstraint(
+            "status != 'reserved' OR "
+            "(storage_uri IS NULL AND reserved_until IS NOT NULL)",
+            name="reserved_shape",
+        ),
+        CheckConstraint(
+            "status IN ('reserved', 'abandoned') OR storage_uri IS NOT NULL",
+            name="persisted_uri",
+        ),
+        CheckConstraint(
+            "status != 'deleted' OR deleted_at IS NOT NULL",
+            name="deleted_timestamp",
+        ),
+        CheckConstraint(
+            "checksum IS NULL OR length(checksum) = 64",
+            name="checksum_length",
+        ),
+        Index(
+            "ix_storage_allocations_workspace_status_updated_page",
+            "workspace_id",
+            "status",
+            "updated_at",
+            "id",
+        ),
+        Index(
+            "ix_storage_allocations_workspace_owner",
+            "workspace_id",
+            "owner_type",
+            "owner_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    owner_type: Mapped[str] = mapped_column(String(48), index=True)
+    owner_id: Mapped[str] = mapped_column(String(160), index=True)
+    category: Mapped[str] = mapped_column(String(160), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(
+        String(24), default="reserved", server_default=text("'reserved'"), index=True
+    )
+    storage_uri: Mapped[str | None] = mapped_column(Text)
+    checksum: Mapped[str | None] = mapped_column(String(64), index=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    size_verified: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
+    mime_type: Mapped[str | None] = mapped_column(String(120))
+    reserved_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    delete_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Membership(TimestampMixin, Base):
     __tablename__ = "memberships"
     __table_args__ = (

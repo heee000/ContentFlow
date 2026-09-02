@@ -17,9 +17,11 @@ from ..entities import (
     PromptEvalRun,
     PromptEvalSuite,
     PromptRelease,
+    StorageObjectAllocation,
     User,
     WorkerNode,
     Workspace,
+    WorkspaceStorageUsage,
 )
 from ..job_queue import enqueue_job
 from ..pagination import (
@@ -49,6 +51,7 @@ from ..prompts import BUILTIN_PROMPT_SET, calculate_prompt_hashes
 from ..schemas import (
     AuditLogResponse,
     AuditIntegrityResponse,
+    JobResponse,
     MemberCreate,
     MemberResponse,
     MemberUpdate,
@@ -61,9 +64,13 @@ from ..schemas import (
     PromptReleaseCreate,
     PromptReleaseResponse,
     PromptReviewRequest,
+    StorageObjectAllocationResponse,
+    StorageReconcileRequest,
+    StorageUsageResponse,
     WorkerHealthResponse,
     WorkerQueueHealthResponse,
 )
+from ..storage_ledger import new_reconciliation_run_id, pending_storage_counts
 
 
 router = APIRouter(prefix="/admin", tags=["administration"])
@@ -1178,3 +1185,170 @@ def worker_health(
             ),
         ),
     )
+
+
+@router.get("/storage/usage", response_model=StorageUsageResponse)
+def storage_usage(
+    principal: Admin,
+    session: Db,
+    settings: AppSettings,
+):
+    usage = session.get(WorkspaceStorageUsage, principal.workspace_id)
+    counts = pending_storage_counts(session, principal.workspace_id)
+    return StorageUsageResponse(
+        used_bytes=usage.used_bytes if usage is not None else 0,
+        used_objects=usage.used_objects if usage is not None else 0,
+        reserved_bytes=usage.reserved_bytes if usage is not None else 0,
+        reserved_objects=usage.reserved_objects if usage is not None else 0,
+        unverified_objects=usage.unverified_objects if usage is not None else 0,
+        max_bytes=settings.workspace_storage_max_bytes,
+        max_objects=settings.workspace_storage_max_objects,
+        delete_pending_objects=counts["delete_pending"],
+        missing_objects=counts["missing"],
+        integrity_error_objects=counts["integrity_error"],
+        abandoned_reservations=counts["abandoned"],
+        last_reconciled_at=(
+            usage.last_reconciled_at if usage is not None else None
+        ),
+    )
+
+
+@router.get(
+    "/storage/objects",
+    response_model=list[StorageObjectAllocationResponse],
+)
+def list_storage_objects(
+    principal: Admin,
+    session: Db,
+    response: Response,
+    status_filter: str | None = None,
+    attention_only: bool = False,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    allowed_statuses = {
+        "reserved",
+        "active",
+        "delete_pending",
+        "missing",
+        "integrity_error",
+        "deleted",
+        "abandoned",
+    }
+    if status_filter is not None and status_filter not in allowed_statuses:
+        raise HTTPException(status_code=422, detail="存储对象状态筛选值无效")
+    if status_filter is not None and attention_only:
+        raise HTTPException(
+            status_code=422,
+            detail="单一状态筛选与异常对象筛选不能同时使用",
+        )
+    query = select(StorageObjectAllocation).where(
+        StorageObjectAllocation.workspace_id == principal.workspace_id
+    )
+    if status_filter is not None:
+        query = query.where(StorageObjectAllocation.status == status_filter)
+    elif attention_only:
+        query = query.where(
+            StorageObjectAllocation.status.in_(
+                ("delete_pending", "missing", "integrity_error", "abandoned")
+            )
+        )
+    return paginate(
+        session,
+        query,
+        timestamp_column=StorageObjectAllocation.updated_at,
+        id_column=StorageObjectAllocation.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
+
+
+@router.post(
+    "/storage/reconcile",
+    response_model=JobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def reconcile_storage(
+    payload: StorageReconcileRequest,
+    principal: Admin,
+    session: Db,
+    settings: AppSettings,
+):
+    workspace_query = select(Workspace.id).where(
+        Workspace.id == principal.workspace_id
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        workspace_query = workspace_query.with_for_update()
+    if session.scalar(workspace_query) is None:
+        raise HTTPException(status_code=404, detail="工作区不存在")
+    active_job = session.scalar(
+        select(Job)
+        .where(
+            Job.workspace_id == principal.workspace_id,
+            Job.job_type == "storage.reconcile",
+            Job.status.in_(("queued", "retry", "running")),
+        )
+        .order_by(Job.created_at.asc())
+        .limit(1)
+    )
+    if active_job is not None:
+        active_deletes_orphans = (
+            (active_job.payload_json or {}).get("delete_orphans") is True
+        )
+        if payload.delete_orphans and not active_deletes_orphans:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "已有仅核对任务正在运行；请等待完成后再发起孤儿对象清理"
+                ),
+            )
+        return active_job
+
+    run_id = new_reconciliation_run_id()
+    requested_at = datetime.now(timezone.utc)
+    job_payload = {
+        "workspace_id": principal.workspace_id,
+        "run_id": run_id,
+        "scan_started_at": requested_at.isoformat(),
+        "storage_cursor": None,
+        "delete_orphans": payload.delete_orphans,
+    }
+    entry_key = f"storage.reconcile:{principal.workspace_id}:entry"
+    entry_query = select(Job).where(Job.idempotency_key == entry_key)
+    if session.bind and session.bind.dialect.name == "postgresql":
+        entry_query = entry_query.with_for_update()
+    job = session.scalar(entry_query)
+    if job is None:
+        job = enqueue_job(
+            session,
+            job_type="storage.reconcile",
+            payload=job_payload,
+            workspace_id=principal.workspace_id,
+            idempotency_key=entry_key,
+            max_attempts=settings.worker_max_attempts,
+        )
+    else:
+        job.status = "queued"
+        job.payload_json = job_payload
+        job.result_json = {}
+        job.attempts = 0
+        job.max_attempts = settings.worker_max_attempts
+        job.run_at = requested_at
+        job.locked_by = None
+        job.locked_at = None
+        job.last_error = None
+    record_audit(
+        session,
+        action="storage.reconcile_requested",
+        entity_type="workspace",
+        entity_id=principal.workspace_id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "run_id": run_id,
+            "delete_orphans": payload.delete_orphans,
+            "job_id": job.id,
+        },
+    )
+    return job

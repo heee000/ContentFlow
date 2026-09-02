@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
-from ..entities import PublishConfirmation, PublishEvidence, PublishJob
+from ..entities import PublishConfirmation, PublishEvidence, PublishJob, new_id
 from ..object_storage import build_object_storage
 from ..pagination import DEFAULT_PAGE_LIMIT, PageCursor, PageLimit, paginate
 from ..publish_evidence import (
@@ -28,6 +28,11 @@ from ..schemas import (
     PublishEvidenceResponse,
     PublishJobResponse,
     PublishScriptResultRequest,
+)
+from ..storage_ledger import (
+    StorageLedgerUnverified,
+    StorageQuotaExceeded,
+    build_ledgered_object_storage,
 )
 
 
@@ -236,7 +241,13 @@ async def upload_publish_evidence(
             ),
         )
 
-    storage = build_object_storage(settings)
+    evidence_id = new_id()
+    storage = build_ledgered_object_storage(
+        session,
+        settings,
+        owner_type="publish_evidence",
+        owner_id=evidence_id,
+    )
     stored = None
     try:
         stored = storage.put(
@@ -250,6 +261,11 @@ async def upload_publish_evidence(
             normalized.data
         ):
             raise ValueError("post-storage integrity verification failed")
+    except (StorageQuotaExceeded, StorageLedgerUnverified) as error:
+        raise HTTPException(
+            status_code=413 if isinstance(error, StorageQuotaExceeded) else 409,
+            detail=str(error),
+        ) from error
     except (OSError, ValueError) as error:
         if stored is not None:
             try:
@@ -262,6 +278,7 @@ async def upload_publish_evidence(
 
     try:
         evidence = PublishEvidence(
+            id=evidence_id,
             workspace_id=principal.workspace_id,
             publish_job_id=job.id,
             script_attempt_id=script_attempt_id,

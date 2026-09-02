@@ -505,6 +505,10 @@ label small { color: var(--ink-muted); font-size: 12px; }
 .admin-form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
 .panel-form { padding: 24px; }
 .admin-section { margin-top: 24px; }
+.storage-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.storage-metrics { margin-bottom: 0; border-top: 0; border-left: 0; }
+.storage-metrics strong { min-width: 0; overflow-wrap: anywhere; font-size: 30px; }
+.storage-note { border-top: 1px solid var(--border); }
 .compact-select { width: auto; min-width: 136px; min-height: 40px; padding: 6px 28px 6px 10px; }
 .audit-metadata {
   max-width: 360px;
@@ -1170,6 +1174,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .active-generation-list article { grid-template-columns: 1fr; }
   .page-heading { display: grid; align-items: start; }
   .page-action, .page-action .button { width: 100%; }
+  .storage-actions { width: 100%; display: grid; grid-template-columns: 1fr; }
   .metric-grid, .metric-grid-five { grid-template-columns: repeat(2, 1fr); }
   .metric-grid button, .metric-grid > div { min-height: 128px; }
   .metric-grid strong { font-size: 32px; }

@@ -13,7 +13,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
 
 from contentflow.audit import verify_audit_chain
-from contentflow.entities import AuditLog
+from contentflow.entities import Asset, AuditLog, KnowledgeDocument, User, Workspace
 from contentflow.migrate import HEAD_REVISION, upgrade_database
 from contentflow.settings import Settings
 
@@ -921,6 +921,106 @@ class MigrationTest(unittest.TestCase):
                             local_storage_dir=Path(temp_dir) / "storage",
                         )
                     )
+            finally:
+                if previous is None:
+                    os.environ.pop("CONTENTFLOW_DATABASE_URL", None)
+                else:
+                    os.environ["CONTENTFLOW_DATABASE_URL"] = previous
+
+    def test_storage_ledger_migration_backfills_usage_and_downgrades(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "storage-ledger.db"
+            url = f"sqlite:///{database.as_posix()}"
+            previous = os.environ.get("CONTENTFLOW_DATABASE_URL")
+            os.environ["CONTENTFLOW_DATABASE_URL"] = url
+            try:
+                config = Config("alembic.ini")
+                command.upgrade(config, "9a7b2c3d4e5f")
+                engine = create_engine(url)
+                with Session(engine) as session:
+                    user = User(
+                        email="storage-migration@example.com",
+                        password_hash="not-used",
+                        display_name="Storage Migration",
+                    )
+                    session.add(user)
+                    session.flush()
+                    workspace = Workspace(
+                        name="Storage Migration",
+                        slug="storage-migration",
+                        created_by=user.id,
+                    )
+                    session.add(workspace)
+                    session.flush()
+                    session.add_all(
+                        [
+                            Asset(
+                                workspace_id=workspace.id,
+                                kind="image",
+                                provider="upload",
+                                status="ready",
+                                storage_uri="file:///legacy/asset.png",
+                                mime_type="image/png",
+                                size_bytes=4,
+                            ),
+                            Asset(
+                                workspace_id=workspace.id,
+                                kind="image",
+                                provider="upload",
+                                status="ready",
+                                storage_uri="file:///legacy/asset.png",
+                                mime_type="image/png",
+                                size_bytes=4,
+                            ),
+                            KnowledgeDocument(
+                                workspace_id=workspace.id,
+                                name="legacy.txt",
+                                source_type="upload",
+                                storage_uri="file:///legacy/knowledge.txt",
+                                checksum="a" * 64,
+                                status="ready",
+                                metadata_json={},
+                            ),
+                        ]
+                    )
+                    session.commit()
+                    workspace_id = workspace.id
+                engine.dispose()
+
+                command.upgrade(config, "head")
+                engine = create_engine(url)
+                with engine.connect() as connection:
+                    usage = connection.execute(
+                        text(
+                            "SELECT used_bytes, used_objects, unverified_objects "
+                            "FROM workspace_storage_usage WHERE workspace_id = :id"
+                        ),
+                        {"id": workspace_id},
+                    ).one()
+                    allocations = connection.execute(
+                        text(
+                            "SELECT owner_type, size_bytes, size_verified, status "
+                            "FROM storage_object_allocations "
+                            "WHERE workspace_id = :id ORDER BY owner_type"
+                        ),
+                        {"id": workspace_id},
+                    ).all()
+                self.assertEqual(tuple(usage), (4, 2, 1))
+                self.assertEqual(
+                    [tuple(row) for row in allocations],
+                    [
+                        ("knowledge_document", 0, 0, "active"),
+                        ("shared_legacy", 4, 1, "integrity_error"),
+                    ],
+                )
+                engine.dispose()
+
+                command.downgrade(config, "9a7b2c3d4e5f")
+                engine = create_engine(url)
+                tables = set(inspect(engine).get_table_names())
+                engine.dispose()
+                self.assertNotIn("workspace_storage_usage", tables)
+                self.assertNotIn("storage_object_allocations", tables)
             finally:
                 if previous is None:
                     os.environ.pop("CONTENTFLOW_DATABASE_URL", None)

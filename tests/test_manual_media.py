@@ -12,8 +12,19 @@ from sqlalchemy import func, select
 
 from contentflow import db
 from contentflow.api import create_app
-from contentflow.entities import Asset, Campaign, ContentItem, Job, User, WorkflowRun
+from contentflow.entities import (
+    Asset,
+    Campaign,
+    ContentItem,
+    Job,
+    StorageObjectAllocation,
+    User,
+    WorkflowRun,
+    WorkspaceStorageUsage,
+)
+from contentflow.object_storage import build_object_storage
 from contentflow.settings import Settings
+from contentflow.worker import Worker
 
 
 class ManualMediaFlowTest(unittest.TestCase):
@@ -204,6 +215,76 @@ class ManualMediaFlowTest(unittest.TestCase):
             files={"file": ("cover.png", b"not-read", "image/png")},
         )
         self.assertEqual(stale.status_code, 409, stale.text)
+
+    def test_failed_asset_replacement_deletes_old_object_via_retryable_job(self):
+        reviewed = self.client.post(
+            f"/api/v1/contents/{self.content_id}/review",
+            headers=self.headers,
+            json={
+                "decision": "approve",
+                "reason": "文案已核验",
+                "expected_version": 1,
+            },
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        first_cover = io.BytesIO()
+        Image.new("RGB", (24, 16), color=(10, 20, 30)).save(
+            first_cover,
+            format="PNG",
+        )
+        first = self.client.post(
+            "/api/v1/assets/upload",
+            headers=self.headers,
+            data={"asset_id": self.asset_id},
+            files={"file": ("first.png", first_cover.getvalue(), "image/png")},
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+        with db.SessionLocal() as session:
+            asset = session.get(Asset, self.asset_id)
+            old_uri = asset.storage_uri
+            asset.status = "failed"
+            session.commit()
+
+        second_cover = io.BytesIO()
+        Image.new("RGB", (24, 16), color=(90, 80, 70)).save(
+            second_cover,
+            format="PNG",
+        )
+        second = self.client.post(
+            "/api/v1/assets/upload",
+            headers=self.headers,
+            data={"asset_id": self.asset_id},
+            files={"file": ("second.png", second_cover.getvalue(), "image/png")},
+        )
+        self.assertEqual(second.status_code, 201, second.text)
+        new_uri = second.json()["storage_uri"]
+        self.assertNotEqual(new_uri, old_uri)
+
+        with db.SessionLocal() as session:
+            allocations = list(
+                session.scalars(
+                    select(StorageObjectAllocation)
+                    .where(StorageObjectAllocation.owner_id == self.asset_id)
+                    .order_by(StorageObjectAllocation.created_at.asc())
+                )
+            )
+            usage = session.get(WorkspaceStorageUsage, self.workspace_id)
+            self.assertEqual(
+                [allocation.status for allocation in allocations],
+                ["delete_pending", "active"],
+            )
+            self.assertEqual(usage.used_objects, 2)
+        storage = build_object_storage(self.settings)
+        self.assertIsNotNone(old_uri)
+        storage.read(old_uri)
+
+        self.assertTrue(Worker(settings=self.settings).run_once())
+        with self.assertRaises(FileNotFoundError):
+            storage.read(old_uri)
+        self.assertIsNotNone(storage.read(new_uri))
+        with db.SessionLocal() as session:
+            usage = session.get(WorkspaceStorageUsage, self.workspace_id)
+            self.assertEqual(usage.used_objects, 1)
 
     def test_new_manual_asset_is_rejected_at_current_version_quota(self):
         reviewed = self.client.post(

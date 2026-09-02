@@ -65,7 +65,7 @@ ContentFlow 面向营销内容生产，把一份活动 Brief 和品牌/产品知
 |---|---|---|
 | Web | Next.js 16.2.12、React 19.2.8、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
 | API | FastAPI 0.115+、Pydantic | REST API 前缀默认 `/api/v1` |
-| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`e28a6b9c4f10` |
+| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`b0c1d2e3f4a5` |
 | 隔离测试数据库 | SQLite | 仅在测试显式指定 URL 时使用，不是默认生产运行库 |
 | 生产数据库 | PostgreSQL 16 + pgvector | 迁移创建 1024 维向量表与 HNSW 索引 |
 | 异步任务 | 数据库 Job 队列 + 独立 Python Worker | 不依赖 Redis/Celery |
@@ -1843,4 +1843,30 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 实现提交 `7bf99aa0b16cf9977faaedfcdf375c05d1c1d031` 已用 John Wang 身份普通推送，未使用 force；[ContentFlow CI #33668048927](https://github.com/heee000/ContentFlow/actions/runs/33668048927) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `274 passed, 167 subtests passed`、覆盖率 82.19%，并发证据上限已被真实数据库签收；前端、安全审计、Prometheus、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9861374770` 摘要为 `sha256:facce3722cb5ca1ffb4627fc43b0788a0acc7134810e38faf0414b2c1e3e1c07`。
 - Alembic 回归覆盖从旧 head 插入版本 3 和非法版本元数据、升级回填、索引列序、空库 head 以及降级移除字段；大表生产迁移仍需维护窗口和副本容量测量。
 - 下一步资源治理不能只跨 Asset/Knowledge/Evidence/PublishJob 做临时求和。可靠的工作区总存储上限还需要统一对象分配账本，在每条写入链路锁定工作区并预留，记录删除待办/失败，处理重复物理对象、事务回滚补偿、旧数据回填与孤儿巡检。
+- 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。所有提交只显式暂存本轮文件，使用 John Wang 身份普通推送，不使用 force。
+
+## 21.42 统一工作区对象账本与第三十轮复审增量交接
+
+### 本轮实现
+
+1. Alembic head 更新为 `b0c1d2e3f4a5`，public 表门槛从 28 提升为 30；新增 `workspace_storage_usage` 和 `storage_object_allocations`，状态、非负计数、预留形态、持久 URI、删除时间和 SHA-256 长度都有数据库约束。旧未版本化结构只有两张表完整成组且依赖审计链表存在时才允许接管，半迁移继续失败关闭。
+2. 知识上传、人工/检索/生成素材、发布证据、脚本包和人工导出统一走 `LedgeredObjectStorage`。写入先在工作区行锁/条件更新下原子预留字节和对象数，物理键包含 allocation UUID，成功后转为正式用量；对象写入后数据库事务回滚会触发物理补偿。未核实大小的旧对象存在时新增写入失败关闭，避免未知存量下继续超卖。
+3. 素材替换和过期脚本包不再同步尽力删除后立即释放，而是进入幂等 `storage.delete` Job。物理删除失败保留 `delete_pending`、错误与尝试次数并继续计费，成功后在数据库锁下只释放一次；删除实现按 URI 选择 local/S3 后端，并再次校验对象位于当前工作区前缀。
+4. `storage.reconcile` 使用有界页长扫描当前配置后端，释放过期预留、补齐旧大小、识别验证后对象缺失与物理大小变化、报告/可选删除超过 24 小时宽限期的孤儿。跨页携带固定开始水位，扫描期间的新对象不误判；大小变化标为 `integrity_error` 并按实际大小修正用量，缺失对象仍保守计费。
+5. 迁移对 Knowledge/Asset/Evidence 的重复旧 URI 做集合检测；共享对象标记 `shared_legacy + integrity_error`，运行时拒绝自动删除，防止替换一个引用时破坏另一个引用。新对象的 allocation UUID 从源头消除同名同内容碰撞。
+6. 管理员新增用量、异常清单和对账接口；异常筛选只返回缺失、完整性异常、待删除和已释放预留，不暴露真实 URI。管理页按项目设计系统展示配额/预留/异常表，普通核对与孤儿清理分开；清理必须浏览器再次确认，同一工作区已有仅核对任务时升级为清理会返回 409，避免界面把未执行的清理误报为已排队。
+
+### 已验证与待签收
+
+- 存储账本、迁移、素材替换和脚本包清理专项为 `40 passed`；补齐对象协议透传后定向回归为 `20 passed, 14 subtests passed`，最终本机全量为 `281 passed, 11 skipped, 167 subtests passed`，分支覆盖率 80.52%。11 项均为本机没有启动 PostgreSQL/MinIO 的外部服务用例，不能冒充真实并发或对象后端签收。
+- Ruff、Python 编译、锁文件、Alembic 单 head、PowerShell 语法、公网部署 fail-closed 校验、`pip check` 和 Python/npm 漏洞审计均通过；ESLint、Next.js/TypeScript 生产构建、Vinext/Sites 构建和 2 项 SSR 渲染测试通过。本地隔离 API/Web 登录页加载成功且控制台无 warning/error；没有使用真实账号登录或调用平台。本机 WSL Bash 服务被宿主 ACL 拒绝，`verify-backup.sh` 的 Linux 语法/运行仍由远程 CI 签收。
+- PostgreSQL 双线程工作区配额测试与 MinIO 分页/键隔离测试已经入仓，但本机未运行外部服务；只有本提交的 GitHub Linux/PostgreSQL/MinIO CI 全绿后才能写成远程签收。当前没有 commit、push 或 force。
+
+### 继续保留的边界
+
+- 对账只遍历当前配置后端；切换 local/Bucket 时需独立清点旧后端。列表扫描验证存在性与大小，尚无周期性全对象内容哈希、S3 Metadata/版本历史巡检或云账单归因。
+- S3/MinIO 开启版本控制后，逻辑删除可能保留历史版本容量；ContentFlow 配额只统计当前逻辑对象，Bucket 生命周期、Object Lock、保留期和云成本告警仍需单独治理。
+- 目前只有替换/过期对象进入删除状态机，没有知识、证据、活动/工作区通用保留、归档、合法删除和备份删除传播。共享旧对象选择保守隔离而不是自动拆引用，需维护人员迁移。
+- 存储核对仍由管理员手动发起，缺少周期调度、Prometheus 指标、告警到人、百万对象查询/扫描预算和目标环境故障注入。Local 枚举适合开发，不是生产大规模方案。
+- FORCE RLS 与数据库角色拆分继续等待明确高影响授权；公网部署继续冻结。本轮没有创建云资源、调用平台 API、创建素材/草稿或公开发布。
 - 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。所有提交只显式暂存本轮文件，使用 John Wang 身份普通推送，不使用 force。

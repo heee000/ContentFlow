@@ -314,6 +314,47 @@ type AuditIntegrity = {
   verified_at: string;
 };
 
+type StorageUsage = {
+  used_bytes: number;
+  used_objects: number;
+  reserved_bytes: number;
+  reserved_objects: number;
+  unverified_objects: number;
+  max_bytes: number;
+  max_objects: number;
+  delete_pending_objects: number;
+  missing_objects: number;
+  integrity_error_objects: number;
+  abandoned_reservations: number;
+  last_reconciled_at: string | null;
+};
+
+type StorageObjectAllocation = {
+  id: string;
+  owner_type: string;
+  owner_id: string;
+  category: string;
+  filename: string;
+  status:
+    | "reserved"
+    | "active"
+    | "delete_pending"
+    | "missing"
+    | "integrity_error"
+    | "deleted"
+    | "abandoned";
+  checksum: string | null;
+  size_bytes: number;
+  size_verified: boolean;
+  mime_type: string | null;
+  reserved_until: string | null;
+  delete_attempts: number;
+  last_error: string | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 
 type PromptStage = "plan" | "generate" | "review";
 type PromptReleaseStatus =
@@ -530,6 +571,8 @@ type DataState = {
   workspaces: WorkspaceAccess[];
   members: Member[];
   auditLogs: AuditLog[];
+  storageUsage: StorageUsage | null;
+  storageAttention: StorageObjectAllocation[];
   promptGovernance: PromptGovernance | null;
   promptEval: PromptEvalGovernance | null;
 };
@@ -560,6 +603,8 @@ const EMPTY_DATA: DataState = {
   workspaces: [],
   members: [],
   auditLogs: [],
+  storageUsage: null,
+  storageAttention: [],
   promptGovernance: null,
   promptEval: null,
   metrics: {
@@ -677,6 +722,12 @@ const STATUS: Record<string, string> = {
   stale: "旧版本",
   submitted: "已提交",
   succeeded: "成功",
+  reserved: "写入预留",
+  delete_pending: "等待删除",
+  missing: "对象缺失",
+  integrity_error: "完整性异常",
+  deleted: "已删除",
+  abandoned: "已释放预留",
 };
 
 const DELIVERY_MODE: Record<string, string> = {
@@ -759,6 +810,8 @@ function messageOf(error: unknown): string {
 function StatusBadge({ value }: { value: string }) {
   const semantic =
     value === "failed" || value === "blocked" || value === "rejected"
+      || value === "missing" || value === "integrity_error"
+      || value === "abandoned"
       ? "danger"
       : value === "approved" ||
           value === "ready" ||
@@ -773,7 +826,9 @@ function StatusBadge({ value }: { value: string }) {
         : value === "processing" ||
             value === "running" ||
             value === "queued" ||
-            value === "scheduled"
+            value === "scheduled" ||
+            value === "delete_pending" ||
+            value === "reserved"
           ? "info"
           : "neutral";
   const animated = ["processing", "running", "queued", "generating", "indexing", "retry"].includes(value);
@@ -1136,6 +1191,8 @@ export function ContentFlowApp() {
         promptEvalControl,
         promptEvalSuitePage,
         promptEvalRunPage,
+        storageUsage,
+        storageAttentionPage,
       ] = await Promise.all([
         api<DashboardSummary>("/dashboard/summary"),
         apiAllPages<Campaign>("/campaigns"),
@@ -1175,6 +1232,14 @@ export function ContentFlowApp() {
         session?.role === "admin"
           ? apiAllPages<PromptEvalRun>("/admin/prompt-eval/runs")
           : Promise.resolve({ items: [], truncated: false, syncTime: null }),
+        session?.role === "admin"
+          ? api<StorageUsage>("/admin/storage/usage")
+          : Promise.resolve(null),
+        session?.role === "admin"
+          ? apiAllPages<StorageObjectAllocation>(
+              "/admin/storage/objects?attention_only=true",
+            )
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
       ]);
       const limitedCollections = [
         ["活动", campaignPage.truncated],
@@ -1192,6 +1257,7 @@ export function ContentFlowApp() {
         ["Prompt 版本", promptReleasePage.truncated],
         ["Prompt Eval 套件", promptEvalSuitePage.truncated],
         ["Prompt Eval 运行", promptEvalRunPage.truncated],
+        ["存储异常对象", storageAttentionPage.truncated],
       ].filter(([, truncated]) => truncated).map(([label]) => label);
       setData({
         dashboard,
@@ -1209,6 +1275,8 @@ export function ContentFlowApp() {
         workspaces: workspacePage.items,
         members: memberPage.items,
         auditLogs: auditPage.items,
+        storageUsage,
+        storageAttention: storageAttentionPage.items,
         promptGovernance: promptGovernanceControl
           ? { ...promptGovernanceControl, releases: promptReleasePage.items }
           : null,
@@ -1713,6 +1781,8 @@ export function ContentFlowApp() {
               workspaces={data.workspaces}
               members={data.members}
               auditLogs={data.auditLogs}
+              storageUsage={data.storageUsage}
+              storageAttention={data.storageAttention}
               promptGovernance={data.promptGovernance}
               promptEval={data.promptEval}
               onWorkspaceCreated={createAndActivateWorkspace}
@@ -4277,6 +4347,8 @@ function AdministrationView({
   workspaces,
   members,
   auditLogs,
+  storageUsage,
+  storageAttention,
   promptGovernance,
   promptEval,
   onWorkspaceCreated,
@@ -4287,6 +4359,8 @@ function AdministrationView({
   workspaces: WorkspaceAccess[];
   members: Member[];
   auditLogs: AuditLog[];
+  storageUsage: StorageUsage | null;
+  storageAttention: StorageObjectAllocation[];
   promptGovernance: PromptGovernance | null;
   promptEval: PromptEvalGovernance | null;
   onWorkspaceCreated: (name: string) => Promise<void>;
@@ -4364,6 +4438,34 @@ function AdministrationView({
       });
       formElement.reset();
       flash("成员已加入当前工作区");
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function reconcileStorage(deleteOrphans: boolean) {
+    if (
+      deleteOrphans
+      && !window.confirm(
+        "确认清理孤儿对象？系统只会删除超过安全宽限期、且不在账本中的对象；该操作无法撤销。",
+      )
+    ) return;
+    const busyKey = deleteOrphans ? "storage-cleanup" : "storage-reconcile";
+    setBusy(busyKey);
+    setError("");
+    try {
+      await api<QueueJob>("/admin/storage/reconcile", {
+        method: "POST",
+        body: { delete_orphans: deleteOrphans },
+      });
+      flash(
+        deleteOrphans
+          ? "存储核对与孤儿对象清理已加入任务队列"
+          : "存储核对已加入任务队列",
+      );
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -4605,6 +4707,93 @@ function AdministrationView({
             <Button busy={busy === "member"} type="submit">添加成员</Button>
           </form>
         </article>
+      </section>
+
+      <section className="panel admin-section">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Storage governance</p>
+            <h2>对象存储配额与一致性</h2>
+          </div>
+          <div className="storage-actions">
+            <Button
+              type="button"
+              kind="ghost"
+              busy={busy === "storage-reconcile"}
+              onClick={() => void reconcileStorage(false)}
+            >
+              核对账本
+            </Button>
+            <Button
+              type="button"
+              kind="danger"
+              busy={busy === "storage-cleanup"}
+              onClick={() => void reconcileStorage(true)}
+            >
+              清理孤儿对象
+            </Button>
+          </div>
+        </div>
+        {storageUsage ? (
+          <>
+            <div className="metric-grid storage-metrics" aria-label="工作区存储统计">
+              <div>
+                <span>已计费容量</span>
+                <strong>{formatBytes(storageUsage.used_bytes)}</strong>
+                <small>上限 {formatBytes(storageUsage.max_bytes)}</small>
+              </div>
+              <div>
+                <span>已计费对象</span>
+                <strong>{storageUsage.used_objects.toLocaleString()}</strong>
+                <small>上限 {storageUsage.max_objects.toLocaleString()} 个</small>
+              </div>
+              <div>
+                <span>写入预留</span>
+                <strong>{storageUsage.reserved_objects.toLocaleString()}</strong>
+                <small>{formatBytes(storageUsage.reserved_bytes)} 尚未转为正式对象</small>
+              </div>
+              <div>
+                <span>需要关注</span>
+                <strong>{storageAttention.length.toLocaleString()}</strong>
+                <small>
+                  缺失 {storageUsage.missing_objects} · 待删 {storageUsage.delete_pending_objects}
+                  {storageUsage.integrity_error_objects
+                    ? ` · 完整性异常 ${storageUsage.integrity_error_objects}`
+                    : ""}
+                  {storageUsage.abandoned_reservations
+                    ? ` · 已释放 ${storageUsage.abandoned_reservations}`
+                    : ""}
+                </small>
+              </div>
+            </div>
+            <p className="form-note storage-note" role="status">
+              {storageUsage.unverified_objects
+                ? `${storageUsage.unverified_objects} 个历史对象尚未验证大小；完成核对前会阻止新增上传。`
+                : "账本中的对象大小均已验证。"}
+              {storageUsage.last_reconciled_at
+                ? ` 最近一次完成核对：${formatDateTime(storageUsage.last_reconciled_at)}。`
+                : " 尚未完成过全量核对。"}
+            </p>
+          </>
+        ) : (
+          <p className="form-note" role="status">正在读取当前工作区的存储账本…</p>
+        )}
+        <DataTable
+          headers={["状态", "文件", "归属", "大小", "重试 / 原因", "更新时间"]}
+          rows={storageAttention.map((item) => [
+            <StatusBadge key="status" value={item.status} />,
+            <span key="file"><strong>{item.filename}</strong><br /><small>{item.category}</small></span>,
+            <code key="owner">{item.owner_type} · {item.owner_id.slice(0, 8)}</code>,
+            item.size_verified ? formatBytes(item.size_bytes) : "待验证",
+            item.last_error
+              ? `${item.delete_attempts} 次 · ${item.last_error}`
+              : item.delete_attempts
+                ? `${item.delete_attempts} 次`
+                : "—",
+            formatDateTime(item.updated_at),
+          ])}
+          empty="当前没有缺失、完整性异常、待删除或已释放的对象"
+        />
       </section>
 
 
@@ -5173,10 +5362,12 @@ function formatDateTime(value: string): string {
 }
 
 function formatBytes(value: number | null): string {
-  if (!value) return "—";
+  if (value === null) return "—";
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value < 1024 ** 4) return `${(value / 1024 ** 3).toFixed(1)} GB`;
+  return `${(value / 1024 ** 4).toFixed(1)} TB`;
 }
 
 function toLocalInput(date: Date): string {

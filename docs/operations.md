@@ -152,14 +152,14 @@ python -m alembic history
 .\scripts\verify_backup.ps1 -BackupPath <path> -ExpectedAlembicRevision <revision> -MinimumPublicTableCount <count>
 ```
 
-正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `9a7b2c3d4e5f`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
+正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `b0c1d2e3f4a5`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
 
-`verify_backup.ps1` 默认校验 dump 哈希、至少 28 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
+`verify_backup.ps1` 默认校验 dump 哈希、至少 30 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
 
 真正灾难恢复时仍必须恢复到新的 PostgreSQL 数据库和空 bucket，完成应用验收后再切换流量。不要未经演练直接对当前 `contentflow` 库执行 `pg_restore --clean`。
 
-- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `9a7b2c3d4e5f` 在审计哈希链和分页索引之外增加可索引的素材内容版本；持久 PostgreSQL 迁移与 28 表联合恢复需由当前 CI/恢复演练重新签收；旧证据不等于 PITR 或异地灾备。
-- 从大数据量旧版本升级到 `9a7b2c3d4e5f` 会回填 `assets.content_version` 并创建普通 PostgreSQL 复合索引。当前自动迁移适合个人测试/低数据量环境；企业生产必须先在副本测量回填、索引空间和锁等待，并在维护窗口由独立迁移任务执行，不能依赖多副本 API 同时启动迁移。
+- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `b0c1d2e3f4a5` 又增加工作区存储用量与对象分配两张表；持久 PostgreSQL 迁移与 30 表联合恢复需由当前 CI/恢复演练重新签收，旧证据不等于 PITR 或异地灾备。
+- 从大数据量旧版本升级到 `b0c1d2e3f4a5` 会先回填 `assets.content_version` 和分页索引，再分批扫描知识、素材、发布证据与发布包 URI 建立统一账本。旧对象大小无法确认时标为未验证并阻止新增写入；同一 URI 被多条旧记录引用时标为 `integrity_error` 且禁止自动删除。当前自动迁移适合个人测试/低数据量环境；企业生产必须先在副本测量扫描、索引空间、WAL 和锁等待，并在维护窗口由独立迁移任务执行，不能依赖多副本 API 同时启动迁移。
 - 运营列表调用方应保存 `X-ContentFlow-Next-Cursor` 原样继续读取，不得解析或构造游标。增量同步使用上次响应的 `X-ContentFlow-Sync-Time` 并保留短重叠窗口；收到 422 游标错误应丢弃游标并从第一页重载。`updated_after` 必须包含时区。
 - MinIO/S3 生产 bucket 应启用版本控制、生命周期、服务端加密和不可变保留策略。
 - `CONTENTFLOW_SECRET_KEY`、当前/历史凭据加密密钥必须单独备份到集中密钥管理系统；丢失后访问令牌和已加密平台凭据无法恢复。
@@ -167,7 +167,28 @@ python -m alembic history
 
 脚本发布证据默认单文件 10 MiB、单次尝试 20 个对象/累计 50 MiB，图片解码像素上限 4000 万；通过 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_BYTES`、`CONTENTFLOW_PUBLISH_EVIDENCE_MAX_ITEMS`、`CONTENTFLOW_PUBLISH_EVIDENCE_MAX_TOTAL_BYTES` 和 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_PIXELS` 调整。累计上限不得小于单文件上限，单文件上限不得超过通用上传上限；PostgreSQL 会锁定发布任务后检查数量和累计字节，超限请求不会写对象。每个内容版本默认最多 20 个素材记录，可用 `CONTENTFLOW_ASSET_MAX_ITEMS_PER_CONTENT_VERSION` 在 1 至 100 间调整；旧版本任务会在媒体 Provider 调用前停止。任务包确认窗口默认 1440 分钟，可用 `CONTENTFLOW_SCRIPT_CONFIRMATION_TTL_MINUTES` 在 15 至 43200 分钟之间调整；修改只影响之后生成的新尝试。
 
-证据对象应纳入与数据库一致的备份、保留和访问审计。任务包或证据对象写入成功、数据库 flush/commit 失败时，API/Worker 会同步回滚数据库并尽力删除刚写入的对象；过期重建也会在新状态落盘后清理旧包。对象存储删除自身仍可能失败，系统会记录日志/审计但不会把已提交的新任务伪装成失败，因此生产环境仍需按无数据库引用的 `publish-evidence/` 和脚本包对象定期巡检并告警。
+证据对象应纳入与数据库一致的备份、保留和访问审计。任务包或证据对象写入成功、数据库 flush/commit 失败时，API/Worker 会同步回滚数据库并尽力删除刚写入的对象；过期重建和素材替换会创建可重试的 `storage.delete` 任务，只有物理删除成功后才释放配额。删除失败保持 `delete_pending` 和计费状态，避免把仍存在的对象伪装成已清理。
+
+## 工作区存储账本与对账
+
+所有持久对象写入先在 PostgreSQL 中原子预留工作区字节数和对象数，再使用带 allocation UUID 的唯一物理键写入，最后把预留转为正式用量。默认单工作区上限为 5 GiB / 10000 个对象，可通过以下配置调整：
+
+```dotenv
+CONTENTFLOW_WORKSPACE_STORAGE_MAX_BYTES=5368709120
+CONTENTFLOW_WORKSPACE_STORAGE_MAX_OBJECTS=10000
+CONTENTFLOW_STORAGE_RESERVATION_TTL_MINUTES=60
+CONTENTFLOW_STORAGE_CLEANUP_BATCH_SIZE=100
+CONTENTFLOW_STORAGE_DELETE_MAX_ATTEMPTS=20
+CONTENTFLOW_STORAGE_ORPHAN_GRACE_SECONDS=86400
+```
+
+- 管理员在“团队与审计 → 对象存储配额与一致性”查看计费容量、对象数、预留、未验证旧对象、待删除、缺失和完整性异常；API 分别为 `GET /api/v1/admin/storage/usage` 与有界分页的 `GET /api/v1/admin/storage/objects`。
+- “核对账本”调用 `POST /api/v1/admin/storage/reconcile`，由 Worker 分页扫描当前配置的存储后端，释放过期预留、补全旧对象大小、发现已验证对象缺失或大小变化，并报告超过宽限期的孤儿候选。巡检跨页携带固定开始水位，扫描期间的新写入不会被误判缺失。
+- “清理孤儿对象”必须再次确认并发送 `delete_orphans=true`；只删除超过宽限期且不在账本中的对象。若已有仅核对任务运行，请等待完成后再发起清理，接口会返回 409 而不会悄悄降级请求。
+- 迁移发现多个旧数据库记录共享同一 URI 时，会保留一个 `shared_legacy` 隔离项并禁止自动删除。应先定位所有引用、复制为独立对象并更新引用，再由维护流程清理；不要直接改账本状态或手工删原对象。
+- 删除登记再次校验 URI 位于当前工作区前缀，不能用同 Bucket 或同本地根目录中的其他工作区对象创建删除任务。账本 API 不返回真实 `storage_uri`，降低路径与 Bucket key 暴露。
+
+当前对账只扫描“当前配置的”存储后端；从 local/旧 Bucket 迁移到新 Bucket 时，旧后端必须在独立维护窗口单独清点。列表对账只验证存在性与大小，读取路径仍执行 SHA-256 校验，但尚无周期性全对象内容哈希巡检。启用 S3/MinIO 版本控制后，逻辑删除可能只创建 delete marker，历史版本容量与云账单不计入 ContentFlow 工作区配额，必须由 Bucket 生命周期、Object Lock/保留策略和云成本告警治理。
 
 ## 监控基线与告警建议
 

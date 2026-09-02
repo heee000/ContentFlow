@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -10,22 +11,26 @@ from fastapi.testclient import TestClient
 from contentflow import db
 from contentflow.api import create_app
 from contentflow.entities import Job, WorkerNode
+from contentflow.object_storage import LocalObjectStorage
 from contentflow.settings import Settings
+from contentflow.storage_ledger import LedgeredObjectStorage
 
 
 class AdministrationTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
+        self.storage_dir = root / "storage"
         settings = Settings(
             database_url=f"sqlite:///{(root / 'administration.db').as_posix()}",
             secret_key="administration-test-secret",
-            local_storage_dir=root / "storage",
+            local_storage_dir=self.storage_dir,
             allow_registration=True,
             worker_heartbeat_seconds=1,
             worker_stale_seconds=5,
             worker_queue_stall_seconds=10,
         )
+        self.settings = settings
         self.client = TestClient(create_app(settings))
         self.client.__enter__()
 
@@ -171,6 +176,124 @@ class AdministrationTest(unittest.TestCase):
         self.assertEqual(session.status_code, 200, session.text)
         self.assertEqual(session.json()["workspace"]["name"], "Second Workspace")
         self.assertEqual(session.json()["role"], "admin")
+
+    def test_storage_usage_inventory_reconciliation_and_rbac(self):
+        added = self.client.post(
+            "/api/v1/admin/members",
+            headers=self.owner_headers,
+            json={"email": "member@example.com", "role": "editor"},
+        )
+        self.assertEqual(added.status_code, 201, added.text)
+        member_login = self.client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "member@example.com",
+                "password": "member-password",
+                "workspace_id": self.primary_workspace_id,
+            },
+        )
+        self.assertEqual(member_login.status_code, 200, member_login.text)
+        member_headers = {
+            "Authorization": f"Bearer {member_login.json()['access_token']}"
+        }
+        forbidden = self.client.get(
+            "/api/v1/admin/storage/usage",
+            headers=member_headers,
+        )
+        self.assertEqual(forbidden.status_code, 403, forbidden.text)
+
+        with db.SessionLocal() as session:
+            storage = LedgeredObjectStorage(
+                session=session,
+                settings=self.settings,
+                owner_type="administration_test",
+                owner_id="admin-storage-object",
+                storage=LocalObjectStorage(
+                    self.storage_dir,
+                    max_upload_bytes=self.settings.max_upload_bytes,
+                ),
+            )
+            stored = storage.put(
+                workspace_id=self.primary_workspace_id,
+                category="tests",
+                filename="admin-storage.txt",
+                stream=BytesIO(b"admin-storage"),
+                content_type="text/plain",
+            )
+            session.commit()
+
+        usage = self.client.get(
+            "/api/v1/admin/storage/usage",
+            headers=self.owner_headers,
+        )
+        self.assertEqual(usage.status_code, 200, usage.text)
+        self.assertEqual(usage.json()["used_bytes"], len(b"admin-storage"))
+        self.assertEqual(usage.json()["used_objects"], 1)
+        self.assertEqual(usage.json()["reserved_objects"], 0)
+        self.assertEqual(usage.json()["integrity_error_objects"], 0)
+
+        objects = self.client.get(
+            "/api/v1/admin/storage/objects?status_filter=active",
+            headers=self.owner_headers,
+        )
+        self.assertEqual(objects.status_code, 200, objects.text)
+        self.assertEqual(len(objects.json()), 1)
+        self.assertEqual(objects.json()[0]["filename"], "admin-storage.txt")
+        self.assertEqual(objects.json()[0]["checksum"], stored.checksum)
+        self.assertNotIn("storage_uri", objects.json()[0])
+        attention = self.client.get(
+            "/api/v1/admin/storage/objects?attention_only=true",
+            headers=self.owner_headers,
+        )
+        self.assertEqual(attention.status_code, 200, attention.text)
+        self.assertEqual(attention.json(), [])
+        invalid_filter = self.client.get(
+            "/api/v1/admin/storage/objects?status_filter=unknown",
+            headers=self.owner_headers,
+        )
+        self.assertEqual(invalid_filter.status_code, 422, invalid_filter.text)
+        conflicting_filters = self.client.get(
+            (
+                "/api/v1/admin/storage/objects"
+                "?status_filter=active&attention_only=true"
+            ),
+            headers=self.owner_headers,
+        )
+        self.assertEqual(
+            conflicting_filters.status_code,
+            422,
+            conflicting_filters.text,
+        )
+
+        reconcile = self.client.post(
+            "/api/v1/admin/storage/reconcile",
+            headers=self.owner_headers,
+            json={"delete_orphans": False},
+        )
+        self.assertEqual(reconcile.status_code, 202, reconcile.text)
+        self.assertEqual(reconcile.json()["job_type"], "storage.reconcile")
+        duplicate = self.client.post(
+            "/api/v1/admin/storage/reconcile",
+            headers=self.owner_headers,
+            json={"delete_orphans": False},
+        )
+        self.assertEqual(duplicate.status_code, 202, duplicate.text)
+        self.assertEqual(duplicate.json()["id"], reconcile.json()["id"])
+        conflicting_cleanup = self.client.post(
+            "/api/v1/admin/storage/reconcile",
+            headers=self.owner_headers,
+            json={"delete_orphans": True},
+        )
+        self.assertEqual(
+            conflicting_cleanup.status_code,
+            409,
+            conflicting_cleanup.text,
+        )
+        with db.SessionLocal() as session:
+            job = session.get(Job, reconcile.json()["id"])
+            self.assertIsNotNone(job)
+            self.assertEqual(job.payload_json["workspace_id"], self.primary_workspace_id)
+            self.assertIsNotNone(job.payload_json["scan_started_at"])
 
     def test_worker_health_reports_tenant_scoped_queue_and_global_capacity(self):
         now = datetime.now(timezone.utc)

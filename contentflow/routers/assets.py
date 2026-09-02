@@ -18,12 +18,12 @@ from ..dependencies import (
     Principal,
     require_role,
 )
-from ..entities import Asset, ContentItem
+from ..entities import Asset, ContentItem, new_id
 from ..filenames import safe_filename
 from ..job_queue import enqueue_job
 from ..knowledge_service import local_path_from_uri
 from ..media_providers import MediaGeneration, MediaProviderError, download_generated_media
-from ..object_storage import build_object_storage
+from ..object_storage import build_object_storage, is_managed_storage_uri
 from ..pagination import (
     DEFAULT_PAGE_LIMIT,
     PageCursor,
@@ -39,11 +39,51 @@ from ..schemas import (
     AssetSourceChangeRequest,
     JobResponse,
 )
+from ..storage_ledger import (
+    StorageLedgerUnverified,
+    StorageQuotaExceeded,
+    build_ledgered_object_storage,
+    request_storage_deletion,
+)
 
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 Db = Annotated[Session, Depends(get_db)]
 Editor = Annotated[Principal, Depends(require_role("editor"))]
+
+
+def storage_write_http_error(error: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=413 if isinstance(error, StorageQuotaExceeded) else 409,
+        detail=str(error),
+    )
+
+
+def request_asset_object_cleanup(
+    session: Session,
+    settings,
+    asset: Asset,
+) -> str | None:
+    if not is_managed_storage_uri(settings, asset.storage_uri):
+        return None
+    metadata = dict(asset.metadata_json or {})
+    checksum = metadata.get("checksum")
+    if not isinstance(checksum, str) or len(checksum) != 64:
+        checksum = None
+    _allocation, job = request_storage_deletion(
+        session,
+        settings=settings,
+        workspace_id=asset.workspace_id,
+        storage_uri=asset.storage_uri,
+        owner_type="asset",
+        owner_id=asset.id,
+        category="assets",
+        filename=f"{asset.id}.object",
+        size_bytes=asset.size_bytes,
+        checksum=checksum,
+        mime_type=asset.mime_type,
+    )
+    return job.id if job is not None else None
 
 
 def get_asset(
@@ -235,6 +275,7 @@ def change_asset_source(
         "selected": True,
         "manual_upload_required": payload.source == "manual",
     }
+    cleanup_job_id = request_asset_object_cleanup(session, settings, asset)
     asset.storage_uri = None
     asset.mime_type = None
     asset.size_bytes = None
@@ -279,6 +320,7 @@ def change_asset_source(
             "from": previous_source,
             "to": payload.source,
             "source_revision": source_revision,
+            "cleanup_job_id": cleanup_job_id,
         },
     )
     session.flush()
@@ -316,6 +358,7 @@ def select_asset_candidate(
     metadata = dict(asset.metadata_json or {})
     selected_storage = None
     selected_storage_uri = None
+    cleanup_job_id = None
 
     if asset.provider == "openverse" and asset.status == "awaiting_selection":
         if not payload.candidate_id:
@@ -366,14 +409,23 @@ def select_asset_candidate(
                 status_code=422,
                 detail="所选图片无法通过安全下载或图片规范校验",
             ) from error
-        storage = build_object_storage(settings)
-        stored = storage.put(
-            workspace_id=principal.workspace_id,
-            category="assets",
-            filename=f"openverse-cover.{normalized.extension}",
-            stream=io.BytesIO(normalized.data),
-            content_type=normalized.mime_type,
+        storage = build_ledgered_object_storage(
+            session,
+            settings,
+            owner_type="asset",
+            owner_id=asset.id,
         )
+        try:
+            stored = storage.put(
+                workspace_id=principal.workspace_id,
+                category="assets",
+                filename=f"openverse-cover.{normalized.extension}",
+                stream=io.BytesIO(normalized.data),
+                content_type=normalized.mime_type,
+            )
+        except (StorageQuotaExceeded, StorageLedgerUnverified) as error:
+            raise storage_write_http_error(error) from error
+        cleanup_job_id = request_asset_object_cleanup(session, settings, asset)
         selected_storage = storage
         selected_storage_uri = stored.uri
         asset.status = "ready"
@@ -439,6 +491,7 @@ def select_asset_candidate(
             "content_item_id": content.id,
             "candidate_group": candidate_group,
             "provider": asset.provider,
+            "cleanup_job_id": cleanup_job_id,
         },
     )
     try:
@@ -680,22 +733,37 @@ async def upload_asset(
     else:
         raise HTTPException(status_code=415, detail="仅支持图片、视频或分镜 JSON")
 
-    storage = build_object_storage(settings)
-    stored = storage.put(
-        workspace_id=principal.workspace_id,
-        category="assets",
-        filename=filename,
-        stream=io.BytesIO(data),
-        content_type=claimed_type,
+    storage_owner_id = asset.id if asset is not None else new_id()
+    storage = build_ledgered_object_storage(
+        session,
+        settings,
+        owner_type="asset",
+        owner_id=storage_owner_id,
     )
+    try:
+        stored = storage.put(
+            workspace_id=principal.workspace_id,
+            category="assets",
+            filename=filename,
+            stream=io.BytesIO(data),
+            content_type=claimed_type,
+        )
+    except (StorageQuotaExceeded, StorageLedgerUnverified) as error:
+        raise storage_write_http_error(error) from error
     if asset is None:
         asset = Asset(
+            id=storage_owner_id,
             workspace_id=principal.workspace_id,
             content_item_id=content.id,
             content_version=content.version,
             kind=target_kind,
         )
         session.add(asset)
+    cleanup_job_id = (
+        request_asset_object_cleanup(session, settings, asset)
+        if asset.storage_uri != stored.uri
+        else None
+    )
     asset.provider = "manual-upload"
     asset.status = "ready"
     asset.storage_uri = stored.uri
@@ -726,6 +794,7 @@ async def upload_asset(
                 "size_bytes": stored.size_bytes,
                 "mime_type": stored.mime_type,
                 "filled_existing_task": filled_existing_task,
+                "cleanup_job_id": cleanup_job_id,
             },
         )
     except Exception:

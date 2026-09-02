@@ -47,6 +47,7 @@ from ..security import (
     parse_refresh_token,
     verify_password,
 )
+from ..storage_ledger import create_workspace_storage_usage
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -323,6 +324,7 @@ def register(
     )
     session.add(workspace)
     session.flush()
+    create_workspace_storage_usage(session, workspace.id)
     membership = Membership(
         workspace_id=workspace.id,
         user_id=user.id,
@@ -740,6 +742,7 @@ def create_workspace(
     )
     session.add(workspace)
     session.flush()
+    create_workspace_storage_usage(session, workspace.id)
     membership = Membership(
         workspace_id=workspace.id,
         user_id=principal.user_id,

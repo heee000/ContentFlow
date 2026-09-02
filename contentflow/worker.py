@@ -49,10 +49,19 @@ from .media_providers import (
     download_generated_media,
     media_provider_profile_fingerprint,
 )
-from .object_storage import build_object_storage
+from .object_storage import build_object_storage, is_managed_storage_uri
 from .prompt_eval import execute_prompt_eval_run
 from .script_publishing import build_script_package, store_script_package
 from .settings import Settings, get_settings
+from .storage_ledger import (
+    StorageLedgerInvariantError,
+    StorageLedgerUnverified,
+    StorageQuotaExceeded,
+    build_ledgered_object_storage,
+    delete_storage_allocation,
+    reconcile_workspace_storage,
+    request_storage_deletion,
+)
 from .workflow_service import execute_workflow_run
 
 
@@ -365,6 +374,7 @@ def handle_asset_search(
 
 def _store_generation(
     *,
+    session: Session,
     asset: Asset,
     settings: Settings,
     generation,
@@ -386,13 +396,39 @@ def _store_generation(
     filename = generation.filename or (
         "asset.png" if asset.kind == "image" else "asset.mp4"
     )
-    stored = build_object_storage(settings).put(
+    stored = build_ledgered_object_storage(
+        session,
+        settings,
+        owner_type="asset",
+        owner_id=asset.id,
+    ).put(
         workspace_id=asset.workspace_id,
         category="assets",
         filename=filename,
         stream=BytesIO(data),
         content_type=generation.mime_type,
     )
+    if (
+        is_managed_storage_uri(settings, asset.storage_uri)
+        and asset.storage_uri != stored.uri
+    ):
+        previous_metadata = dict(asset.metadata_json or {})
+        previous_checksum = previous_metadata.get("checksum")
+        if not isinstance(previous_checksum, str) or len(previous_checksum) != 64:
+            previous_checksum = None
+        request_storage_deletion(
+            session,
+            settings=settings,
+            workspace_id=asset.workspace_id,
+            storage_uri=asset.storage_uri,
+            owner_type="asset",
+            owner_id=asset.id,
+            category="assets",
+            filename=f"{asset.id}.object",
+            size_bytes=asset.size_bytes,
+            checksum=previous_checksum,
+            mime_type=asset.mime_type,
+        )
     asset.status = "ready"
     asset.storage_uri = stored.uri
     asset.mime_type = stored.mime_type
@@ -491,7 +527,12 @@ def handle_asset_generate(
             max_attempts=60,
         )
     elif generation.status == "ready":
-        _store_generation(asset=asset, settings=settings, generation=generation)
+        _store_generation(
+            session=session,
+            asset=asset,
+            settings=settings,
+            generation=generation,
+        )
     else:
         raise RuntimeError(f"未知素材生成状态: {generation.status}")
     record_audit(
@@ -531,7 +572,12 @@ def handle_asset_poll(
     generation = provider.poll(asset.external_task_id)
     if generation.status == "processing":
         raise JobNotReady("素材仍在生成中")
-    _store_generation(asset=asset, settings=settings, generation=generation)
+    _store_generation(
+        session=session,
+        asset=asset,
+        settings=settings,
+        generation=generation,
+    )
     record_audit(
         session,
         action="asset.complete",
@@ -735,12 +781,17 @@ def handle_publish_dispatch(
     if delivery_mode == "manual_export" and channel.platform != "xiaohongshu":
         raise ValueError("人工导出目前只适用于小红书")
 
-    storage = build_object_storage(settings)
     if delivery_mode == "script":
         requested_by = (publish_job.request_json or {}).get("script_requested_by")
         if not isinstance(requested_by, str) or not requested_by:
             raise ValueError("脚本发布尝试缺少可审计的发起人")
         script_attempt_id = str(uuid.uuid4())
+        storage = build_ledgered_object_storage(
+            session,
+            settings,
+            owner_type="publish_job",
+            owner_id=f"{publish_job.id}:{script_attempt_id}",
+        )
         expires_at = datetime.now(timezone.utc) + timedelta(
             minutes=settings.script_confirmation_ttl_minutes
         )
@@ -820,6 +871,12 @@ def handle_publish_dispatch(
             "external_url": publish_job.external_url,
         }
 
+    storage = build_ledgered_object_storage(
+        session,
+        settings,
+        owner_type="publish_job",
+        owner_id=publish_job.id,
+    )
     connector = build_connector(channel=channel, settings=settings, storage=storage)
 
     request_json = dict(publish_job.request_json or {})
@@ -854,6 +911,8 @@ def handle_publish_dispatch(
             content=content,
             assets=assets,
         )
+    except (StorageQuotaExceeded, StorageLedgerUnverified):
+        raise
     except ConnectorPublishError as error:
         if not error.retry_safe:
             raise
@@ -1228,6 +1287,8 @@ HANDLERS: dict[str, Handler] = {
     "asset.poll": handle_asset_poll,
     "publish.dispatch": handle_publish_dispatch,
     "publish.reconcile": handle_publish_reconcile,
+    "storage.delete": delete_storage_allocation,
+    "storage.reconcile": reconcile_workspace_storage,
     "metrics.pull": handle_metrics_pull,
 }
 
@@ -1511,6 +1572,9 @@ class Worker:
                                 (
                                     PublishReconciliationRequired,
                                     PublishRetrySafeFailure,
+                                    StorageLedgerInvariantError,
+                                    StorageLedgerUnverified,
+                                    StorageQuotaExceeded,
                                 ),
                             )
                             or (

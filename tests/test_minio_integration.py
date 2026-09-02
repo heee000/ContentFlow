@@ -194,3 +194,42 @@ def test_minio_detects_corruption_and_reads_legacy_checksum_keys(
         minio_harness.storage.read(f"s3://{minio_harness.bucket}/{legacy_key}")
         == legacy_payload
     )
+
+
+def test_minio_workspace_listing_paginates_allocation_keys(
+    minio_harness: MinioHarness,
+):
+    workspace_id = f"workspace-list-{uuid.uuid4().hex}"
+    allocation_ids = [str(uuid.uuid4()) for _ in range(3)]
+    stored = [
+        minio_harness.storage.put(
+            workspace_id=workspace_id,
+            category="assets",
+            filename=f"asset-{index}.bin",
+            stream=BytesIO(str(index).encode("ascii")),
+            allocation_id=allocation_id,
+        )
+        for index, allocation_id in enumerate(allocation_ids)
+    ]
+
+    first = minio_harness.storage.list_workspace_objects(workspace_id, limit=2)
+    assert len(first.items) == 2
+    assert first.next_cursor is not None
+    second = minio_harness.storage.list_workspace_objects(
+        workspace_id,
+        limit=2,
+        cursor=first.next_cursor,
+    )
+    assert len(second.items) == 1
+    assert second.next_cursor is None
+    assert {item.uri for item in [*first.items, *second.items]} == {
+        item.uri for item in stored
+    }
+    for allocation_id, item in zip(allocation_ids, stored, strict=True):
+        assert allocation_id in item.uri
+    with pytest.raises(ValueError, match="不属于当前工作区"):
+        minio_harness.storage.list_workspace_objects(
+            workspace_id,
+            limit=2,
+            cursor="another-workspace/assets/object.bin",
+        )

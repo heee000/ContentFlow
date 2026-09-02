@@ -13,8 +13,8 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "9a7b2c3d4e5f"
-MINIMUM_PUBLIC_TABLE_COUNT = 28
+HEAD_REVISION = "b0c1d2e3f4a5"
+MINIMUM_PUBLIC_TABLE_COUNT = 30
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
 LAYOUT_REVISION = "8b6c1f3a9d21"
@@ -36,6 +36,9 @@ STYLE_SKILL_TABLE = "style_skills"
 STYLE_SKILL_REVISION = "1a2b3c4d5e6f"
 AUDIT_CHAIN_HEAD_TABLE = "audit_chain_heads"
 AUDIT_CHAIN_REVISION = "6d4e8f9a0b1c"
+WORKSPACE_STORAGE_USAGE_TABLE = "workspace_storage_usage"
+STORAGE_OBJECT_ALLOCATION_TABLE = "storage_object_allocations"
+STORAGE_LEDGER_REVISION = "b0c1d2e3f4a5"
 AUDIT_CHAIN_COLUMNS = {
     "chain_scope",
     "chain_sequence",
@@ -99,6 +102,8 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         PUBLISH_CONFIRMATION_TABLE,
         STYLE_SKILL_TABLE,
         AUDIT_CHAIN_HEAD_TABLE,
+        WORKSPACE_STORAGE_USAGE_TABLE,
+        STORAGE_OBJECT_ALLOCATION_TABLE,
     }
     expected_tables = set(db.Base.metadata.tables)
     missing_tables = (expected_tables - incrementally_added) - tables
@@ -138,6 +143,8 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
     prompt_eval_run_exists = PROMPT_EVAL_RUN_TABLE in tables
     style_skill_exists = STYLE_SKILL_TABLE in tables
     audit_chain_head_exists = AUDIT_CHAIN_HEAD_TABLE in tables
+    workspace_storage_usage_exists = WORKSPACE_STORAGE_USAGE_TABLE in tables
+    storage_object_allocation_exists = STORAGE_OBJECT_ALLOCATION_TABLE in tables
     audit_log_columns = {
         column["name"] for column in inspector.get_columns("audit_logs")
     }
@@ -219,7 +226,20 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             "continuing."
         )
 
-    if audit_chain_head_exists:
+    if workspace_storage_usage_exists != storage_object_allocation_exists:
+        raise RuntimeError(
+            "The storage ledger tables are incomplete. Back up the database "
+            "and repair the schema before continuing."
+        )
+    if workspace_storage_usage_exists and not audit_chain_head_exists:
+        raise RuntimeError(
+            "The storage ledger tables exist without the audit-chain migration. "
+            "Back up the database and repair the schema before continuing."
+        )
+
+    if workspace_storage_usage_exists:
+        revision = STORAGE_LEDGER_REVISION
+    elif audit_chain_head_exists:
         revision = AUDIT_CHAIN_REVISION
     elif style_skill_exists:
         revision = STYLE_SKILL_REVISION

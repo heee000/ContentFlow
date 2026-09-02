@@ -8,6 +8,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -34,15 +35,23 @@ from contentflow.entities import (
     Job,
     PublishJob,
     PublishEvidence,
+    StorageObjectAllocation,
     User,
     WorkflowRun,
     Workspace,
+    WorkspaceStorageUsage,
 )
 from contentflow.migrate import HEAD_REVISION, PROJECT_ROOT
+from contentflow.object_storage import LocalObjectStorage
 from contentflow.observability import ObservabilityMetrics
 from contentflow.routers.publish_evidence import upload_publish_evidence
 from contentflow.security import hash_rate_limit_key
 from contentflow.settings import Settings
+from contentflow.storage_ledger import (
+    LedgeredObjectStorage,
+    StorageQuotaExceeded,
+    create_workspace_storage_usage,
+)
 from contentflow.worker import (
     handle_publish_reconcile,
     schedule_pending_publish_reconciliations,
@@ -63,6 +72,7 @@ class PostgresHarness:
     engine: Engine
     sessions: sessionmaker[Session]
     settings: Settings
+    storage_dir: Path
 
 
 @pytest.fixture(scope="module")
@@ -119,6 +129,7 @@ def postgres_harness(tmp_path_factory: pytest.TempPathFactory):
                 future=True,
             ),
             settings=settings,
+            storage_dir=storage_dir,
         )
     finally:
         if test_engine is not None:
@@ -258,7 +269,88 @@ def test_postgres_migrations_reach_head(postgres_harness: PostgresHarness):
         "auth_sessions",
         "auth_refresh_token_history",
         "auth_rate_limits",
+        "workspace_storage_usage",
+        "storage_object_allocations",
     } <= tables
+
+
+def test_postgres_serializes_concurrent_storage_quota_reservations(
+    postgres_harness: PostgresHarness,
+):
+    suffix = uuid.uuid4().hex
+    with postgres_harness.sessions() as session:
+        user = User(
+            email=f"storage-quota-{suffix}@example.com",
+            password_hash="not-used-by-this-test",
+            display_name="Storage Quota Owner",
+        )
+        session.add(user)
+        session.flush()
+        workspace = Workspace(
+            name=f"Storage Quota {suffix}",
+            slug=f"storage-quota-{suffix}",
+            created_by=user.id,
+        )
+        session.add(workspace)
+        session.flush()
+        create_workspace_storage_usage(session, workspace.id)
+        session.commit()
+        workspace_id = workspace.id
+
+    settings = postgres_harness.settings.model_copy(
+        update={
+            "max_upload_bytes": 8,
+            "workspace_storage_max_bytes": 8,
+            "workspace_storage_max_objects": 1,
+        }
+    )
+    storage = LocalObjectStorage(
+        postgres_harness.storage_dir,
+        max_upload_bytes=8,
+    )
+    barrier = Barrier(2)
+
+    def upload(index: int) -> tuple[str, str | None]:
+        with postgres_harness.sessions() as session:
+            barrier.wait(timeout=10)
+            ledger = LedgeredObjectStorage(
+                session=session,
+                settings=settings,
+                owner_type="postgres_quota_test",
+                owner_id=f"concurrent-{index}",
+                storage=storage,
+            )
+            try:
+                stored = ledger.put(
+                    workspace_id=workspace_id,
+                    category="quota-tests",
+                    filename=f"payload-{index}.bin",
+                    stream=io.BytesIO(b"12345678"),
+                )
+                session.commit()
+                return "stored", stored.uri
+            except StorageQuotaExceeded:
+                session.rollback()
+                return "quota", None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(upload, range(2)))
+
+    assert sorted(status for status, _uri in results) == ["quota", "stored"]
+    with postgres_harness.sessions() as session:
+        usage = session.get(WorkspaceStorageUsage, workspace_id)
+        allocations = list(
+            session.scalars(
+                select(StorageObjectAllocation).where(
+                    StorageObjectAllocation.workspace_id == workspace_id
+                )
+            )
+        )
+        assert usage is not None
+        assert (usage.used_bytes, usage.used_objects) == (8, 1)
+        assert (usage.reserved_bytes, usage.reserved_objects) == (0, 0)
+        assert len(allocations) == 1
+        assert allocations[0].status == "active"
 
 
 def test_postgres_serializes_concurrent_audit_chain_appends(

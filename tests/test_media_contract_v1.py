@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 import httpx
 import yaml
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from contentflow.db import Base, build_engine
 from contentflow.entities import Asset, Job
@@ -871,6 +871,7 @@ class MediaContractAdapterTest(unittest.TestCase):
         private_url = "https://assets.example/image.png?signature=private-token"
         with self.assertRaises(MediaProviderError) as captured:
             _store_generation(
+                session=Session(),
                 asset=Asset(
                     id="asset-download-policy",
                     workspace_id="workspace-1",

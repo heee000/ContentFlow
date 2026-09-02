@@ -66,6 +66,20 @@ class Settings(BaseSettings):
     storage_backend: str = "local"
     local_storage_dir: Path = Path(".contentflow/storage")
     max_upload_bytes: int = Field(default=100 * 1024 * 1024, gt=0, le=1024**3)
+    workspace_storage_max_bytes: int = Field(
+        default=5 * 1024**3,
+        gt=0,
+        le=10 * 1024**4,
+    )
+    workspace_storage_max_objects: int = Field(default=10_000, ge=1, le=1_000_000)
+    storage_reservation_ttl_minutes: int = Field(default=60, ge=5, le=24 * 60)
+    storage_cleanup_batch_size: int = Field(default=100, ge=1, le=500)
+    storage_delete_max_attempts: int = Field(default=20, ge=1, le=100)
+    storage_orphan_grace_seconds: int = Field(
+        default=24 * 60 * 60,
+        ge=60 * 60,
+        le=30 * 24 * 60 * 60,
+    )
     publish_evidence_max_bytes: int = Field(
         default=10 * 1024 * 1024,
         gt=0,
@@ -164,6 +178,10 @@ class Settings(BaseSettings):
         if self.publish_evidence_max_bytes > self.max_upload_bytes:
             raise ValueError(
                 "publish_evidence_max_bytes must not exceed max_upload_bytes"
+            )
+        if self.workspace_storage_max_bytes < self.max_upload_bytes:
+            raise ValueError(
+                "workspace_storage_max_bytes must not be less than max_upload_bytes"
             )
         if self.publish_evidence_max_total_bytes < self.publish_evidence_max_bytes:
             raise ValueError(
