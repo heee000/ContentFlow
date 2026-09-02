@@ -152,16 +152,16 @@ python -m alembic history
 .\scripts\verify_backup.ps1 -BackupPath <path> -ExpectedAlembicRevision <revision> -MinimumPublicTableCount <count>
 ```
 
-正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `1a2b3c4d5e6f`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
+正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `6d4e8f9a0b1c`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
 
-`verify_backup.ps1` 默认校验 dump 哈希、至少 27 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
+`verify_backup.ps1` 默认校验 dump 哈希、至少 28 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
 
 真正灾难恢复时仍必须恢复到新的 PostgreSQL 数据库和空 bucket，完成应用验收后再切换流量。不要未经演练直接对当前 `contentflow` 库执行 `pg_restore --clean`。
 
-- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `1a2b3c4d5e6f` 在 `e28a6b9c4f10` 后新增风格 Skill 表及内容 Agent 元数据列；持久 PostgreSQL 迁移与 27 表联合恢复需由当前 CI/恢复演练重新签收；旧证据不等于 PITR 或异地灾备。
+- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `6d4e8f9a0b1c` 新增审计链头表及审计哈希字段；持久 PostgreSQL 迁移与 28 表联合恢复需由当前 CI/恢复演练重新签收；旧证据不等于 PITR 或异地灾备。
 - MinIO/S3 生产 bucket 应启用版本控制、生命周期、服务端加密和不可变保留策略。
 - `CONTENTFLOW_SECRET_KEY`、当前/历史凭据加密密钥必须单独备份到集中密钥管理系统；丢失后访问令牌和已加密平台凭据无法恢复。
-- 审计日志按合规周期归档，不要和普通应用日志一起随意清理。
+- 审计日志按合规周期归档，不要和普通应用日志一起随意清理。管理员应定期调用 `GET /api/v1/admin/audit-integrity`；返回 `valid=false` 时暂停高风险发布/治理操作，保留数据库和对象存储快照，并依据 `reason` 与 `first_invalid_sequence` 调查。链头哈希可作为外部归档锚点，但当前数据库内哈希链只提供篡改检测，不等于 WORM、可信时间戳或管理员不可伪造。
 
 脚本发布证据默认单文件上限 10 MiB、图片解码像素上限 4000 万，且证据上限不能超过通用上传上限；通过 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_BYTES` 和 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_PIXELS` 调整。任务包确认窗口默认 1440 分钟，可用 `CONTENTFLOW_SCRIPT_CONFIRMATION_TTL_MINUTES` 在 15 至 43200 分钟之间调整；修改只影响之后生成的新尝试。
 

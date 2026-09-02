@@ -104,7 +104,7 @@ flowchart TB
 - Cookie 写操作校验可信 Origin；CLI 继续支持短期 Bearer Token
 - 登录账号/IP、注册 IP、刷新会话/IP 使用 PostgreSQL 共享限流；标识先做带作用域 HMAC，并以 advisory lock 串行化同键并发
 - 平台凭据使用由应用密钥派生的 Fernet key 加密
-- API 响应不返回凭据密文，审计元数据递归脱敏 token、secret、password 等字段
+- API 响应不返回凭据密文，审计元数据递归脱敏 token、secret、password 等字段；每个工作区的审计记录按序号、前序哈希和链头形成 SHA-256 哈希链，PostgreSQL 事务级 advisory lock 串行化并发追加，管理员可在线核验缺口、内容篡改和链头不一致
 - 生产环境禁止默认应用密钥
 - 平台发布必须经过 reviewer 角色和人工审核状态
 

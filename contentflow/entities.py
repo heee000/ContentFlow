@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    BigInteger,
     String,
     Text,
     UniqueConstraint,
@@ -778,8 +779,39 @@ class MetricSnapshot(Base):
     raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class AuditChainHead(Base):
+    __tablename__ = "audit_chain_heads"
+    __table_args__ = (
+        CheckConstraint("sequence >= 0", name="sequence_non_negative"),
+        CheckConstraint("length(head_hash) = 64", name="head_hash_length"),
+    )
+
+    chain_scope: Mapped[str] = mapped_column(String(80), primary_key=True)
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="SET NULL"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    head_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        UniqueConstraint(
+            "chain_scope",
+            "chain_sequence",
+            name="uq_audit_log_chain_sequence",
+        ),
+        CheckConstraint("chain_sequence > 0", name="chain_sequence_positive"),
+        CheckConstraint("integrity_version = 1", name="integrity_version"),
+        CheckConstraint(
+            "length(previous_hash) = 64 AND length(entry_hash) = 64",
+            name="hash_lengths",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str | None] = mapped_column(
@@ -793,6 +825,11 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(80), index=True)
     request_id: Mapped[str | None] = mapped_column(String(64), index=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    chain_scope: Mapped[str] = mapped_column(String(80), index=True)
+    chain_sequence: Mapped[int] = mapped_column(BigInteger)
+    previous_hash: Mapped[str] = mapped_column(String(64))
+    entry_hash: Mapped[str] = mapped_column(String(64), index=True)
+    integrity_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
     )

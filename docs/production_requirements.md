@@ -23,7 +23,7 @@
 - [x] 数据库任务队列、Worker、租约、重试、幂等键和失败记录。
 - [x] 外部平台凭据加密保存，日志中不得出现 API Key、access token 或 refresh token。
 - [x] REST API、OpenAPI 文档、输入校验、统一错误返回和请求追踪 ID。
-- [x] 审计日志覆盖注册/登录、内容修改、审批、生成、发布和连接器配置。
+- [x] 审计日志覆盖注册/登录、内容修改、审批、生成、发布和连接器配置；按工作区串行形成带独立链头的 SHA-256 哈希链，管理员接口和工作台可检测记录改写、序号缺口及链头不一致。
 - [x] 健康检查、就绪检查、结构化日志和工作台运行摘要。
 - [x] 受保护的 Prometheus 指标：默认关闭、生产强制开启并使用独立长 Token；HTTP/数据库指标使用固定低基数标签，不暴露租户或对象 ID。
 - [x] 可选 observability profile：固定摘要 Prometheus/Grafana、Compose secrets/preflight、版本化抓取与 recording/alert rules、promtool 故障行为测试、只读 provisioned Dashboard；Prometheus 不映射宿主端口。

@@ -89,7 +89,20 @@ class AuditLogResponse(BaseModel):
     actor_display_name: str | None
     request_id: str | None
     metadata_json: dict[str, Any]
+    chain_sequence: int
+    entry_hash: str
+    integrity_version: int
     created_at: datetime
+
+
+class AuditIntegrityResponse(BaseModel):
+    valid: bool
+    checked_entries: int
+    head_sequence: int
+    head_hash: str | None
+    first_invalid_sequence: int | None
+    reason: str | None
+    verified_at: datetime
 
 
 PromptReleaseStatus = Literal["draft", "approved", "active", "retired", "rejected"]

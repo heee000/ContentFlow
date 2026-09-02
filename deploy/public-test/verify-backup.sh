@@ -55,7 +55,7 @@ compose run --rm --no-deps \
       "SELECT count(*) FROM information_schema.tables WHERE table_schema='\''public'\'';")
     revision=$(psql --dbname "$VERIFY_DATABASE" -tA -c \
       "SELECT version_num FROM alembic_version;")
-    test "$tables" -ge 27
-    test -n "$revision"
+    test "$tables" -ge 28
+    test "$revision" = "6d4e8f9a0b1c"
     printf "Isolated restore passed: tables=%s alembic=%s\n" "$tables" "$revision"
   '

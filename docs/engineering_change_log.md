@@ -582,3 +582,29 @@
 - 供应链与部署：新增手工 image workflow，要求同 SHA 既有成功 CI，构建/推送 GHCR amd64 镜像，记录 OCI provenance/SBOM、Trivy 可修复 Critical 门禁和 digest Artifact。部署 workflow 只能从指定成功 build run 下载坐标，通过受保护 Environment 和预置 SSH known_hosts 部署；远端先验配置/磁盘/BGE/备份、再迁移、readiness 与 Worker heartbeat，失败不更新 current symlink，也不宣称数据库迁移可自动回滚。
 - 本地验证：Ruff 全仓通过；隔离真实 `.env` 后后端 `245 passed, 7 skipped, 145 subtests passed`，分支覆盖率 80.96%；11 个 YAML、最终公网 Compose 和 4 个 POSIX shell 脚本语法通过。前端首次用不满足 engines 的 Node 22.11.0 时 vinext 暴露 npm 可选原生绑定缺失，未删除锁文件或强制修复；改用满足要求的随附 Node 24.19.0 从同一 `package-lock.json` 执行 `npm ci` 后，ESLint、2 项渲染测试、HTTPS Next 生产构建和 moderate audit 全部通过，0 vulnerability。
 - 剩余边界：BuildKit attestation 尚不是独立签名与部署时验签；R2、restic、Caddy TLS、GHCR 和 SSH workflow 未在目标主机执行；Prometheus/Grafana 暂未纳入公网栈；单机 PostgreSQL/BGE 的峰值/OOM/磁盘仍需真实耐久证据。
+
+## 2026-09-02 审计完整性与持续复审阶段
+
+### CF-20260902-01：审计记录只能查询，数据库误改后产品无法发现
+
+- 状态：实现与本地专项/全量验证完成；真实 PostgreSQL 并发追加已进入集成测试，等待本阶段 GitHub CI 签收。
+- 问题与影响：`audit_logs` 过去只有脱敏与 API 只读，没有记录间完整性关系。数据库误改、漏行、错误恢复或越权写入后，管理工作台仍会把被改变的记录当成正常证据，审批、发布、凭据和 Prompt 治理的追责链不足。
+- 根因：审计模型没有稳定序号、前序摘要、记录摘要和独立链头；并发 API/Worker 也没有同一工作区审计追加的数据库串行化协议。
+- 解决方案：Alembic head 升级为 `6d4e8f9a0b1c`，新增 `audit_chain_heads`，并为 `audit_logs` 增加 scope、sequence、previous hash、entry hash 与 integrity version。迁移按 `created_at + id` 确定性回填旧记录；新写入对脱敏后规范载荷计算 SHA-256，PostgreSQL 使用基于 scope 的事务 advisory lock 与链头行锁串行追加。唯一约束、正序约束、哈希长度和版本约束在数据库层失败关闭。
+- 产品入口：新增管理员 `GET /api/v1/admin/audit-integrity`，逐条重算并区分序号缺口、前序不匹配、载荷/记录哈希异常和链头不一致。管理页进入时核验一次，显示链头与异常序号，并允许人工重新核验；没有把全量核验加入 2.5/15 秒全局轮询。
+- 涉及文件：`contentflow/audit.py`、`entities.py`、`routers/admin.py`、`schemas.py`、迁移 `6d4e8f9a0b1c`、管理工作台、迁移/接口/PostgreSQL 测试、架构/运维/生产清单与备份门槛。
+- 本地验证：全仓 Ruff、迁移单 head、锁文件与公网部署 fail-closed 校验通过；审计/迁移/安全专项 `53 passed, 32 subtests passed`，新增接管/半迁移测试后相关专项 `17 passed`，部署恢复契约 `2 passed`；最终全量后端 `254 passed, 8 skipped, 145 subtests passed`。8 个跳过项只因本机 Docker/PostgreSQL/MinIO 未运行，不能冒充 PostgreSQL 并发签收。前端 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js/TypeScript 生产构建通过。
+- 剩余边界：数据库管理员仍可同时重算记录和链头；删除整条尾部后若同步改链头也无法由同库自证。当前能力是 tamper-evident，不是 WORM、可信时间戳、外部公证或管理员不可伪造。后续需周期性把链头签名/锚定到独立不可变存储或 SIEM，并建立告警和取证 Runbook。
+
+### CF-20260902-02：客户端 Request ID 无边界会污染日志或触发数据库长度错误
+
+- 状态：已实现并进入同一阶段验证。
+- 问题与影响：API 过去直接接受任意 `X-Request-ID`，随后写入结构化日志和最长 64 字符的审计列；超长或非安全字符在 PostgreSQL 中可能使业务事务因审计写入失败，也会增加日志注入与高基数风险。
+- 解决方案：只接受 1-64 位、以字母数字开头且后续仅含字母数字、点、下划线、冒号和连字符的 ID；其余值在进入 request state、日志和审计前替换为服务端 32 位 UUID，并把最终值回传响应头。
+- 验证：回归覆盖合法 ID 原样保留和 65 字符输入被替换；全量测试与前端门禁继续通过。
+
+### CF-20260902-03：灾备脚本未与新迁移和审计链表同步
+
+- 状态：仓库门槛已同步；当前 head 的真实联合恢复仍待独立演练。
+- 解决方案：本地备份/恢复默认 revision 更新为 `6d4e8f9a0b1c`，最低 public 表数更新为 28；公网隔离恢复不再只检查 revision 非空，而是要求精确等于当前 head。部署静态验证器从 `contentflow.migrate` 读取当前常量并校验恢复脚本文本，新增迁移时若忘记同步将让 CI 失败。PowerShell 语法、2 项恢复契约、部署静态验证器和差异检查通过。
+- 剩余边界：脚本门槛正确不等于当前 28 表 PostgreSQL+对象联合恢复已经发生；PITR、异地不可变副本和 RPO/RTO 演练继续保持未签收。

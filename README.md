@@ -25,7 +25,7 @@ flowchart LR
 
 - 多租户账户、工作区创建/切换、成员管理与 RBAC：`viewer / editor / reviewer / admin`
 - PBKDF2 密码哈希、HMAC 签名访问令牌、Fernet 平台凭据加密
-- 活动 Brief、运行批次、内容版本、平台结构化排版/分镜、素材、渠道、发布、指标和审计持久化
+- 活动 Brief、运行批次、内容版本、平台结构化排版/分镜、素材、渠道、发布、指标和审计持久化；审计记录按工作区形成可核验 SHA-256 哈希链
 - Markdown/TXT/CSV/JSON 知识导入、切块、引用追踪
 - 离线 Hash Embedding；生产可显式选择 OpenAI-compatible Embedding 或固定版本的本地 BGE-M3（1024 维归一化 Dense 向量）
 - PostgreSQL + pgvector 1024 维向量列和 HNSW 余弦索引
@@ -42,7 +42,7 @@ flowchart LR
 - 抖音视频上传/创建/数据回收适配器
 - 公众号封面素材、草稿创建、可选发布提交和基于 `publish_id` 的最终状态对账适配器
 - 官方 API、本机脚本辅助和小红书人工导出三种显式发布方式；不确定 API 结果必须先对账，禁止静默脚本降级
-- 10 个业务区的响应式运营工作台，包含全量内容/版本回看、人工指标录入、团队权限、Prompt/Eval 治理与审计查询
+- 10 个业务区的响应式运营工作台，包含全量内容/版本回看、人工指标录入、团队权限、Prompt/Eval 治理、审计查询与完整性告警
 - Alembic、Docker Compose、健康检查、结构化日志、受保护 Prometheus 指标、版本化告警规则与 Grafana 运维看板
 
 ## 目录

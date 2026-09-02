@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..audit import record_audit
+from ..audit import record_audit, verify_audit_chain
 from ..db import get_db
 from ..dependencies import AppSettings, Principal, require_role
 from ..entities import (
@@ -41,6 +41,7 @@ from ..prompt_governance import (
 from ..prompts import BUILTIN_PROMPT_SET, calculate_prompt_hashes
 from ..schemas import (
     AuditLogResponse,
+    AuditIntegrityResponse,
     MemberCreate,
     MemberResponse,
     MemberUpdate,
@@ -937,7 +938,7 @@ def list_audit_logs(
     if entity_type:
         query = query.where(AuditLog.entity_type == entity_type)
     rows = session.execute(
-        query.order_by(AuditLog.created_at.desc()).limit(limit)
+        query.order_by(AuditLog.chain_sequence.desc()).limit(limit)
     ).all()
     return [
         AuditLogResponse(
@@ -949,10 +950,30 @@ def list_audit_logs(
             actor_display_name=display_name,
             request_id=audit.request_id,
             metadata_json=audit.metadata_json,
+            chain_sequence=audit.chain_sequence,
+            entry_hash=audit.entry_hash,
+            integrity_version=audit.integrity_version,
             created_at=audit.created_at,
         )
         for audit, display_name in rows
     ]
+
+
+@router.get("/audit-integrity", response_model=AuditIntegrityResponse)
+def audit_integrity(principal: Admin, session: Db):
+    result = verify_audit_chain(
+        session,
+        workspace_id=principal.workspace_id,
+    )
+    return AuditIntegrityResponse(
+        valid=result.valid,
+        checked_entries=result.checked_entries,
+        head_sequence=result.head_sequence,
+        head_hash=result.head_hash,
+        first_invalid_sequence=result.first_invalid_sequence,
+        reason=result.reason,
+        verified_at=datetime.now(timezone.utc),
+    )
 
 
 def heartbeat_age_seconds(value: datetime, now: datetime) -> float:

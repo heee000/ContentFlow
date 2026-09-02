@@ -293,7 +293,20 @@ type AuditLog = {
   actor_display_name: string | null;
   request_id: string | null;
   metadata_json: Record<string, unknown>;
+  chain_sequence: number;
+  entry_hash: string;
+  integrity_version: number;
   created_at: string;
+};
+
+type AuditIntegrity = {
+  valid: boolean;
+  checked_entries: number;
+  head_sequence: number;
+  head_hash: string | null;
+  first_invalid_sequence: number | null;
+  reason: string | null;
+  verified_at: string;
 };
 
 
@@ -4108,12 +4121,42 @@ function AdministrationView({
 }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [auditIntegrity, setAuditIntegrity] = useState<AuditIntegrity | null>(null);
+  const [auditChecking, setAuditChecking] = useState(true);
   const [promptDraftSource, setPromptDraftSource] = useState<
     "active" | "builtin"
   >("active");
   const promptDraftBase = promptDraftSource === "builtin"
     ? promptGovernance?.builtin
     : promptGovernance?.active;
+
+  const checkAuditIntegrity = useCallback(async () => {
+    setAuditChecking(true);
+    try {
+      setAuditIntegrity(await api<AuditIntegrity>("/admin/audit-integrity"));
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setAuditChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    api<AuditIntegrity>("/admin/audit-integrity")
+      .then((result) => {
+        if (active) setAuditIntegrity(result);
+      })
+      .catch((caught) => {
+        if (active) setError(messageOf(caught));
+      })
+      .finally(() => {
+        if (active) setAuditChecking(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function createWorkspace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -4800,10 +4843,39 @@ function AdministrationView({
             <p className="eyebrow">Audit trail</p>
             <h2>最近 {auditLogs.length} 条审计记录</h2>
           </div>
+          <div className="table-actions">
+            {auditIntegrity ? (
+              <StatusBadge value={auditIntegrity.valid ? "passed" : "blocked"} />
+            ) : null}
+            <Button
+              type="button"
+              kind="ghost"
+              busy={auditChecking}
+              onClick={() => void checkAuditIntegrity()}
+            >
+              重新核验
+            </Button>
+          </div>
         </div>
+        {auditIntegrity?.valid ? (
+          <p className="form-note" role="status">
+            已验证 {auditIntegrity.checked_entries} 条连续记录，链头序号 {auditIntegrity.head_sequence}
+            {auditIntegrity.head_hash ? ` · SHA-256 ${auditIntegrity.head_hash.slice(0, 16)}…` : ""}。
+          </p>
+        ) : auditIntegrity ? (
+          <p className="permission-note" role="alert">
+            审计链完整性异常：{auditIntegrity.reason || "unknown"}
+            {auditIntegrity.first_invalid_sequence
+              ? `，首个异常序号 ${auditIntegrity.first_invalid_sequence}`
+              : ""}。请暂停高风险操作并保留数据库与对象存储快照。
+          </p>
+        ) : null}
         <DataTable
-          headers={["时间", "操作者", "动作", "对象", "详情"]}
+          headers={["序号 / 哈希", "时间", "操作者", "动作", "对象", "详情"]}
           rows={auditLogs.map((log) => [
+            <code key="integrity">
+              #{log.chain_sequence} · {log.entry_hash.slice(0, 12)}…
+            </code>,
             formatDateTime(log.created_at),
             log.actor_display_name || "系统任务",
             log.action,

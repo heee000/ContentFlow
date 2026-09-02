@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from contentflow.auth_rate_limit import RateLimitKey, consume_rate_limits
+from contentflow.audit import record_audit, verify_audit_chain
 from contentflow.connectors import ConnectorResult
 from contentflow.entities import (
     Asset,
@@ -242,6 +243,7 @@ def test_postgres_migrations_reach_head(postgres_harness: PostgresHarness):
     assert revision == HEAD_REVISION
     assert vector_enabled is True
     assert {
+        "audit_chain_heads",
         "jobs",
         "publish_jobs",
         "worker_nodes",
@@ -250,6 +252,65 @@ def test_postgres_migrations_reach_head(postgres_harness: PostgresHarness):
         "auth_refresh_token_history",
         "auth_rate_limits",
     } <= tables
+
+
+def test_postgres_serializes_concurrent_audit_chain_appends(
+    postgres_harness: PostgresHarness,
+):
+    suffix = uuid.uuid4().hex
+    with postgres_harness.sessions() as session:
+        user = User(
+            email=f"audit-chain-{suffix}@example.com",
+            password_hash="not-used-by-this-test",
+            display_name="Audit Chain Owner",
+        )
+        session.add(user)
+        session.flush()
+        workspace = Workspace(
+            name=f"Audit Chain {suffix}",
+            slug=f"audit-chain-{suffix}",
+            created_by=user.id,
+        )
+        session.add(workspace)
+        session.commit()
+        workspace_id = workspace.id
+        user_id = user.id
+
+    barrier = Barrier(2)
+
+    def append_event(index: int) -> None:
+        with postgres_harness.sessions() as session:
+            barrier.wait(timeout=10)
+            record_audit(
+                session,
+                action=f"postgres.audit.{index}",
+                entity_type="postgres_test",
+                entity_id=str(index),
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+                metadata={"index": index},
+            )
+            session.commit()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(append_event, index) for index in range(2)]
+        for future in futures:
+            future.result(timeout=15)
+
+    with postgres_harness.sessions() as session:
+        result = verify_audit_chain(session, workspace_id=workspace_id)
+        entries = list(
+            session.scalars(
+                select(AuditLog)
+                .where(AuditLog.workspace_id == workspace_id)
+                .order_by(AuditLog.chain_sequence.asc())
+            )
+        )
+        session.commit()
+    assert result.valid is True
+    assert result.checked_entries == 2
+    assert [entry.chain_sequence for entry in entries] == [1, 2]
+    assert entries[1].previous_hash == entries[0].entry_hash
 
 
 def test_postgres_skip_locked_idempotency_and_terminal_convergence(

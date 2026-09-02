@@ -1,6 +1,6 @@
 # ContentFlow 项目交接文档
 
-> 更新日期：2026-08-13
+> 更新日期：2026-09-02
 > 适用仓库：ContentFlow 仓库根目录
 > GitHub：<https://github.com/heee000/ContentFlow>
 > 当前工作分支：`codex/enterprise-media-runtime`
@@ -1748,3 +1748,28 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 用户下一步只需提供外部资源或受限部署入口，不需要重新设计拓扑。优先按 `deploy/public-test/README.md` 的资源清单创建主机、域名和双 R2 Bucket。
 - 不把本机 `.env`、账号文档、数据库、MinIO 或 BGE cache 直接上传。目标环境从 `env.example` 新建密钥，平台凭据在 Web 重新录入。
 - 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；所有提交只显式暂存本轮文件。
+
+## 21.38 审计哈希链、在线核验与第二十六轮复审增量交接
+
+### 已实现
+
+1. Alembic head 更新为 `6d4e8f9a0b1c`，新增 `audit_chain_heads`，public 表门槛更新为 28；既有审计按 `created_at + id` 确定性回填。未版本化 `1a2b3c4d5e6f` 结构可安全接管，缺头表或缺链字段的半迁移结构会失败关闭。
+2. 每条审计保存 chain scope、递增 sequence、previous hash、entry hash 和 integrity version。哈希覆盖事件 ID、工作区/操作者、动作、实体、受限 Request ID、脱敏 metadata 与 UTC 时间；数据库约束拒绝重复序号、错误版本、非正序号和错误哈希长度。
+3. PostgreSQL 同一 scope 先取得事务 advisory lock，再锁定/更新独立链头；API 与 Worker 并发追加不会生成分叉。新增真实 PostgreSQL 双线程测试，等待当前提交的远程 CI 在 pgvector 服务上签收。
+4. 管理员 `GET /api/v1/admin/audit-integrity` 顺序重算完整工作区链，报告 sequence gap、previous hash、entry hash、payload 或 chain head 异常。管理页进入时核验一次并可手动重跑，不把全表核验塞进高频全局轮询。
+5. API 只接受 1-64 位安全 `X-Request-ID`；无效或超长值在进入日志/审计前替换为服务端 UUID。备份/恢复默认 revision 与最低表数同步，公网隔离恢复要求精确当前 head。
+
+### 当前本地验证
+
+- 全仓 Ruff、`uv lock --check`、Alembic 单 head、PowerShell 语法、公网部署 fail-closed 校验和 `git diff --check` 通过。
+- 审计/迁移/安全专项 `53 passed, 32 subtests passed`；新增接管与半迁移专项后迁移/审计合计 `17 passed`。
+- 全量后端 `254 passed, 8 skipped, 145 subtests passed`。8 个跳过项为本机 Docker/PostgreSQL/MinIO 未运行；不能把 SQLite 结果写成 PostgreSQL 并发已本地签收。公网恢复版本/表数防漂移契约另有 `2 passed`。
+- 前端 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js 16.2.12/TypeScript 生产构建通过。
+
+### 仍需保留的边界与接手规则
+
+- 同库哈希链只能检测常见篡改；数据库管理员若同时重算记录和链头仍可伪造。后续应把链头签名并锚定到独立不可变存储/SIEM，加入周期核验、告警、可信时间和保留/取证制度。
+- 当前 head 的真实 PostgreSQL 并发、迁移、覆盖率与 MinIO 回归由本阶段 GitHub CI 签收；28 表 PostgreSQL+对象联合恢复仍需独立演练，CI 迁移不等于灾备签收。
+- 下一批高价值缺口是统一分页/增量刷新与前端拆分、PostgreSQL RLS/租户生命周期、OIDC/MFA/step-up、OpenTelemetry/容量故障演练，以及真实渠道/媒体质量成本矩阵。
+- 公网部署按用户要求继续冻结；本轮没有购买、创建或配置外部资源。公众号 `auto_publish=false` 不变，没有调用平台接口或创建素材/草稿/公开发布。
+- 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、平台账密、模型缓存、备份和运行数据同样排除。

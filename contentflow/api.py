@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -39,6 +40,13 @@ from .settings import Settings, get_settings
 
 
 logger = logging.getLogger("contentflow.api")
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+
+
+def normalized_request_id(value: str | None) -> str:
+    if value and REQUEST_ID_PATTERN.fullmatch(value):
+        return value
+    return uuid.uuid4().hex
 
 
 def configure_logging() -> None:
@@ -95,7 +103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.middleware("http")
     async def request_context(request: Request, call_next):
-        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+        request_id = normalized_request_id(request.headers.get("x-request-id"))
         request.state.request_id = request_id
         started = time.perf_counter()
         if observability is not None:
