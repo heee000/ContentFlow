@@ -1798,3 +1798,10 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 前端单文件仍大，活动期仍有 8 路增量请求。下一阶段应拆分领域 query hooks/components，先做视图感知轮询和 Playwright 请求预算，再评估带恢复游标的 SSE/Inbox。
 - FORCE RLS 与 owner/migrator/API/Worker 角色拆分没有实施。它会改变数据库权限并可能导致 API/Worker 全面失去访问，必须在用户明确授权后以备份、回滚、分批迁移和跨租户负向测试执行；不得偷偷借分页阶段带入。
 - 公网部署仍按用户要求冻结；没有购买、创建或配置外部资源，也没有调用平台接口。继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、平台账密、模型缓存、备份和运行数据同样排除。
+
+### 首次远程 CI 反馈与依赖修复
+
+1. 分页实现提交 `f4172f20b1edd45f7d63848113223161bc7ccfc4` 已用 John Wang 身份普通推送；手工 CI `33655246050` 的后端 PostgreSQL/pgvector、MinIO、安全门禁与供应链证据 Job 成功，前端 lint/test/build 成功，但依赖审计失败，所以该 Run 不是本阶段最终签收。
+2. 失败原因是新披露公告覆盖锁文件中的传递依赖 `fast-uri 3.1.5`：四条高危主机混淆/SSRF 公告要求离开 `3.0.0 - 3.1.5`。上游 `ajv 8.20.0` 的范围为 `^3.0.1`，因此只将锁定版本更新到兼容的 `3.1.7`；没有增加直接依赖、跨主版本、使用 force 修复或降低 `moderate` 审计门槛。
+3. 本地 `npm audit --audit-level=moderate` 已回到 0 漏洞。用符合 engines 的随附 Node 24.19.0 重新 `npm ci` 后，ESLint、Vinext/Sites 构建、2 项 SSR 测试和 Next.js/TypeScript 生产构建通过。默认 Node 22.11.0 会因低于仓库要求跳过 Rolldown Windows 原生可选包，接手时不要按错误提示删除锁文件。
+4. 下一步必须先提交并普通推送 `web/package-lock.json` 与本记录，再触发新 CI；只有四个 Job 全成功后，才能把新 Run、PostgreSQL/MinIO 测试数量、覆盖率、Artifact 摘要和 SLSA/CycloneDX attestation 补写为最终证据。

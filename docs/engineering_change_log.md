@@ -659,3 +659,12 @@
 - Ruff 全仓、`uv lock --check`、Alembic 单 head `7e5f9a0b1c2d`、PowerShell 备份脚本语法、公网部署 fail-closed 校验与 `git diff --check` 通过。
 - 前端 ESLint、Sites/vinext 构建和 2 项渲染测试、Next.js/TypeScript 生产构建通过；`npm audit --audit-level=moderate` 为 0 vulnerabilities。
 - 远程 Linux + PostgreSQL/pgvector + MinIO、供应链与 attestation 仍必须绑定本阶段提交重新运行；未成功前不把本阶段标为远程签收。
+
+### CF-20260903-05：远程审计在本地验证后新命中 fast-uri 高危公告
+
+- 状态：兼容范围内的锁文件修复和本地前端复验完成；修复提交的远程 CI 仍需重新签收。
+- 发现方式：实现提交 `f4172f20b1edd45f7d63848113223161bc7ccfc4` 的首次手工 CI `33655246050` 中，后端 PostgreSQL/pgvector、MinIO、安全门禁与供应链证据任务成功，前端 lint、渲染测试和生产构建也成功；最后的 `npm audit --audit-level=moderate` 新命中 `fast-uri 3.0.0 - 3.1.5` 的四条高危主机混淆/SSRF 公告，因此整次运行正确失败，来源证明任务被跳过。
+- 根因：`ajv 8.20.0` 通过 `^3.0.1` 引入 `fast-uri`，锁文件固定在刚被公告覆盖的 `3.1.5`。这不是业务代码缺陷或 CI 网络故障，也不应通过降低审计级别规避。
+- 解决方案：仅把传递依赖锁定结果从 `fast-uri 3.1.5` 更新到同一兼容主版本的 `3.1.7`；不新增直接依赖、不跨主版本、不运行 `npm audit fix --force`，也不修改审计门槛。
+- 本地验证：更新后 `npm audit --audit-level=moderate` 为 `0 vulnerabilities`。用满足项目 engines 的随附 Node `24.19.0` 从锁文件重建依赖后，ESLint、Vinext/Sites 构建、2 项服务端渲染测试和 Next.js 16.2.12/TypeScript 生产构建通过。本机默认 Node `22.11.0` 低于项目要求的 `22.13.0`，会跳过 Rolldown Windows 可选绑定；该运行时噪声没有通过改锁文件掩盖。
+- 证据边界：失败运行 `33655246050` 只作为问题发现和后端集成通过证据，不能当作本阶段最终签收；必须以包含 `3.1.7` 锁文件的后续提交重新跑完四个 Job，才能记录成功 Run、Artifact 和 attestation。
