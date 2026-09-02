@@ -173,7 +173,10 @@ class LocalObjectStorage:
 
         digest = hashlib.sha256()
         size = 0
-        temporary = target_dir / f".{uuid.uuid4().hex}-{clean_name}.uploading"
+        # The final name is byte-bounded below. Keep the staging name independent
+        # of the user filename as well: POSIX filesystems apply the same 255-byte
+        # component limit before we ever reach the final rename.
+        temporary = target_dir / f".{uuid.uuid4().hex}.uploading"
         try:
             with temporary.open("wb") as output:
                 while chunk := stream.read(1024 * 1024):

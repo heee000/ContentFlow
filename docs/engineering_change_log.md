@@ -760,3 +760,10 @@
 - Ruff、Python 编译、`uv lock --check`、Alembic 单 head `b0c1d2e3f4a5`、PowerShell 语法、公网部署 fail-closed 校验、`pip check`、Python/npm 漏洞审计、ESLint、Next.js/TypeScript 生产构建、Vinext/Sites 构建与 2 项 SSR 渲染测试均通过。本机 WSL Bash 服务被宿主 ACL 拒绝；变更只同步脚本中的 head/表数，Linux 语法和实际契约必须由远程 CI 重新签收。
 - 本阶段没有读取真实 `.env`/账号文档，没有调用微信公众号或其他平台，没有创建草稿、素材或公网资源。公网部署继续冻结，数据库 FORCE RLS/角色拆分继续等待单独高影响授权。
 - 只有普通推送后的 GitHub Linux + PostgreSQL/pgvector + MinIO、前后端依赖审计、Prometheus、可复现源码/SBOM 和 attestation 全部成功，才能把本阶段标记为远程签收。
+
+### CF-20260903-15：Linux 暂存文件名在最终截断前已超过文件系统上限
+
+- 状态：远程 CI 发现，跨平台修复和本地定向验证进行中；必须以修复提交重新运行完整 CI。
+- 发现方式：实现提交 `69786fa` 的 CI `33678743444` 中，前端与 SBOM 成功，后端真实 PostgreSQL/MinIO 运行到 `test_generated_physical_name_stays_within_filesystem_byte_limit` 时失败。最终对象名虽已按 UTF-8 截断至 255 字节，但写入阶段先使用了“随机前缀 + 原始长文件名 + `.uploading`”，Linux 在打开暂存文件时即返回 `Errno 36`；Windows 本地没有暴露该差异。
+- 解决方案：暂存文件名改为只含固定点前缀、32 位随机十六进制和 `.uploading`，不再携带用户文件名；最终文件名、扩展名、校验和和分配 ID 规则保持不变。异常清理也因此始终操作合法短路径。
+- 证据边界：失败运行只能证明前端/SBOM和后端失败前门禁，不是最终远程签收；修复提交的 Linux 全量、依赖审计和 attestation 全绿后才可关闭本项。
