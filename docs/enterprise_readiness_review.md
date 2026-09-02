@@ -1836,7 +1836,7 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 | 日志安全 | 可用性重试、耗尽和心跳只记录错误类型 | 带敏感主机文本的负向断言 | 集中日志脱敏、保留和访问审计仍缺 |
 | 配置交付 | 所有 Worker 核心参数进入本地/公网 Compose 与 env | 文本契约、Pydantic 和公网 fail-closed | 尚无全 Settings—部署模板自动差异生成 |
 
-本机定向门禁为 `61 passed, 59 subtests passed`，全量为 `299 passed, 13 skipped, 187 subtests passed`、分支覆盖率 80.86%；Ruff、锁/依赖/漏洞、编译、单 Alembic head、双 Compose、公网失败关闭、备份脚本语法以及前端 lint、双构建、2 项 SSR 和 npm 审计均通过。13 项跳过仍是未启动的 PostgreSQL/MinIO 外部服务场景，本轮尚不能声称真实数据库断网恢复已签收。
+本机定向门禁为 `61 passed, 59 subtests passed`，全量为 `299 passed, 13 skipped, 187 subtests passed`、分支覆盖率 80.86%；Ruff、锁/依赖/漏洞、编译、单 Alembic head、双 Compose、公网失败关闭、备份脚本语法以及前端 lint、双构建、2 项 SSR 和 npm 审计均通过。实现提交 `b3f2d6a19516d9265d9d2c8b32ff6be14b078f8c` 的 [CI #33691253662](https://github.com/heee000/ContentFlow/actions/runs/33691253662) 四个 Job 全部成功，真实 PostgreSQL/pgvector 与 MinIO 为 `312 passed, 187 subtests passed`、分支覆盖率 81.99%；Artifact `9870116498` 摘要为 `sha256:6c8207ee31365941f739509add585a8c803e1deb0023988bafcee41f8f7b76cf`。该 CI 签收真实数据库上的既有租约/并发回归，但仍没有主动断网、kill/restart 或主从切换，不能声称真实数据库故障恢复已经演练。
 
 ### 44.3 当前仍存在的 5 个不足
 

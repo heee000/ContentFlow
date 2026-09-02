@@ -831,11 +831,12 @@
 
 ### CF-20260903-21：Worker 把数据库可用性故障混入业务失败且立即退出
 
-- 状态：严格异常分类、有界抖动退避、可中断停机、脱敏终止、配置透传与完整本地回归已实现；真实 PostgreSQL/MinIO CI 和目标环境断网演练待签收。
+- 状态：严格异常分类、有界抖动退避、可中断停机、脱敏终止、配置透传、完整本地回归和真实 PostgreSQL/MinIO CI 已签收；目标环境断网演练仍待完成。
 - 问题与影响：领取/维护查询遇到数据库错误会让服务立即退出；Handler 或完成提交阶段的数据库错误会先进入通用 `fail_job`，可能把基础设施瞬断错误持久化为业务失败，并使已发生外部副作用的任务看起来可以按普通失败恢复。
 - 根因：`run_forever()` 没有数据库故障边界，`run_once()` 又用单个 `except Exception` 同时处理 Provider/领域失败和 SQLAlchemy 基础设施异常；Compose 只透传 heartbeat/stale/queue 参数，poll/lease/max-attempts 及新的恢复预算无法由 env 实际调整。
 - 解决方案：只将连接断开、接口/操作错误、连接池超时和 invalidated DBAPI 连接归为可用性故障，在 `fail_job` 前重新抛出；约束/编程错误不重试。服务模式按 1 秒至 30 秒指数退避，默认 8 次、20% 抖动，成功后清零，停机 Event 可中断等待；耗尽后用脱敏错误退出交给编排器。维护扫描截止在故障后重置。数据库可用性心跳/恢复日志不输出异常正文。
 - 配置交付：本地 API/Worker 与公网共享 backend environment 显式传递 poll、lease、Job max-attempts、heartbeat、stale、queue-stall 和四个数据库恢复参数；env 模板、设置模型、公网 fail-closed 校验与文本契约同步。
 - 本地证据：定向 `61 passed, 59 subtests passed`；全量 `299 passed, 13 skipped, 187 subtests passed`、分支覆盖率 80.86%。覆盖一次恢复、退避/抖动/上限、终止可中断、耗尽、非可用性错误不重试、Job 不被误记失败、日志脱敏、设置和公网部署边界。全仓 Ruff、锁文件、`pip check`、Python 漏洞审计、编译、Alembic 单 head、双 Compose、公网 fail-closed、备份脚本语法、前端 lint/双构建/2 项 SSR/npm moderate 审计均通过。13 项跳过仍是本机未启动的 PostgreSQL/MinIO，不能冒充真实断网/主从切换演练。
 - 验证过程：首次全量回归有 3 个新增日志断言失败，原因是其他测试加载 Alembic 后遗留 `contentflow.worker` logger disabled 状态；定向运行没有复现。测试改为显式隔离并恢复 logger 状态后，原 3 项和两次完整全量均通过。产品入口原本已在迁移后调用 `configure_worker_logging(force=True)`，因此没有借测试修复掩盖运行时缺陷。
+- 远程证据：实现提交 `b3f2d6a19516d9265d9d2c8b32ff6be14b078f8c` 已以 John Wang 身份普通推送；[ContentFlow CI #33691253662](https://github.com/heee000/ContentFlow/actions/runs/33691253662) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `312 passed, 187 subtests passed`、分支覆盖率 81.99%；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9870116498` 摘要为 `sha256:6c8207ee31365941f739509add585a8c803e1deb0023988bafcee41f8f7b76cf`。
 - 剩余边界：默认名义等待约 121 秒，随后下一次失败退出；处理中断的 Job 最多等待租约到期。没有 PostgreSQL kill/restart、DNS/网络分区、连接池耗尽、多 Worker 惊群、编排器 restart/backoff 或恢复 RTO 证据；同数据库无法在完全断连时承载 degraded 状态，仍依赖 stale/API-down、集中日志和外部编排指标。

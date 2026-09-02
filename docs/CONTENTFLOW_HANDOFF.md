@@ -1948,6 +1948,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 ### 当前验证与边界
 
 - 定向测试覆盖处理阶段不写业务失败、一次故障后恢复、指数上限/抖动、30 秒等待被停机立即唤醒、预算耗尽后脱敏退出、IntegrityError 不重试、节点心跳日志脱敏、设置上下界和公网配置失败关闭；相关门禁为 `61 passed, 59 subtests passed`。本机全量为 `299 passed, 13 skipped, 187 subtests passed`、分支覆盖率 80.86%，13 项均为未启动的 PostgreSQL/MinIO 外部服务用例。全仓 Ruff、锁文件、`pip check`、Python 漏洞审计、编译、Alembic 单 head、双 Compose、公网 fail-closed、PowerShell 备份脚本语法、前端 ESLint、Vinext/Sites 构建、2 项 SSR 测试、Next.js/TypeScript 生产构建和 npm moderate 审计 0 漏洞均通过。
+- 实现提交 `b3f2d6a19516d9265d9d2c8b32ff6be14b078f8c` 已以 John Wang 身份普通推送；[ContentFlow CI #33691253662](https://github.com/heee000/ContentFlow/actions/runs/33691253662) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `312 passed, 187 subtests passed`、分支覆盖率 81.99%；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9870116498` 摘要为 `sha256:6c8207ee31365941f739509add585a8c803e1deb0023988bafcee41f8f7b76cf`。
 - 当前证据是 SQLAlchemy 确定性异常注入，不是 PostgreSQL 容器 kill/restart、DNS 失败、连接池耗尽、网络分区、故障主从切换或多 Worker 惊群演练。默认预算是安全基线，不是生产 RTO/SLO 结论。
 - 完全断库时 Worker 无法把 degraded 状态写进同一数据库；现有 API 指标只能在数据库可读时观察 stale/no-active，仍需真实 Alertmanager receiver、集中日志和编排器重启指标形成闭环。
 - `contentflow-worker --once` 保持单次失败即退出；服务模式预算耗尽后也必须退出，避免永久重试掩盖凭据、网络策略或迁移错误。公网部署仍冻结，本轮未访问 `.env`、平台账号或受保护知识文件。
