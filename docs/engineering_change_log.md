@@ -805,3 +805,12 @@
 - 本轮没有读取或修改 `.env`、平台账密、模型缓存、备份或运行数据，没有调用微信公众号/其他平台，也没有恢复公网部署。`knowledge/北京周末 CityWalk 路线助手产品资料.txt` 继续保持未跟踪且禁止读取、修改、暂存或提交。
 - 只显式暂存本阶段文件，使用 John Wang 身份普通推送；不使用 force 或 force-with-lease。
 - 实现提交 `9c822cc3b175b53d29e5dabb868dc754c0ad795e` 已以 John Wang 身份普通推送。[ContentFlow CI #33683730898](https://github.com/heee000/ContentFlow/actions/runs/33683730898) 四个 Job 全部成功：固定 Prometheus 3.13.1 的配置、规则与行为测试通过；真实 PostgreSQL/pgvector 与 MinIO 为 `298 passed, 171 subtests passed`、覆盖率 81.89%，从而签收双 Worker 调度去重、迁移和对象后端；前端 lint/test/build/audit、Python 审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9867276819` 摘要为 `sha256:0401d311bbb01c36c1fa8216c8c7902446a5510b70b18756b3b7bafe02345b2c`。
+
+### CF-20260903-19：日级存储计划被秒级队列轮询重复查询
+
+- 状态：独立检查节流、配置边界、Worker 行为回归、运维说明与完整本地门禁已实现；远程 CI 待本阶段提交签收。
+- 问题与影响：`Worker.run_once()` 原先在领取每个普通任务前无条件查询到期工作区。默认队列轮询为 1 秒，因此每个空闲 Worker 每秒执行一次面向 24 小时周期任务的数据库查询；副本越多，固定空闲查询开销越大。
+- 根因：工作区核对周期、每轮工作区上限已经独立配置，但没有定义“多久检查一次是否到期”的进程内调度频率，队列活跃度被错误地当作日级计划时钟。
+- 解决方案：新增 `CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_POLL_SECONDS`，默认 60 秒且限制在 5 至 3600 秒。每个 Worker 启动后立即检查一次，随后使用不受系统时钟回拨影响的单调时钟设置下一次检查；截止时间在查询前推进，连续队列轮询不会重复扫描。进程内节流只负责降低负载，跨 Worker 正确性仍由 PostgreSQL `SKIP LOCKED` 与固定幂等入口保证。
+- 验证边界：连续两次空闲 `run_once()` 只允许一次到期扫描；原有 Worker 到期核对端到端用例仍要求任务创建并以 report-only 模式成功执行。节流最多增加配置值对应的到期发现延迟，不改变 24 小时工作区周期，也不自动删除孤儿。
+- 本地证据：Ruff 全仓通过；Worker/队列/设置定向为 `60 passed, 45 subtests passed`；全量为 `287 passed, 12 skipped, 173 subtests passed`、分支覆盖率 80.76%，12 项均为本机未启动的 PostgreSQL/MinIO 外部服务场景。`uv lock --check`、公网部署 fail-closed 校验、`pip check`、Python 漏洞审计和两份 PowerShell 备份脚本语法通过；前端 ESLint、Vinext/Sites 构建、2 项 SSR 渲染测试、Next.js 生产构建与 npm 中等级别漏洞审计通过。

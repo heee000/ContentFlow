@@ -7,7 +7,7 @@ import unittest
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -184,6 +184,31 @@ class JobQueueLeaseTest(unittest.TestCase):
             node = session.get(WorkerNode, "idle-worker")
             self.assertEqual(node.status, "stopped")
             self.assertIsNotNone(node.stopped_at)
+
+    def test_idle_worker_throttles_storage_reconciliation_sweeps(self):
+        settings = Settings(
+            database_url="sqlite://",
+            secret_key="storage-sweep-throttle-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            storage_reconcile_schedule_poll_seconds=60,
+        )
+        worker = Worker(
+            settings=settings,
+            worker_id="storage-sweep-throttle-worker",
+            session_factory=self.session_factory,
+        )
+
+        with patch(
+            "contentflow.worker.schedule_due_storage_reconciliations",
+            return_value=0,
+        ) as schedule_sweep:
+            self.assertFalse(worker.run_once())
+            self.assertFalse(worker.run_once())
+
+        schedule_sweep.assert_called_once_with(
+            ANY,
+            settings=settings,
+        )
 
     def test_worker_logging_is_reenabled_after_migrations(self):
         previous_disabled = worker_logger.disabled

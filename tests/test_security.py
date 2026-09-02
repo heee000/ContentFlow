@@ -457,11 +457,14 @@ class RuntimeSettingsTest(unittest.TestCase):
         self.assertTrue(settings.storage_reconcile_schedule_enabled)
         self.assertEqual(settings.storage_reconcile_interval_hours, 24)
         self.assertEqual(settings.storage_reconcile_schedule_batch_size, 25)
+        self.assertEqual(settings.storage_reconcile_schedule_poll_seconds, 60)
         for values in (
             {"storage_reconcile_interval_hours": 0},
             {"storage_reconcile_interval_hours": 30 * 24 + 1},
             {"storage_reconcile_schedule_batch_size": 0},
             {"storage_reconcile_schedule_batch_size": 201},
+            {"storage_reconcile_schedule_poll_seconds": 4},
+            {"storage_reconcile_schedule_poll_seconds": 3601},
         ):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 Settings(**values)

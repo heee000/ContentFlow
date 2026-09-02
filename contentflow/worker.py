@@ -7,6 +7,7 @@ import os
 import signal
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -1431,6 +1432,7 @@ class Worker:
         self.handlers = handlers or HANDLERS
         self._stop_event = stop_event or threading.Event()
         self._shutdown_signal: int | None = None
+        self._next_storage_reconciliation_sweep_at = 0.0
 
     @property
     def stop_requested(self) -> bool:
@@ -1446,12 +1448,18 @@ class Worker:
 
         expired_job_refs: list[tuple[str, str]] = []
         with self.session_factory() as session:
-            scheduled_storage_reconciliations = (
-                schedule_due_storage_reconciliations(
-                    session,
-                    settings=self.settings,
+            scheduled_storage_reconciliations = 0
+            monotonic_now = time.monotonic()
+            if monotonic_now >= self._next_storage_reconciliation_sweep_at:
+                self._next_storage_reconciliation_sweep_at = monotonic_now + (
+                    self.settings.storage_reconcile_schedule_poll_seconds
                 )
-            )
+                scheduled_storage_reconciliations = (
+                    schedule_due_storage_reconciliations(
+                        session,
+                        settings=self.settings,
+                    )
+                )
             scheduled_reconciliations = schedule_pending_publish_reconciliations(
                 session,
                 settings=self.settings,

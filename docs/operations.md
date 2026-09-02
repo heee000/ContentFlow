@@ -183,11 +183,12 @@ CONTENTFLOW_STORAGE_ORPHAN_GRACE_SECONDS=86400
 CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_ENABLED=true
 CONTENTFLOW_STORAGE_RECONCILE_INTERVAL_HOURS=24
 CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_BATCH_SIZE=25
+CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_POLL_SECONDS=60
 ```
 
 - 管理员在“团队与审计 → 对象存储配额与一致性”查看计费容量、对象数、预留、未验证旧对象、待删除、缺失和完整性异常；API 分别为 `GET /api/v1/admin/storage/usage` 与有界分页的 `GET /api/v1/admin/storage/objects`。
 - “核对账本”调用 `POST /api/v1/admin/storage/reconcile`，由 Worker 分页扫描当前配置的存储后端，释放过期预留、补全旧对象大小、发现已验证对象缺失或大小变化，并报告超过宽限期的孤儿候选。巡检跨页携带固定开始水位，扫描期间的新写入不会被误判缺失。
-- 任一 Worker 每次领取普通任务前都会尝试为到期工作区安排一次自动核对；默认每 24 小时、每轮最多 25 个工作区。PostgreSQL 使用工作区行锁和 `SKIP LOCKED`，同一工作区使用固定入口幂等键，多 Worker 只会创建一个任务；终态失败在一个周期内冷却，不会空转重入。新工作区从创建时间开始计算首个周期，升级后 `last_reconciled_at` 为空的旧工作区会逐批完成首次核对。
+- 任一 Worker 会在领取普通任务前检查是否需要为到期工作区安排自动核对，但检查本身使用独立的进程内节流，默认每个 Worker 最多每 60 秒查询一次；这与每个工作区默认 24 小时的核对周期是两个不同参数。每轮最多选择 25 个工作区。PostgreSQL 使用工作区行锁和 `SKIP LOCKED`，同一工作区使用固定入口幂等键，多 Worker 只会创建一个任务；终态失败在一个周期内冷却，不会空转重入。进程重启会立即检查一次，数据库锁与幂等键继续负责跨进程正确性；新工作区从创建时间开始计算首个周期，升级后 `last_reconciled_at` 为空的旧工作区会逐批完成首次核对。
 - 自动任务始终写入 `delete_orphans=false`，只报告和修复账本计量，绝不会自动删除孤儿。禁用自动计划只需设置 `CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_ENABLED=false`；这不会终止已经入队的任务，也不应作为长期规避异常的手段。
 - “清理孤儿对象”必须再次确认并发送 `delete_orphans=true`；只删除超过宽限期且不在账本中的对象。若已有仅核对任务运行，请等待完成后再发起清理，接口会返回 409 而不会悄悄降级请求。
 - 迁移发现多个旧数据库记录共享同一 URI 时，会保留一个 `shared_legacy` 隔离项并禁止自动删除。应先定位所有引用、复制为独立对象并更新引用，再由维护流程清理；不要直接改账本状态或手工删原对象。
