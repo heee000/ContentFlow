@@ -1824,4 +1824,5 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 面向用户的可增长集合已经有界，但 2000 条后的专用历史浏览、服务端搜索/导出和虚拟列表仍未实现。发布证据清单哈希等内部全量一致性扫描仍需先增加业务数量/存储配额，再做容量测试，不能直接删掉完整性校验。
 - `contentflow-app.tsx` 仍约 5031 行，活动期仍有 8 路轻量轮询；领域 hooks/components、SSE/Inbox、Playwright 请求预算和断线恢复是下一批可独立交付的改进。
 - FORCE RLS 与数据库角色拆分继续等待用户明确的高影响迁移授权；不得偷偷实施。公网部署继续冻结；本轮没有调用平台接口、创建素材/草稿/发布或外部资源。
-- 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。阶段提交、普通推送和当前提交对应的远程 CI 仍待完成，不能用上一提交 CI 冒充。
+- 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。
+- 实现提交 `950323dbe499291fc14758d6674e276b7711e112` 已用 John Wang 身份普通推送，未使用 force；[ContentFlow CI #33663045854](https://github.com/heee000/ContentFlow/actions/runs/33663045854) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `267 passed, 160 subtests passed`、覆盖率 82.18%；前端、安全审计、Prometheus、可复现源码/SBOM、SLSA 和双 CycloneDX attestation 全部签收。Artifact `9859471526` 摘要为 `sha256:e0cdc89417ca2a5883ea878e2be375ed935bedc5de9d20e562716471675b0a27`。

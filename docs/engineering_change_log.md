@@ -685,7 +685,7 @@
 
 ### CF-20260903-07：低频控制面与历史集合仍会无界读取
 
-- 状态：实现、数据库迁移和本地专项验证完成；阶段提交与远程 PostgreSQL/MinIO/供应链签收待完成。
+- 状态：实现、数据库迁移、本地验证和远程 PostgreSQL/MinIO/供应链签收完成。
 - 问题与影响：成员、用户可访问工作区、渠道、风格 Skill、内容修订、发布证据/确认、审计、Prompt 版本和 Eval 套件/运行仍会读取全部记录，或只能拿到固定最近记录而无法继续。随着组织、审计和发布历史增长，会造成数据库/响应内存放大或历史不可达。
 - 根因：首轮分页只覆盖高增长运营路径；控制面混有连接查询、创建时间排序和单调版本/链序号排序，不能机械套用单一 `updated_at` 标尺。Prompt/Eval 管理摘要还同时承担 active/staged 状态与历史展示。
 - 解决方案：通用分页器增加升序、连接 Row 与严格 `{n,id,v}` 序列游标支持。成员和工作区按 Membership 的 `(created_at,id)`，渠道/风格 Skill/证据/确认/Eval 运行按时间加 ID，修订/Prompt 版本/Eval 套件/审计按业务序号加 ID 稳定翻页。Prompt/Eval 摘要嵌套数组固定为最近 100 条，新增三个独立历史端点供完整读取。风格内置 Skill 只在第一页附加，后续页不重复且不占工作区记录页长。
@@ -694,6 +694,7 @@
 - 涉及文件：`contentflow/pagination.py`、相关 Router/实体、`web/app/contentflow-app.tsx`、迁移/备份脚本、分页/迁移/风格/发布/Worker 测试和 README/架构/运维/交接/成熟度文档。
 - 本地验证：序列游标正常与篡改、审计稳定跨页、所有新增端点响应头、风格内置项只出现第一页、发布证据/确认和内容修订契约、11 个索引列序与空库升降级均有回归。最终不设置任何进程级覆盖的全量后端为 `259 passed, 8 skipped, 160 subtests passed`，分支覆盖率 81.27%；8 项跳过仅是本机没有 PostgreSQL/MinIO。全仓 Ruff、锁文件、单 Alembic head、编译、PowerShell 语法和公网部署 fail-closed 校验通过；ESLint、Next.js/TypeScript 生产构建、Vinext 两项渲染测试和 moderate 依赖审计 0 漏洞通过。
 - 测试污染记录：最初 8 项失败尝试本机 BGE 缓存与 `localhost:9000` S3；过度使用进程覆盖后又让 2 项安全配置负例读取到真实模型字段。根因是若干 fixture 没有禁用 dotenv。`test_security`、Prompt 治理、脚本发布、Observability 和 Worker fixture 现显式使用 `_env_file=None` 并声明自身 local/hash/mock/门禁设置；未读取或修改 `.env`，最终全量测试无需环境覆盖即可通过。
+- 远程证据：实现提交 `950323dbe499291fc14758d6674e276b7711e112` 已以 John Wang 身份普通推送，未使用 force。对应 [ContentFlow CI #33663045854](https://github.com/heee000/ContentFlow/actions/runs/33663045854) 四个 Job 全部成功；真实 PostgreSQL/pgvector 与 MinIO 为 `267 passed, 160 subtests passed`、覆盖率 82.18%，Prometheus、Python/npm 审计、前端、可复现源码/SBOM、SLSA 和双 CycloneDX attestation 全部签收。Artifact `9859471526` 名为 `contentflow-supply-chain-950323dbe499291fc14758d6674e276b7711e112`，摘要 `sha256:e0cdc89417ca2a5883ea878e2be375ed935bedc5de9d20e562716471675b0a27`。
 
 ### CF-20260903-08：第二十八轮复审新增未关闭边界
 
