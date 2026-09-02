@@ -1887,3 +1887,37 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 3. 为纯数据库、AI、对象存储、发布和对账分别建立副作用/幂等/补偿表，引入 fencing token 或 Outbox 后再缩短安全接管时间。
 4. 将结构化 Worker 故障日志和编排器 restart count 发往独立监控故障域，接通真实告警接收与演练证据。
 5. 继续推进跨实体数据生命周期、数据库角色/RLS 授权方案、企业 IAM、PITR/异地、前端 E2E/拆分以及真实渠道和媒体质量成本矩阵。
+
+## 46. 2026-09-03 第三十六轮复审：真实事务冲突与恢复证据边界
+
+### 46.1 复审结论
+
+第三十五轮将 `40001/40P01` 纳入策略，但真实 PostgreSQL 只覆盖了 `57014/55P03/42P01`。本轮用受控并发事务实际制造序列化失败和死锁，确认 psycopg/SQLAlchemy 的真实异常链能够进入 `transaction_retryable`，并继续满足错误摘要脱敏。这个缺口现已关闭；项目成熟度仍为 L2+，因为分类器证据不能替代目标环境的断连恢复、多 Worker 吞吐和逐类 Job 副作用协议。
+
+### 46.2 本轮关闭或部分关闭的风险
+
+| 维度 | 当前提升 | 证据 | 未关闭边界 |
+| --- | --- | --- | --- |
+| 序列化冲突 | 两个 `SERIALIZABLE` 事务读取同一快照并竞争更新，要求一成一败 | 真实 PostgreSQL 返回 `40001`，分类为 `transaction_retryable` | 实际业务 Handler 默认隔离级别和负载下的发生率/吞吐未测 |
+| 死锁 | 两事务以相反顺序持有并请求两行锁，要求一个牺牲者 | 真实 PostgreSQL 返回 `40P01`，分类为 `transaction_retryable` | 尚无多表业务锁顺序和高并发死锁画像 |
+| 测试确定性 | 数据库、Barrier 和 Future 三层超时；失败事务回滚，探针表最终删除 | Linux CI 完整门禁成功 | CI 一次成功不等于长期无抖动，需要持续运行历史 |
+| 信息安全 | 真实驱动错误只保留 kind/SQLSTATE/error type | 探针 SQL/表名负向断言 | 集中日志保留和访问审计仍缺 |
+| 交付范围 | 仅增强测试，不改变生产接口、状态或迁移 | 本地/远程全量回归 | 没有新增真实故障恢复能力本身 |
+
+本机 `uv lock --check`、全仓 Ruff 和完整后端门禁通过：`306 passed, 14 skipped, 196 subtests passed`、分支覆盖率 80.96%；14 项跳过仅因本机 PostgreSQL/MinIO 未运行。实现提交 `a65a411fe2d8db46db2c2746be19dad4b1cc1765` 的 [CI #33696052795](https://github.com/heee000/ContentFlow/actions/runs/33696052795) 四个 Job 全部成功；真实 PostgreSQL/pgvector 与 MinIO 为 `320 passed, 196 subtests passed`、覆盖率 82.10%，并签收实际 `40001/40P01`、前端、Prometheus、依赖审计和供应链证明。Artifact `9871817974` 摘要为 `sha256:6549a79f8875e86ce3d05835c18334734dc5796d0b47bd48fc9d4ad46d902f5c`。
+
+### 46.3 当前仍存在的 5 个不足
+
+1. **真实连接故障与恢复仍未演练**：没有 PostgreSQL stop/start、DNS、网络分区、连接池耗尽、主从切换和多 Worker 同时恢复的 P50/P95/RTO 与惊群数据。
+2. **真实冲突只签收到分类边界**：测试证明驱动异常语义正确，但没有让实际 `Worker.run_once → Handler → fail_job` 在真实业务事务中产生冲突并验证 Job 重排、领域回滚和最终吞吐。
+3. **非发布任务副作用策略仍粗**：AI 调用可能重复计费，对象存储补偿缺完整故障矩阵，纯数据库任务也没有显式快速接管/fencing 协议。
+4. **完全断库的信号仍与业务库同故障域**：Worker 无法写心跳，尚无独立进程健康信号、OTel Collector、真实 Alertmanager receiver、编排器 restart 指标和通知演练闭环。
+5. **企业完整交付主缺口未变**：数据生命周期、数据库角色/RLS、OIDC/MFA/SCIM/KMS、PITR/异地、前端 Playwright/模块化及真实渠道/媒体质量成本矩阵尚未共同签收。
+
+### 46.4 可以继续改进的 5 个方向
+
+1. 在固定 PostgreSQL 服务上加入 stop/start 与 Toxiproxy/网络策略故障矩阵，记录恢复时延、重试次数、租约接管和多 Worker 惊群，再据实校准 retry/lease/heartbeat。
+2. 选择无外部副作用的真实 Job Handler，制造一次 live deadlock/锁冲突，验证完整回滚、Job 退避、领域状态不误失败和最终成功；发布任务继续只用确定性故障注入保护副作用。
+3. 为每类 Job 建立 side-effect/idempotency/compensation/fencing 表，优先把纯数据库任务与可能重复计费的 AI/媒体任务分开，之后才讨论缩短租约。
+4. 将 Worker 结构化故障日志与编排器 restart count 输出到独立监控故障域，接通真实告警接收、恢复通知和值班演练。
+5. 继续推进跨实体数据生命周期、数据库纵深隔离授权方案、企业 IAM、PITR/异地、前端 E2E/拆分和真实外部平台异常矩阵。

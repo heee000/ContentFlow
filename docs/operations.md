@@ -150,7 +150,7 @@ CONTENTFLOW_WORKER_DATABASE_RETRY_JITTER_RATIO=0.2
 
 服务默认按 1、2、4、8、16、30、30、30 秒名义间隔重试，每次加入最多 20% 抖动；第 8 次等待后的下一次可恢复数据库错误会以脱敏终止错误退出，再由 `CONTENTFLOW_RESTART_POLICY` 对应的编排器重启。退避等待可被 SIGTERM/SIGINT 立即打断；恢复后存储与发布维护扫描会立即重新取得资格。`contentflow-worker --once` 用于单次管理执行，不做进程内重试。
 
-连接完全中断时，数据库心跳本身无法写入；应联合观察 `ContentFlowNoActiveWorkers`、`ContentFlowStaleWorkerDetected`、`ContentFlowAPIDown`、队列最老等待时间和编排器重启次数。PostgreSQL 集成门禁会由真实驱动产生 `57014`、`55P03` 和 `42P01` 来验证解析，连接断开路径仍使用确定性异常注入；尚未完成真实 PostgreSQL kill/restart、DNS、连接池耗尽、网络分区或主从切换演练。上线前必须按目标环境测量恢复时间，不能仅凭分类测试调整租约和重试预算。
+连接完全中断时，数据库心跳本身无法写入；应联合观察 `ContentFlowNoActiveWorkers`、`ContentFlowStaleWorkerDetected`、`ContentFlowAPIDown`、队列最老等待时间和编排器重启次数。PostgreSQL 集成门禁会由真实驱动产生 `40001`、`40P01`、`57014`、`55P03` 和 `42P01` 来验证解析：两个 `SERIALIZABLE` 事务并发更新同一快照会稳定产生一个序列化失败，两个事务以相反顺序锁定两行会稳定产生一个死锁牺牲者。连接断开路径仍使用确定性异常注入；尚未完成真实 PostgreSQL kill/restart、DNS、连接池耗尽、网络分区或主从切换演练。上线前必须按目标环境测量恢复时间，不能仅凭分类测试调整租约和重试预算。
 
 ## 数据库迁移
 

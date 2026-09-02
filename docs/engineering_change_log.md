@@ -849,3 +849,15 @@
 - 发布一致性：当 `publish.dispatch` 的领域状态已经是 `publishing`，任何已识别数据库错误都按结果不确定处理，立即转 `reconciliation_required` 并终结原队列尝试；审计 reason 为 `database_<kind>_after_dispatch`。未开始远端写入的事务冲突仍可按 Job 退避，不统一牺牲吞吐。
 - 验证：全仓 Ruff、定向 `35 passed, 9 subtests passed` 及本机全量 `306 passed, 14 skipped, 196 subtests passed`、80.96% 分支覆盖率均通过；14 项跳过仅是本机未启动的 PostgreSQL/MinIO。锁/依赖/漏洞、编译、迁移、双 Compose、公网失败关闭、备份脚本和全部前端门禁通过。PostgreSQL 集成测试使用真实 statement timeout、表锁 NOWAIT 和缺表语句验证 psycopg 的 `57014/55P03/42P01`，并由下一条远程证据签收。剩余真实 kill/restart、网络、池耗尽、主从切换和多 Worker 恢复时延不在本条完成范围内。
 - 远程证据：实现提交 `9c2a6518dc7258ee354e7f7632bc6cfa9ae54797` 已以 John Wang 身份普通推送；[ContentFlow CI #33694647116](https://github.com/heee000/ContentFlow/actions/runs/33694647116) 四个 Job 成功。真实 PostgreSQL/pgvector 与 MinIO 为 `320 passed, 196 subtests passed`、覆盖率 82.10%；真实 SQLSTATE、前端、Prometheus、依赖审计、可复现源码/SBOM、SLSA 与 CycloneDX 均通过。Artifact `9871335459` 摘要为 `sha256:ef9f75479585b2552c77c59231f78fb2849efc44521b08c3691c57b4f4da65a0`。
+
+### CF-20260903-23：序列化失败与死锁分类仍只依赖伪造 SQLSTATE
+
+- 状态：真实双事务故障生成、驱动分类、脱敏断言、完整本地回归和远程 PostgreSQL/MinIO/供应链门禁均已签收。
+- 问题与影响：`40001` 和 `40P01` 已进入 Worker 安全重试矩阵，但此前只用人工构造的 SQLAlchemy 包装异常验证。若 psycopg 的实际包装链、事务失败位置或诊断字段与假对象不同，生产中的序列化失败/死锁可能落入错误类别；仅凭伪造属性不能作为真实数据库证据。
+- 根因：上一阶段真实 PostgreSQL 用例只制造了语句超时、NOWAIT 锁竞争和缺表，尚未建立两个并发事务必然形成冲突的有界编排。
+- 解决方案：在模块级随机临时数据库中创建专用探针表。序列化场景让两个 `SERIALIZABLE` 事务先读取同一版本，再通过 Barrier 同步更新同一行，要求恰好一个提交、一个由 PostgreSQL 返回 `40001`；死锁场景让两个事务分别先锁定一行，再以相反顺序更新另一行，要求恰好一个提交、一个返回 `40P01`。捕获的真实 SQLAlchemy/psycopg 异常直接进入 `database_error_sqlstate`、`classify_database_error` 和 `sanitized_database_error`，两者必须归为 `transaction_retryable`，且摘要不能包含探针 SQL/表名。
+- 稳定性与清理：事务内 `statement_timeout=10s`、Barrier 10 秒、Future 15 秒共同限制悬挂；任何路径都回滚失败事务，并在 `finally` 中删除探针表。整个集成数据库本身仍由既有 fixture 使用安全随机名称创建、终止残留连接并精确删除，不接触持久库。
+- 代码范围：仅修改 `tests/test_postgres_integration.py`，没有改 API、领域状态、生产 Worker、配置、迁移或外部平台行为。
+- 本地证据：`uv lock --check`、全仓 Ruff 和完整后端覆盖率门禁通过；结果为 `306 passed, 14 skipped, 196 subtests passed`、分支覆盖率 80.96%。14 项跳过均为本机 Docker/PostgreSQL/MinIO 未运行，本地结果不冒充真实事务冲突签收。
+- 远程证据：实现提交 `a65a411fe2d8db46db2c2746be19dad4b1cc1765` 已以 John Wang 身份普通推送；[ContentFlow CI #33696052795](https://github.com/heee000/ContentFlow/actions/runs/33696052795) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `320 passed, 196 subtests passed`、分支覆盖率 82.10%，并实际走过 `40001/40P01` 并发断言；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 均通过。Artifact `9871817974` 摘要为 `sha256:6549a79f8875e86ce3d05835c18334734dc5796d0b47bd48fc9d4ad46d902f5c`。
+- 剩余边界：这证明真实驱动异常可被正确解析，不证明实际 Job Handler 在目标负载下发生冲突后的端到端回滚、重排与吞吐，也不替代数据库 kill/restart、DNS、网络分区、池耗尽、主从切换和多 Worker 恢复 RTO 演练。

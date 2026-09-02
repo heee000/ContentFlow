@@ -1,6 +1,6 @@
 # ContentFlow 项目交接文档
 
-> 更新日期：2026-09-02
+> 更新日期：2026-09-03
 > 适用仓库：ContentFlow 仓库根目录
 > GitHub：<https://github.com/heee000/ContentFlow>
 > 当前工作分支：`codex/enterprise-media-runtime`
@@ -1971,3 +1971,21 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 本轮没有新增配置、迁移或平台调用，也没有读取 `.env`、账号、模型缓存、运行数据或受保护知识文件。公网部署继续冻结。
 - SQLSTATE 是错误语义，不是端到端恢复证明。真实 PostgreSQL kill/restart、DNS、网络分区、连接池耗尽、主从切换和多 Worker 惊群仍未执行；`40001`/`40P01` 当前有确定性包装测试，尚未由真实并发事务制造。
 - 除发布任务外，AI、对象存储和纯数据库 Job 仍共享粗粒度中断策略；下一步应以副作用契约和成本为依据声明每类 Job 能否快速接管，不能因为已有 SQLSTATE 就统一降低 300 秒租约。
+
+## 21.48 PostgreSQL 真实事务冲突与第三十六轮复审增量交接
+
+### 本轮实现
+
+1. 第三十五轮虽已把 `40001` 和 `40P01` 纳入 `transaction_retryable`，但真实 PostgreSQL 门禁只制造了 `57014/55P03/42P01`。本轮补齐实际并发事务证据，避免用伪造 SQLSTATE 代表 psycopg/SQLAlchemy 真实包装行为。
+2. 序列化用例在随机临时集成数据库中创建专用探针表，让两个 `SERIALIZABLE` 事务读取同一版本并同步更新同一行；断言恰好一个事务提交、另一个由 PostgreSQL 返回 `40001`。
+3. 死锁用例让两个事务各自先更新一行，再通过 Barrier 同步、以相反顺序请求另一行；断言恰好一个事务提交、一个成为 PostgreSQL `40P01` 死锁牺牲者。
+4. 两个真实异常直接进入现有 `database_error_sqlstate`、`classify_database_error` 和 `sanitized_database_error`，必须归为 `transaction_retryable`，且摘要不得包含探针 SQL/表名。数据库语句、Barrier 和 Future 都有有界超时；失败事务回滚，探针表在 `finally` 中删除。
+5. 本轮只修改 PostgreSQL 集成测试，没有改 API、数据库迁移、领域状态、生产 Worker 配置或前端，也没有触发任何外部平台副作用。
+
+### 当前验证与边界
+
+- 本机 Docker Engine 管道仍不存在，因此真实服务用例安全跳过；`uv lock --check`、全仓 Ruff 和完整后端覆盖率门禁为 `306 passed, 14 skipped, 196 subtests passed`、分支覆盖率 80.96%。14 项跳过均为未启动的 PostgreSQL/MinIO，未被写成真实签收。
+- 实现提交 `a65a411fe2d8db46db2c2746be19dad4b1cc1765` 已以 John Wang 身份普通推送；[ContentFlow CI #33696052795](https://github.com/heee000/ContentFlow/actions/runs/33696052795) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `320 passed, 196 subtests passed`、分支覆盖率 82.10%，并实际签收 `40001/40P01`；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 均通过。Artifact `9871817974` 摘要为 `sha256:6549a79f8875e86ce3d05835c18334734dc5796d0b47bd48fc9d4ad46d902f5c`。
+- 该证据关闭的是“真实驱动是否能被正确分类”，不是实际业务 Handler 在目标负载下的端到端冲突恢复，也不是数据库高可用证明。PostgreSQL kill/restart、DNS、网络分区、连接池耗尽、主从切换和多 Worker 恢复 RTO 仍未执行。
+- 下一轮应优先为无外部副作用的实际 Job 建立 live 冲突恢复测试，并形成按任务类型的副作用/幂等/补偿/fencing 矩阵；不能将发布或可能重复计费的模型调用机械套用普通自动重试。
+- 公网部署继续冻结；本轮未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，未调用平台、创建素材/草稿/发布或云资源。继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。
