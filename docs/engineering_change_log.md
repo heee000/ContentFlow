@@ -820,10 +820,11 @@
 
 ### CF-20260903-20：活动对账任务可占满恢复批次并饿死后续缺失任务
 
-- 状态：公平候选查询、独立节流、批次配置、索引迁移、部署配置和完整本地后端门禁已实现；真实 PostgreSQL CI 待本阶段提交签收。
+- 状态：公平候选查询、独立节流、批次配置、索引迁移、部署配置、完整本地门禁和真实 PostgreSQL/MinIO CI 均已签收。
 - 问题与影响：Worker 原先每次默认 1 秒轮询都选择最老 100 条微信 submitted 记录，随后才在 Python 中发现其幂等对账 Job 已 queued/retry/running。超过批次时，最老活动任务会反复占据窗口，后面的历史缺失任务可能永久无法补建；即使没有缺失，也会给每个空闲 Worker 增加一条全局查询。
 - 根因：候选条件没有把关联 Job 状态下推数据库，队列轮询节拍又被复用为恢复扫描时钟；`publish_jobs` 只有单列 status 和工作区分页索引，没有支撑跨工作区按状态/更新时间恢复扫描的复合索引。
 - 解决方案：使用确定幂等键外连接 Job，在 `LIMIT` 前只保留无 Job 或终态 Job 的 submitted 记录；活动 Job 直接排除，终态 Job 仍原位清理并重排。新增独立 60 秒扫描间隔和 100 条批次上限，两者均有显式安全范围；Worker 使用单调时钟节流。迁移 `d2e3f4a5b6c7` 新增 `(status, updated_at, id)` 索引，并同步运行时 head 与三套备份/恢复校验。本地 API/Worker Compose 及公网共享环境显式透传存储和发布恢复边界，避免 `.env.example` 的调整被容器忽略。
 - 兼容与安全：正常 `publish.dispatch` 仍即时创建对账 Job，扫描最多一分钟延迟只影响异常恢复；微信仍必须有确定 `publish_id`，不对抖音做模糊匹配，不重新调用发布接口，不改变人工接管或失败终态。
 - 初步证据：SQLite 公平性用例把两个活动任务放在批次前方并设 `limit=1`，后续缺失任务仍被补建；连续两次空闲 Worker 只执行一次存储和发布维护扫描。设置边界、迁移升降级、Compose 参数透传和公网恢复契约共同通过 7 项定向回归，公网配置通过 fail-closed 渲染；完整证据将在本阶段签收后补充。
 - 本地证据：Ruff 全仓、Alembic 单 head、两套 Compose 渲染和公网 fail-closed 校验通过；相关完整定向为 `81 passed, 10 skipped, 49 subtests passed`，本机全量为 `290 passed, 13 skipped, 177 subtests passed`、分支覆盖率 80.77%。`uv lock --check`、`pip check`、Python 漏洞审计、两份 PowerShell 备份脚本语法、前端 ESLint、Vinext/Sites 构建、2 项 SSR 渲染测试、Next.js/TypeScript 生产构建与 npm moderate 审计 0 漏洞均通过。13 项跳过均为本机未启动的 PostgreSQL/MinIO 外部服务场景，不能代替远程 PostgreSQL 公平性和 MinIO 签收。
+- 远程证据：实现提交 `1ba8251be9f75c1c4d52d41cba0ff317c6acffe0` 已以 John Wang 身份普通推送；[ContentFlow CI #33688561251](https://github.com/heee000/ContentFlow/actions/runs/33688561251) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `303 passed, 177 subtests passed`、分支覆盖率 81.91%；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9869112197` 摘要为 `sha256:c716780bb2f62e63f443e2ae0ff2c247a0fbb85e0aced27d1cffaad0913862e5`。

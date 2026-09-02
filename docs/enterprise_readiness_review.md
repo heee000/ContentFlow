@@ -1794,14 +1794,14 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 
 | 维度 | 当前提升 | 验证 | 未关闭边界 |
 | --- | --- | --- | --- |
-| 批次公平性 | 活动 Job 在数据库 LIMIT 前排除，无 Job/终态 Job 才占名额 | SQLite `limit=1` 饥饿回归；真实 PostgreSQL 用例已入仓 | 尚无万级 submitted 积压基准 |
+| 批次公平性 | 活动 Job 在数据库 LIMIT 前排除，无 Job/终态 Job 才占名额 | SQLite `limit=1` 饥饿回归；CI 真实 PostgreSQL 已签收 | 尚无万级 submitted 积压基准 |
 | 空闲负载 | 发布恢复扫描从每秒/每任务降为默认每 Worker 每 60 秒 | 连续空闲 `run_once()` 调用计数 | 多副本仍各自检查，尚无全局 scheduler 租约 |
 | 批次治理 | 默认 100，强制 1–1000；显式 0 不再静默退化 | 设置及函数入口边界测试 | 未基于目标数据库延迟自动调节 |
-| 查询计划 | 新增 `(status, updated_at, id)` 复合索引 | SQLite 升降级与模型一致性；远程 PG 待签收 | 大表在线建索引与 EXPLAIN/锁预算未测 |
+| 查询计划 | 新增 `(status, updated_at, id)` 复合索引 | SQLite 升降级与模型一致性；CI 真实 PostgreSQL 已签收迁移和行为 | 大表在线建索引与 EXPLAIN/锁预算未测 |
 | 副作用安全 | 只补建查询任务，正常发布即时建 Job | 原微信对账/人工接管回归保留 | 平台幂等键、回调验签/去重仍缺 |
 | 配置可交付性 | 本地 API/Worker 与公网 backend 显式传递存储和发布恢复边界 | Compose 文本契约与公网 fail-closed 渲染 | 尚未建立所有 Settings 与部署模板的自动差异清单 |
 
-本阶段本机完整定向为 `81 passed, 10 skipped, 49 subtests passed`，全量为 `290 passed, 13 skipped, 177 subtests passed`、分支覆盖率 80.77%；Ruff、Alembic 单 head、本地/公网 Compose 渲染、公网 fail-closed 校验、锁文件、Python 依赖一致性/漏洞审计、备份脚本语法、前端 ESLint、Vinext/Sites 与 Next.js 生产构建、2 项 SSR 测试和 npm moderate 审计 0 漏洞均通过。13 项跳过来自未启动的 PostgreSQL/MinIO 服务，真实 PostgreSQL 候选公平性和索引行为仍需绑定提交的远程 CI 签收。
+本阶段本机完整定向为 `81 passed, 10 skipped, 49 subtests passed`，全量为 `290 passed, 13 skipped, 177 subtests passed`、分支覆盖率 80.77%；Ruff、Alembic 单 head、本地/公网 Compose 渲染、公网 fail-closed 校验、锁文件、Python 依赖一致性/漏洞审计、备份脚本语法、前端 ESLint、Vinext/Sites 与 Next.js 生产构建、2 项 SSR 测试和 npm moderate 审计 0 漏洞均通过。实现提交 `1ba8251be9f75c1c4d52d41cba0ff317c6acffe0` 的 [CI #33688561251](https://github.com/heee000/ContentFlow/actions/runs/33688561251) 四个 Job 全部成功；真实 PostgreSQL/pgvector 与 MinIO 为 `303 passed, 177 subtests passed`、分支覆盖率 81.91%，前端、安全审计、Prometheus、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9869112197` 摘要为 `sha256:c716780bb2f62e63f443e2ae0ff2c247a0fbb85e0aced27d1cffaad0913862e5`。
 
 ### 43.3 当前仍存在的 5 个不足
 

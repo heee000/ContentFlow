@@ -1927,7 +1927,8 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 
 ### 当前验证与边界
 
-- Ruff 全仓、Alembic 单 head、SQLite 公平性、连续 Worker 节流、设置上下界、全部迁移、Compose 参数透传与公网恢复契约均通过；本阶段完整定向为 `81 passed, 10 skipped, 49 subtests passed`，本机全量为 `290 passed, 13 skipped, 177 subtests passed`、分支覆盖率 80.77%。13 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例；`uv lock --check`、`pip check`、Python 漏洞审计、两份 PowerShell 备份脚本语法、公网 fail-closed 渲染、前端 ESLint、Vinext/Sites 构建、2 项 SSR 渲染测试、Next.js/TypeScript 生产构建和 npm moderate 审计 0 漏洞均通过。真实 PostgreSQL 的“活动任务位于批次前方、后续缺失项仍被选中”用例已加入远程测试集，远程证据待本阶段提交后更新。
+- Ruff 全仓、Alembic 单 head、SQLite 公平性、连续 Worker 节流、设置上下界、全部迁移、Compose 参数透传与公网恢复契约均通过；本阶段完整定向为 `81 passed, 10 skipped, 49 subtests passed`，本机全量为 `290 passed, 13 skipped, 177 subtests passed`、分支覆盖率 80.77%。13 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例；`uv lock --check`、`pip check`、Python 漏洞审计、两份 PowerShell 备份脚本语法、公网 fail-closed 渲染、前端 ESLint、Vinext/Sites 构建、2 项 SSR 渲染测试、Next.js/TypeScript 生产构建和 npm moderate 审计 0 漏洞均通过。
+- 实现提交 `1ba8251be9f75c1c4d52d41cba0ff317c6acffe0` 已以 John Wang 身份普通推送；[ContentFlow CI #33688561251](https://github.com/heee000/ContentFlow/actions/runs/33688561251) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `303 passed, 177 subtests passed`、分支覆盖率 81.91%，从而签收“活动任务位于批次前方、后续缺失项仍被选中”的 PostgreSQL 回归、迁移和对象后端；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9869112197` 摘要为 `sha256:c716780bb2f62e63f443e2ae0ff2c247a0fbb85e0aced27d1cffaad0913862e5`。
 - 恢复扫描只处理具备确定 `external_id` 的微信公众号 submitted 任务；不为抖音等不具备可靠查询键的平台做模糊匹配，不调用发布接口，也不改变人工接管与最大尝试语义。
 - 普通 `CREATE INDEX` 在大表可能产生锁等待、WAL 与额外空间；个人/低数据量可随常规迁移升级，企业生产应在副本测量并安排维护窗口或改用受控在线索引流程。
 - 公网部署继续冻结；本轮未读取 `.env`、平台账密或受保护知识文件，未调用平台、创建素材/草稿、发布或创建云资源。
