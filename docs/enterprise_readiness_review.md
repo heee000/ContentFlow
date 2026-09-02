@@ -1870,7 +1870,7 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 | 信息安全 | Job/Worker/两类心跳只输出 kind、SQLSTATE、类型 | SQL、参数、DSN、driver message 负向断言 | 集中日志访问审计与保留制度仍缺 |
 | 向后兼容 | 无 SQLSTATE 驱动保持 availability 保守回退 | OSError 包装回归 | 非 PostgreSQL 驱动没有独立错误矩阵 |
 
-本机全仓 Ruff、定向 `35 passed, 9 subtests passed` 和全量 `306 passed, 14 skipped, 196 subtests passed` 均通过，分支覆盖率 80.96%；14 项跳过仅对应本机未启动的 PostgreSQL/MinIO。锁文件、环境一致性、Python/npm 漏洞、编译、单 Alembic head、双 Compose、公网失败关闭、备份脚本语法、前端 lint、Vinext/Sites、2 项 SSR 与 Next.js/TypeScript 构建均通过。真实 SQLSTATE 集成用例仍以远程 PostgreSQL CI 结果为最终签收依据。
+本机全仓 Ruff、定向 `35 passed, 9 subtests passed` 和全量 `306 passed, 14 skipped, 196 subtests passed` 均通过，分支覆盖率 80.96%；14 项跳过仅对应本机未启动的 PostgreSQL/MinIO。锁文件、环境一致性、Python/npm 漏洞、编译、单 Alembic head、双 Compose、公网失败关闭、备份脚本语法、前端 lint、Vinext/Sites、2 项 SSR 与 Next.js/TypeScript 构建均通过。实现提交 `9c2a6518dc7258ee354e7f7632bc6cfa9ae54797` 的 [CI #33694647116](https://github.com/heee000/ContentFlow/actions/runs/33694647116) 四个 Job 成功；真实 PostgreSQL/pgvector 与 MinIO 为 `320 passed, 196 subtests passed`、覆盖率 82.10%，并签收真实 `57014/55P03/42P01`、安全审计与供应链证明。Artifact `9871335459` 摘要为 `sha256:ef9f75479585b2552c77c59231f78fb2849efc44521b08c3691c57b4f4da65a0`。
 
 ### 45.3 当前仍存在的 5 个不足
 

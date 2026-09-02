@@ -1966,7 +1966,8 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 
 ### 当前验证与边界
 
-- 全仓 Ruff 与 Worker/发布定向 `35 passed, 9 subtests passed` 通过；本机全量为 `306 passed, 14 skipped, 196 subtests passed`、分支覆盖率 80.96%。14 项均为本机未启动的 PostgreSQL/MinIO 外部服务，其中新增真实驱动分类必须由本阶段远程 CI 签收后才能写成完成证据。锁文件、`pip check`、Python 漏洞审计、编译、Alembic 单 head、双 Compose、公网 fail-closed、备份脚本语法、前端 ESLint、Vinext/Sites 构建、2 项 SSR、Next.js/TypeScript 生产构建和 npm moderate 审计 0 漏洞均通过。
+- 全仓 Ruff 与 Worker/发布定向 `35 passed, 9 subtests passed` 通过；本机全量为 `306 passed, 14 skipped, 196 subtests passed`、分支覆盖率 80.96%。14 项均为本机未启动的 PostgreSQL/MinIO 外部服务，本地结果不用于签收真实驱动分类；远程证据见下一条。锁文件、`pip check`、Python 漏洞审计、编译、Alembic 单 head、双 Compose、公网 fail-closed、备份脚本语法、前端 ESLint、Vinext/Sites 构建、2 项 SSR、Next.js/TypeScript 生产构建和 npm moderate 审计 0 漏洞均通过。
+- 实现提交 `9c2a6518dc7258ee354e7f7632bc6cfa9ae54797` 已以 John Wang 身份普通推送；[ContentFlow CI #33694647116](https://github.com/heee000/ContentFlow/actions/runs/33694647116) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `320 passed, 196 subtests passed`、分支覆盖率 82.10%，其中 psycopg 实际返回的 `57014/55P03/42P01` 分类、迁移和对象后端全部通过；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 均签收。Artifact `9871335459` 摘要为 `sha256:ef9f75479585b2552c77c59231f78fb2849efc44521b08c3691c57b4f4da65a0`。
 - 本轮没有新增配置、迁移或平台调用，也没有读取 `.env`、账号、模型缓存、运行数据或受保护知识文件。公网部署继续冻结。
 - SQLSTATE 是错误语义，不是端到端恢复证明。真实 PostgreSQL kill/restart、DNS、网络分区、连接池耗尽、主从切换和多 Worker 惊群仍未执行；`40001`/`40P01` 当前有确定性包装测试，尚未由真实并发事务制造。
 - 除发布任务外，AI、对象存储和纯数据库 Job 仍共享粗粒度中断策略；下一步应以副作用契约和成本为依据声明每类 Job 能否快速接管，不能因为已有 SQLSTATE 就统一降低 300 秒租约。
