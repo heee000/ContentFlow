@@ -104,9 +104,54 @@ class StyleSkillTest(unittest.TestCase):
         self.assertEqual(installed["source"], "workspace")
         self.assertEqual(len(installed["manifest_sha256"]), 64)
 
+        second_manifest = {
+            **self.manifest(),
+            "slug": "calm-editor-second",
+            "name": "克制编辑二号",
+        }
+        second_response = self.client.post(
+            "/api/v1/style-skills",
+            headers=self.headers,
+            json={"manifest": second_manifest},
+        )
+        self.assertEqual(second_response.status_code, 201, second_response.text)
+
         listed = self.client.get("/api/v1/style-skills", headers=self.headers)
         self.assertEqual(listed.status_code, 200, listed.text)
-        self.assertGreaterEqual(len(listed.json()), len(BUILTIN_STYLE_SKILLS) + 1)
+        self.assertGreaterEqual(len(listed.json()), len(BUILTIN_STYLE_SKILLS) + 2)
+
+        first_page = self.client.get(
+            "/api/v1/style-skills",
+            headers=self.headers,
+            params={"limit": 1},
+        )
+        self.assertEqual(first_page.status_code, 200, first_page.text)
+        self.assertEqual(first_page.headers["x-contentflow-page-limit"], "1")
+        cursor = first_page.headers.get("x-contentflow-next-cursor")
+        self.assertIsNotNone(cursor)
+        self.assertEqual(
+            len([item for item in first_page.json() if item["source"] == "builtin"]),
+            len(BUILTIN_STYLE_SKILLS),
+        )
+        self.assertEqual(
+            len([item for item in first_page.json() if item["source"] == "workspace"]),
+            1,
+        )
+
+        second_page = self.client.get(
+            "/api/v1/style-skills",
+            headers=self.headers,
+            params={"limit": 1, "cursor": cursor},
+        )
+        self.assertEqual(second_page.status_code, 200, second_page.text)
+        self.assertEqual(
+            len([item for item in second_page.json() if item["source"] == "builtin"]),
+            0,
+        )
+        self.assertEqual(
+            len([item for item in second_page.json() if item["source"] == "workspace"]),
+            1,
+        )
 
         campaign = self.client.post(
             "/api/v1/campaigns",

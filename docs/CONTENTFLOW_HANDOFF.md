@@ -1807,3 +1807,21 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 4. `web/package-lock.json` 与首轮记录已经由提交 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 普通推送。只有包含后续 Prometheus 确定性修复的 CI 四个 Job 全成功后，才能把新 Run、PostgreSQL/MinIO 测试数量、覆盖率、Artifact 摘要和 SLSA/CycloneDX attestation 补写为最终证据。
 5. 修复提交 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 的 CI `33656868446` 已证明 fast-uri 修复有效：前端 install/lint/test/build/audit 与 SBOM 成功；但 Prometheus 单测随后暴露跨规则组求值顺序未声明。测试现应以 `group_eval_order` 固定 `contentflow-recording` 先于 `contentflow-alerts`，不得继续只增加 alert `eval_time`，也不得改生产阈值让 CI 变绿。本机 Docker 未运行，最终以固定 Prometheus digest 的新远程 CI 为准。
 6. 最终提交 `19eb1773f367362e8a288dfbbd59103f95a47bd5` 的 [ContentFlow CI #33657538096](https://github.com/heee000/ContentFlow/actions/runs/33657538096) 四个 Job 全部成功：固定 Prometheus digest 的配置/13 条规则/规则单测通过；PostgreSQL/pgvector 与 MinIO 后端为 `266 passed, 152 subtests passed`、覆盖率 82.05%；前端审计、Python 审计、可复现源码、SBOM、SLSA 与双 CycloneDX attestation 全部签收。Artifact `9857357210` 摘要为 `sha256:d0c52084bdbf96afaefaa80c9c28e08007c75201a337f2d642245b9109625122`。
+
+## 21.40 控制面有界历史与第二十八轮复审增量交接
+
+### 本轮实现
+
+1. `auth/workspaces`、`admin/members`、`channels`、`style-skills`、内容修订、发布证据/确认、审计以及 Prompt/Eval 历史全部改为默认 100、最大 200 的稳定 keyset 分页；所有查询只取 `limit + 1`。时间游标支持升/降序和连接结果，版本号/链序号使用严格序列游标，畸形或篡改输入返回 422。
+2. 新增 `admin/prompt-releases/history`、`admin/prompt-eval/suites` 和 `admin/prompt-eval/runs`。原管理摘要仍返回 active/staged/latest 等控制状态，嵌套历史固定最多 100 条，Web 用分页历史覆盖显示数组；旧客户端结构保持兼容。
+3. 风格 Skill 第一页返回有限内置项加一页工作区记录，后续游标页不重复内置项。成员/工作区连接查询的游标实体固定为 Membership，避免用展示对象字段生成错误游标。
+4. Alembic head 更新为 `8f6a1b2c3d4e`，增加 11 个控制面/历史复合索引；备份与恢复脚本同步 revision，public 表门槛保持 28。
+5. Web 的所有控制面集合、修订和发布证据均使用有界追页，达到 2000 条显式提示；不再存在直接 `api<T[]>` 的可增长集合读取。渠道分页是在第二次无界查询复扫中发现并补齐，不能从首轮清单遗漏。
+
+### 当前验证与接手边界
+
+- 相关测试 fixture 已显式禁用 dotenv 并声明自身 local/hash/mock 配置；最终不设置任何进程级覆盖的全量后端为 `259 passed, 8 skipped, 160 subtests passed`、分支覆盖率 81.27%。8 项跳过仅是本机未启动 PostgreSQL/MinIO。全仓 Ruff、锁文件、单 Alembic head、编译、PowerShell 语法、公网部署 fail-closed 校验、ESLint、Next.js/TypeScript 生产构建、Vinext 构建、2 项渲染测试和 moderate 依赖审计 0 漏洞均通过。最初的 BGE/S3/安全配置污染已保留在工程台账，没有读取或修改真实 `.env`。
+- 面向用户的可增长集合已经有界，但 2000 条后的专用历史浏览、服务端搜索/导出和虚拟列表仍未实现。发布证据清单哈希等内部全量一致性扫描仍需先增加业务数量/存储配额，再做容量测试，不能直接删掉完整性校验。
+- `contentflow-app.tsx` 仍约 5031 行，活动期仍有 8 路轻量轮询；领域 hooks/components、SSE/Inbox、Playwright 请求预算和断线恢复是下一批可独立交付的改进。
+- FORCE RLS 与数据库角色拆分继续等待用户明确的高影响迁移授权；不得偷偷实施。公网部署继续冻结；本轮没有调用平台接口、创建素材/草稿/发布或外部资源。
+- 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。阶段提交、普通推送和当前提交对应的远程 CI 仍待完成，不能用上一提交 CI 冒充。

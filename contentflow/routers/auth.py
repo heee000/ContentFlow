@@ -28,6 +28,7 @@ from ..entities import (
     Workspace,
     new_id,
 )
+from ..pagination import DEFAULT_PAGE_LIMIT, PageCursor, PageLimit, paginate
 from ..schemas import (
     LoginRequest,
     RegisterRequest,
@@ -687,21 +688,34 @@ def session_info(principal: CurrentPrincipal):
 
 
 @router.get("/workspaces", response_model=list[WorkspaceAccessResponse])
-def list_workspaces(principal: CurrentPrincipal, session: Db):
-    rows = session.execute(
-        select(Workspace, Membership.role)
-        .join(Membership, Membership.workspace_id == Workspace.id)
-        .where(Membership.user_id == principal.user_id)
-        .order_by(Membership.created_at)
-    ).all()
+def list_workspaces(
+    principal: CurrentPrincipal,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    rows = paginate(
+        session,
+        select(Membership, Workspace)
+        .join(Workspace, Workspace.id == Membership.workspace_id)
+        .where(Membership.user_id == principal.user_id),
+        timestamp_column=Membership.created_at,
+        id_column=Membership.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        ascending=True,
+        scalar=False,
+    )
     return [
         WorkspaceAccessResponse(
             id=workspace.id,
             name=workspace.name,
             slug=workspace.slug,
-            role=role,
+            role=membership.role,
         )
-        for workspace, role in rows
+        for membership, workspace in rows
     ]
 
 

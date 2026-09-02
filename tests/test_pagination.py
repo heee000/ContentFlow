@@ -12,7 +12,12 @@ from sqlalchemy import select
 from contentflow import db
 from contentflow.api import create_app
 from contentflow.entities import Campaign
-from contentflow.pagination import decode_cursor, encode_cursor
+from contentflow.pagination import (
+    decode_cursor,
+    decode_sequence_cursor,
+    encode_cursor,
+    encode_sequence_cursor,
+)
 from contentflow.settings import Settings
 
 
@@ -172,6 +177,18 @@ class PaginationTest(unittest.TestCase):
             decode_cursor(f"{cursor}x")
         self.assertEqual(context.exception.status_code, 422)
 
+        sequence_cursor = encode_sequence_cursor(42, "sequence-row")
+        sequence_position = decode_sequence_cursor(sequence_cursor)
+        self.assertEqual(sequence_position.sequence, 42)
+        self.assertEqual(sequence_position.row_id, "sequence-row")
+
+        with self.assertRaises(HTTPException) as sequence_context:
+            decode_sequence_cursor(f"{sequence_cursor}x")
+        self.assertEqual(sequence_context.exception.status_code, 422)
+
+        with self.assertRaises(HTTPException):
+            decode_sequence_cursor(encode_sequence_cursor(True, "sequence-row"))
+
     def test_all_operational_lists_expose_the_bounded_contract(self):
         paths = (
             "/api/v1/campaigns",
@@ -181,6 +198,14 @@ class PaginationTest(unittest.TestCase):
             "/api/v1/publishing/jobs",
             "/api/v1/knowledge/documents",
             "/api/v1/jobs",
+            "/api/v1/channels",
+            "/api/v1/auth/workspaces",
+            "/api/v1/admin/members",
+            "/api/v1/admin/audit-logs",
+            "/api/v1/style-skills",
+            "/api/v1/admin/prompt-releases/history",
+            "/api/v1/admin/prompt-eval/suites",
+            "/api/v1/admin/prompt-eval/runs",
         )
         for path in paths:
             with self.subTest(path=path):
@@ -195,3 +220,42 @@ class PaginationTest(unittest.TestCase):
                     "1",
                 )
                 self.assertIn("x-contentflow-sync-time", response.headers)
+
+    def test_audit_sequence_pages_are_stable(self):
+        for index in range(3):
+            self._create_campaign(f"审计游标活动 {index}")
+
+        first = self.client.get(
+            "/api/v1/admin/audit-logs",
+            params={"limit": 2},
+            headers=self.headers,
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        cursor = first.headers.get("x-contentflow-next-cursor")
+        self.assertIsNotNone(cursor)
+        first_items = first.json()
+        self.assertEqual(len(first_items), 2)
+
+        second = self.client.get(
+            "/api/v1/admin/audit-logs",
+            params={"limit": 2, "cursor": cursor},
+            headers=self.headers,
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+        second_items = second.json()
+        self.assertTrue(second_items)
+        self.assertFalse(
+            {item["id"] for item in first_items}
+            & {item["id"] for item in second_items}
+        )
+        combined_sequences = [
+            item["chain_sequence"] for item in [*first_items, *second_items]
+        ]
+        self.assertEqual(combined_sequences, sorted(combined_sequences, reverse=True))
+
+        invalid = self.client.get(
+            "/api/v1/admin/audit-logs",
+            params={"limit": 2, "cursor": f"{cursor}x"},
+            headers=self.headers,
+        )
+        self.assertEqual(invalid.status_code, 422, invalid.text)

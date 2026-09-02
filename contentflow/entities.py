@@ -68,6 +68,18 @@ class Membership(TimestampMixin, Base):
         UniqueConstraint(
             "workspace_id", "user_id", name="uq_membership_workspace_user"
         ),
+        Index(
+            "ix_memberships_workspace_created_page",
+            "workspace_id",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "ix_memberships_user_created_page",
+            "user_id",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -185,6 +197,12 @@ class PromptRelease(TimestampMixin, Base):
             "workspace_id",
             "status",
         ),
+        Index(
+            "ix_prompt_releases_workspace_number_page",
+            "workspace_id",
+            "release_number",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -237,6 +255,12 @@ class PromptEvalSuite(TimestampMixin, Base):
             "workspace_id",
             "status",
         ),
+        Index(
+            "ix_prompt_eval_suites_workspace_version_page",
+            "workspace_id",
+            "version_number",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -271,6 +295,12 @@ class PromptEvalRun(TimestampMixin, Base):
             "ix_prompt_eval_runs_workspace_created",
             "workspace_id",
             "created_at",
+        ),
+        Index(
+            "ix_prompt_eval_runs_workspace_created_page",
+            "workspace_id",
+            "created_at",
+            "id",
         ),
         Index(
             "ix_prompt_eval_runs_release_suite",
@@ -342,6 +372,12 @@ class StyleSkill(TimestampMixin, Base):
             name="status",
         ),
         Index("ix_style_skills_workspace_status", "workspace_id", "status"),
+        Index(
+            "ix_style_skills_workspace_created_page",
+            "workspace_id",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -493,6 +529,13 @@ class ContentRevision(Base):
             "version",
             name="uq_content_revision_version",
         ),
+        Index(
+            "ix_content_revisions_item_version_page",
+            "workspace_id",
+            "content_item_id",
+            "version",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -556,6 +599,12 @@ class ChannelConnection(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint(
             "workspace_id", "platform", "display_name", name="uq_channel_display_name"
+        ),
+        Index(
+            "ix_channel_connections_workspace_created_page",
+            "workspace_id",
+            "created_at",
+            "id",
         ),
     )
 
@@ -716,6 +765,13 @@ class PublishEvidence(Base):
             "script_attempt_id",
             "created_at",
         ),
+        Index(
+            "ix_publish_evidence_attempt_created_page",
+            "publish_job_id",
+            "script_attempt_id",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -764,6 +820,13 @@ class PublishConfirmation(Base):
             "publish_job_id",
             "script_attempt_id",
             "created_at",
+        ),
+        Index(
+            "ix_publish_confirmation_attempt_created_page",
+            "publish_job_id",
+            "script_attempt_id",
+            "created_at",
+            "id",
         ),
     )
 
@@ -846,6 +909,12 @@ class AuditLog(Base):
         CheckConstraint(
             "length(previous_hash) = 64 AND length(entry_hash) = 64",
             name="hash_lengths",
+        ),
+        Index(
+            "ix_audit_logs_workspace_sequence_page",
+            "workspace_id",
+            "chain_sequence",
+            "id",
         ),
     )
 

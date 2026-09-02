@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,13 @@ from ..entities import (
     Workspace,
 )
 from ..job_queue import enqueue_job
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    paginate,
+    paginate_sequence,
+)
 from ..prompt_eval import (
     EvalIntegrityError,
     calculate_suite_hash,
@@ -124,13 +131,26 @@ def ensure_another_admin(
 
 
 @router.get("/members", response_model=list[MemberResponse])
-def list_members(principal: Admin, session: Db):
-    rows = session.execute(
+def list_members(
+    principal: Admin,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    rows = paginate(
+        session,
         select(Membership, User)
         .join(User, User.id == Membership.user_id)
-        .where(Membership.workspace_id == principal.workspace_id)
-        .order_by(Membership.created_at)
-    ).all()
+        .where(Membership.workspace_id == principal.workspace_id),
+        timestamp_column=Membership.created_at,
+        id_column=Membership.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        ascending=True,
+        scalar=False,
+    )
     return [member_response(membership, user) for membership, user in rows]
 
 
@@ -395,6 +415,7 @@ def list_prompt_releases(principal: Admin, session: Db, settings: AppSettings):
             select(PromptRelease)
             .where(PromptRelease.workspace_id == principal.workspace_id)
             .order_by(PromptRelease.release_number.desc())
+            .limit(DEFAULT_PAGE_LIMIT)
         )
     )
     try:
@@ -429,6 +450,31 @@ def list_prompt_releases(principal: Admin, session: Db, settings: AppSettings):
         generation_block_reason=generation_block_reason,
         releases=[prompt_release_response(release) for release in releases],
     )
+
+
+@router.get(
+    "/prompt-releases/history",
+    response_model=list[PromptReleaseResponse],
+)
+def list_prompt_release_history(
+    principal: Admin,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    releases = paginate_sequence(
+        session,
+        select(PromptRelease).where(
+            PromptRelease.workspace_id == principal.workspace_id
+        ),
+        sequence_column=PromptRelease.release_number,
+        id_column=PromptRelease.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
+    return [prompt_release_response(release) for release in releases]
 
 
 @router.post(
@@ -667,6 +713,7 @@ def list_prompt_eval(principal: Admin, session: Db):
             select(PromptEvalSuite)
             .where(PromptEvalSuite.workspace_id == principal.workspace_id)
             .order_by(PromptEvalSuite.version_number.desc())
+            .limit(DEFAULT_PAGE_LIMIT)
         )
     )
     runs = list(
@@ -683,6 +730,56 @@ def list_prompt_eval(principal: Admin, session: Db):
         suites=[prompt_eval_suite_response(suite) for suite in suites],
         runs=[prompt_eval_run_response(run) for run in runs],
     )
+
+
+@router.get(
+    "/prompt-eval/suites",
+    response_model=list[PromptEvalSuiteResponse],
+)
+def list_prompt_eval_suites(
+    principal: Admin,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    suites = paginate_sequence(
+        session,
+        select(PromptEvalSuite).where(
+            PromptEvalSuite.workspace_id == principal.workspace_id
+        ),
+        sequence_column=PromptEvalSuite.version_number,
+        id_column=PromptEvalSuite.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
+    return [prompt_eval_suite_response(suite) for suite in suites]
+
+
+@router.get(
+    "/prompt-eval/runs",
+    response_model=list[PromptEvalRunResponse],
+)
+def list_prompt_eval_runs(
+    principal: Admin,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    runs = paginate(
+        session,
+        select(PromptEvalRun).where(
+            PromptEvalRun.workspace_id == principal.workspace_id
+        ),
+        timestamp_column=PromptEvalRun.created_at,
+        id_column=PromptEvalRun.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
+    return [prompt_eval_run_response(run) for run in runs]
 
 
 @router.post(
@@ -924,9 +1021,11 @@ def evaluate_prompt_release(
 def list_audit_logs(
     principal: Admin,
     session: Db,
+    response: Response,
     action: str | None = None,
     entity_type: str | None = None,
-    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
 ):
     query = (
         select(AuditLog, User.display_name)
@@ -937,9 +1036,16 @@ def list_audit_logs(
         query = query.where(AuditLog.action == action)
     if entity_type:
         query = query.where(AuditLog.entity_type == entity_type)
-    rows = session.execute(
-        query.order_by(AuditLog.chain_sequence.desc()).limit(limit)
-    ).all()
+    rows = paginate_sequence(
+        session,
+        query,
+        sequence_column=AuditLog.chain_sequence,
+        id_column=AuditLog.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        scalar=False,
+    )
     return [
         AuditLogResponse(
             id=audit.id,

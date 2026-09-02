@@ -42,10 +42,16 @@ class WorkerIntegrationTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         self.settings = Settings(
+            _env_file=None,
+            environment="development",
             database_url=f"sqlite:///{(root / 'worker.db').as_posix()}",
             secret_key="worker-test-secret",
             local_storage_dir=root / "storage",
+            storage_backend="local",
             allow_registration=True,
+            require_governed_prompts=False,
+            metrics_enabled=False,
+            embedding_provider="hash",
             text_provider="mock",
             image_provider="mock",
             video_provider="mock",
@@ -861,6 +867,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(revisions.status_code, 200, revisions.text)
+        self.assertEqual(revisions.headers["x-contentflow-page-limit"], "100")
         self.assertEqual(len(revisions.json()), 1)
         self.assertEqual(revisions.json()[0]["version"], 1)
         self.assertEqual(

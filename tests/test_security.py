@@ -34,7 +34,7 @@ def production_settings(**overrides) -> Settings:
         "metrics_bearer_token": "m" * 32,
     }
     values.update(overrides)
-    return Settings(**values)
+    return Settings(_env_file=None, **values)
 
 
 class SecurityTest(unittest.TestCase):

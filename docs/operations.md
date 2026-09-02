@@ -152,14 +152,14 @@ python -m alembic history
 .\scripts\verify_backup.ps1 -BackupPath <path> -ExpectedAlembicRevision <revision> -MinimumPublicTableCount <count>
 ```
 
-正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `7e5f9a0b1c2d`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
+正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `8f6a1b2c3d4e`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
 
 `verify_backup.ps1` 默认校验 dump 哈希、至少 28 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
 
 真正灾难恢复时仍必须恢复到新的 PostgreSQL 数据库和空 bucket，完成应用验收后再切换流量。不要未经演练直接对当前 `contentflow` 库执行 `pg_restore --clean`。
 
-- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `7e5f9a0b1c2d` 包含审计哈希链和 7 个运营列表组合索引；持久 PostgreSQL 迁移与 28 表联合恢复需由当前 CI/恢复演练重新签收；旧证据不等于 PITR 或异地灾备。
-- 从大数据量旧版本升级到 `7e5f9a0b1c2d` 会创建普通 PostgreSQL 索引。当前自动迁移适合个人测试/低数据量环境；企业生产必须先在副本测量索引空间和锁等待，并在维护窗口由独立迁移任务执行，不能依赖多副本 API 同时启动迁移。
+- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `8f6a1b2c3d4e` 包含审计哈希链、7 个运营列表和 11 个控制面/历史列表组合索引；持久 PostgreSQL 迁移与 28 表联合恢复需由当前 CI/恢复演练重新签收；旧证据不等于 PITR 或异地灾备。
+- 从大数据量旧版本升级到 `8f6a1b2c3d4e` 会创建普通 PostgreSQL 索引。当前自动迁移适合个人测试/低数据量环境；企业生产必须先在副本测量索引空间和锁等待，并在维护窗口由独立迁移任务执行，不能依赖多副本 API 同时启动迁移。
 - 运营列表调用方应保存 `X-ContentFlow-Next-Cursor` 原样继续读取，不得解析或构造游标。增量同步使用上次响应的 `X-ContentFlow-Sync-Time` 并保留短重叠窗口；收到 422 游标错误应丢弃游标并从第一页重载。`updated_after` 必须包含时区。
 - MinIO/S3 生产 bucket 应启用版本控制、生命周期、服务端加密和不可变保留策略。
 - `CONTENTFLOW_SECRET_KEY`、当前/历史凭据加密密钥必须单独备份到集中密钥管理系统；丢失后访问令牌和已加密平台凭据无法恢复。

@@ -33,11 +33,19 @@ class PromptGovernanceTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         self.settings = Settings(
+            _env_file=None,
+            environment="development",
             database_url=f"sqlite:///{(root / 'prompt-governance.db').as_posix()}",
             secret_key="prompt-governance-test-secret",
             local_storage_dir=root / "storage",
+            storage_backend="local",
             allow_registration=True,
+            require_governed_prompts=False,
+            metrics_enabled=False,
+            embedding_provider="hash",
             text_provider="mock",
+            image_provider="mock",
+            video_provider="mock",
         )
         self.client = TestClient(create_app(self.settings))
         self.client.__enter__()

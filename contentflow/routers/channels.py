@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,7 @@ from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
 from ..entities import ChannelConnection, Job
 from ..job_queue import enqueue_job
+from ..pagination import DEFAULT_PAGE_LIMIT, PageCursor, PageLimit, paginate
 from ..schemas import ChannelCreate, ChannelResponse, JobResponse
 from ..security import encrypt_credentials
 
@@ -70,13 +71,23 @@ def validate_channel_payload(payload: ChannelCreate) -> str:
 
 
 @router.get("", response_model=list[ChannelResponse])
-def list_channels(principal: CurrentPrincipal, session: Db):
-    return list(
-        session.scalars(
-            select(ChannelConnection)
-            .where(ChannelConnection.workspace_id == principal.workspace_id)
-            .order_by(ChannelConnection.created_at.desc())
-        )
+def list_channels(
+    principal: CurrentPrincipal,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    return paginate(
+        session,
+        select(ChannelConnection).where(
+            ChannelConnection.workspace_id == principal.workspace_id
+        ),
+        timestamp_column=ChannelConnection.created_at,
+        id_column=ChannelConnection.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
     )
 
 

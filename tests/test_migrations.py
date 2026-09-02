@@ -57,6 +57,96 @@ class MigrationTest(unittest.TestCase):
                         indexes[index_name]["column_names"],
                         ["workspace_id", "updated_at", "id"],
                     )
+                control_plane_pagination_indexes = {
+                    "memberships": {
+                        "ix_memberships_workspace_created_page": [
+                            "workspace_id",
+                            "created_at",
+                            "id",
+                        ],
+                        "ix_memberships_user_created_page": [
+                            "user_id",
+                            "created_at",
+                            "id",
+                        ],
+                    },
+                    "style_skills": {
+                        "ix_style_skills_workspace_created_page": [
+                            "workspace_id",
+                            "created_at",
+                            "id",
+                        ],
+                    },
+                    "channel_connections": {
+                        "ix_channel_connections_workspace_created_page": [
+                            "workspace_id",
+                            "created_at",
+                            "id",
+                        ],
+                    },
+                    "content_revisions": {
+                        "ix_content_revisions_item_version_page": [
+                            "workspace_id",
+                            "content_item_id",
+                            "version",
+                            "id",
+                        ],
+                    },
+                    "publish_evidence_items": {
+                        "ix_publish_evidence_attempt_created_page": [
+                            "publish_job_id",
+                            "script_attempt_id",
+                            "created_at",
+                            "id",
+                        ],
+                    },
+                    "publish_confirmations": {
+                        "ix_publish_confirmation_attempt_created_page": [
+                            "publish_job_id",
+                            "script_attempt_id",
+                            "created_at",
+                            "id",
+                        ],
+                    },
+                    "prompt_releases": {
+                        "ix_prompt_releases_workspace_number_page": [
+                            "workspace_id",
+                            "release_number",
+                            "id",
+                        ],
+                    },
+                    "prompt_eval_suites": {
+                        "ix_prompt_eval_suites_workspace_version_page": [
+                            "workspace_id",
+                            "version_number",
+                            "id",
+                        ],
+                    },
+                    "prompt_eval_runs": {
+                        "ix_prompt_eval_runs_workspace_created_page": [
+                            "workspace_id",
+                            "created_at",
+                            "id",
+                        ],
+                    },
+                    "audit_logs": {
+                        "ix_audit_logs_workspace_sequence_page": [
+                            "workspace_id",
+                            "chain_sequence",
+                            "id",
+                        ],
+                    },
+                }
+                for (
+                    table_name,
+                    expected_indexes,
+                ) in control_plane_pagination_indexes.items():
+                    actual_indexes = {
+                        item["name"]: item["column_names"]
+                        for item in inspect(engine).get_indexes(table_name)
+                    }
+                    for index_name, columns in expected_indexes.items():
+                        self.assertEqual(actual_indexes[index_name], columns)
                 self.assertIn("worker_nodes", tables)
                 self.assertIn("auth_sessions", tables)
                 self.assertIn("auth_refresh_token_history", tables)

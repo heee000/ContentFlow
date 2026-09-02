@@ -17,6 +17,7 @@ from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
 from ..entities import PublishConfirmation, PublishEvidence, PublishJob
 from ..object_storage import build_object_storage
+from ..pagination import DEFAULT_PAGE_LIMIT, PageCursor, PageLimit, paginate
 from ..publish_evidence import (
     PublishEvidenceError,
     evidence_manifest_sha256,
@@ -109,6 +110,9 @@ def list_publish_evidence(
     publish_job_id: str,
     principal: CurrentPrincipal,
     session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
 ):
     job = _publish_job(
         session,
@@ -116,10 +120,19 @@ def list_publish_evidence(
         workspace_id=principal.workspace_id,
     )
     script_attempt_id, _, _ = _script_context(job)
-    return _current_evidence(
+    return paginate(
         session,
-        job=job,
-        script_attempt_id=script_attempt_id,
+        select(PublishEvidence).where(
+            PublishEvidence.workspace_id == principal.workspace_id,
+            PublishEvidence.publish_job_id == job.id,
+            PublishEvidence.script_attempt_id == script_attempt_id,
+        ),
+        timestamp_column=PublishEvidence.created_at,
+        id_column=PublishEvidence.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        ascending=True,
     )
 
 
@@ -319,6 +332,9 @@ def list_publish_confirmations(
     publish_job_id: str,
     principal: CurrentPrincipal,
     session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
 ):
     job = _publish_job(
         session,
@@ -326,16 +342,19 @@ def list_publish_confirmations(
         workspace_id=principal.workspace_id,
     )
     script_attempt_id, _, _ = _script_context(job)
-    return list(
-        session.scalars(
-            select(PublishConfirmation)
-            .where(
-                PublishConfirmation.workspace_id == principal.workspace_id,
-                PublishConfirmation.publish_job_id == job.id,
-                PublishConfirmation.script_attempt_id == script_attempt_id,
-            )
-            .order_by(PublishConfirmation.created_at, PublishConfirmation.id)
-        )
+    return paginate(
+        session,
+        select(PublishConfirmation).where(
+            PublishConfirmation.workspace_id == principal.workspace_id,
+            PublishConfirmation.publish_job_id == job.id,
+            PublishConfirmation.script_attempt_id == script_attempt_id,
+        ),
+        timestamp_column=PublishConfirmation.created_at,
+        id_column=PublishConfirmation.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        ascending=True,
     )
 
 

@@ -18,6 +18,7 @@ from ..pagination import (
     PageLimit,
     UpdatedAfter,
     paginate,
+    paginate_sequence,
 )
 from ..schemas import (
     ContentResponse,
@@ -117,17 +118,22 @@ def list_content_revisions(
     content_id: str,
     principal: CurrentPrincipal,
     session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
 ):
     get_content_or_404(session, principal.workspace_id, content_id)
-    return list(
-        session.scalars(
-            select(ContentRevision)
-            .where(
-                ContentRevision.content_item_id == content_id,
-                ContentRevision.workspace_id == principal.workspace_id,
-            )
-            .order_by(ContentRevision.version.desc())
-        )
+    return paginate_sequence(
+        session,
+        select(ContentRevision).where(
+            ContentRevision.content_item_id == content_id,
+            ContentRevision.workspace_id == principal.workspace_id,
+        ),
+        sequence_column=ContentRevision.version,
+        id_column=ContentRevision.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
     )
 
 

@@ -1119,29 +1119,32 @@ export function ContentFlowApp() {
         dashboard,
         campaignPage,
         runPage,
-        styleSkills,
+        stylePage,
         contentPage,
         assetPage,
         mediaCapabilities,
-        channels,
+        channelPage,
         publishPage,
         knowledgePage,
         jobPage,
         metrics,
-        workspaces,
-        members,
-        auditLogs,
-        promptGovernance,
-        promptEval,
+        workspacePage,
+        memberPage,
+        auditPage,
+        promptGovernanceControl,
+        promptReleasePage,
+        promptEvalControl,
+        promptEvalSuitePage,
+        promptEvalRunPage,
       ] = await Promise.all([
         api<DashboardSummary>("/dashboard/summary"),
         apiAllPages<Campaign>("/campaigns"),
         apiAllPages<WorkflowRun>("/runs"),
-        api<StyleSkill[]>("/style-skills"),
+        apiAllPages<StyleSkill>("/style-skills"),
         apiAllPages<Content>("/contents"),
         apiAllPages<Asset>("/assets"),
         api<MediaCapabilities>("/assets/capabilities"),
-        api<Channel[]>("/channels"),
+        apiAllPages<Channel>("/channels"),
         apiAllPages<PublishJob>("/publishing/jobs"),
         apiAllPages<KnowledgeDocument>("/knowledge/documents"),
         apiAllPages<QueueJob>("/jobs"),
@@ -1150,47 +1153,72 @@ export function ContentFlowApp() {
             ? `/metrics/summary?campaign_id=${encodeURIComponent(campaignFilter)}`
             : "/metrics/summary",
         ),
-        api<WorkspaceAccess[]>("/auth/workspaces"),
+        apiAllPages<WorkspaceAccess>("/auth/workspaces"),
         session?.role === "admin"
-          ? api<Member[]>("/admin/members")
-          : Promise.resolve([]),
+          ? apiAllPages<Member>("/admin/members")
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
         session?.role === "admin"
-          ? api<AuditLog[]>("/admin/audit-logs")
-          : Promise.resolve([]),
+          ? apiAllPages<AuditLog>("/admin/audit-logs")
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
         session?.role === "admin"
           ? api<PromptGovernance>("/admin/prompt-releases")
           : Promise.resolve(null),
         session?.role === "admin"
+          ? apiAllPages<PromptRelease>("/admin/prompt-releases/history")
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
+        session?.role === "admin"
           ? api<PromptEvalGovernance>("/admin/prompt-eval")
           : Promise.resolve(null),
+        session?.role === "admin"
+          ? apiAllPages<PromptEvalSuite>("/admin/prompt-eval/suites")
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
+        session?.role === "admin"
+          ? apiAllPages<PromptEvalRun>("/admin/prompt-eval/runs")
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
       ]);
       const limitedCollections = [
         ["活动", campaignPage.truncated],
         ["运行记录", runPage.truncated],
+        ["风格 Skill", stylePage.truncated],
         ["内容", contentPage.truncated],
         ["素材", assetPage.truncated],
         ["发布任务", publishPage.truncated],
         ["知识文档", knowledgePage.truncated],
         ["队列任务", jobPage.truncated],
+        ["渠道", channelPage.truncated],
+        ["工作区", workspacePage.truncated],
+        ["成员", memberPage.truncated],
+        ["审计记录", auditPage.truncated],
+        ["Prompt 版本", promptReleasePage.truncated],
+        ["Prompt Eval 套件", promptEvalSuitePage.truncated],
+        ["Prompt Eval 运行", promptEvalRunPage.truncated],
       ].filter(([, truncated]) => truncated).map(([label]) => label);
       setData({
         dashboard,
         campaigns: campaignPage.items,
         runs: runPage.items,
-        styleSkills,
+        styleSkills: stylePage.items,
         contents: contentPage.items,
         assets: assetPage.items,
         mediaCapabilities,
-        channels,
+        channels: channelPage.items,
         publishes: publishPage.items,
         knowledge: knowledgePage.items,
         jobs: jobPage.items,
         metrics,
-        workspaces,
-        members,
-        auditLogs,
-        promptGovernance,
-        promptEval,
+        workspaces: workspacePage.items,
+        members: memberPage.items,
+        auditLogs: auditPage.items,
+        promptGovernance: promptGovernanceControl
+          ? { ...promptGovernanceControl, releases: promptReleasePage.items }
+          : null,
+        promptEval: promptEvalControl
+          ? {
+              ...promptEvalControl,
+              suites: promptEvalSuitePage.items,
+              runs: promptEvalRunPage.items,
+            }
+          : null,
       });
       lastOperationalRefresh.current = safeRefreshBoundary([
         campaignPage.syncTime,
@@ -1202,7 +1230,7 @@ export function ContentFlowApp() {
       ]);
       setPageWarning(
         limitedCollections.length
-          ? `${limitedCollections.join("、")}数据量较大，当前仅显示最新 2000 条。`
+          ? `${limitedCollections.join("、")}已达到安全加载上限 2000 条，请使用筛选或历史视图继续定位。`
           : "",
       );
       setError("");
@@ -2468,13 +2496,16 @@ function ReviewView({
   useEffect(() => {
     if (!selected?.id) return;
     let active = true;
-    api<ContentRevision[]>(`/contents/${selected.id}/revisions`)
-      .then((items) => {
+    apiAllPages<ContentRevision>(`/contents/${selected.id}/revisions`)
+      .then((page) => {
         if (active) {
           setRevisionState({
             key: `${selected.id}:${selected.version}`,
-            items,
+            items: page.items,
           });
+          if (page.truncated) {
+            setError("内容修订已达到安全加载上限 2000 条，请联系管理员导出完整历史。");
+          }
         }
       })
       .catch((caught) => {
@@ -3436,13 +3467,16 @@ function PublishingView({
     setEvidenceBusy(true);
     setError("");
     try {
-      const [items, reviews] = await Promise.all([
-        api<PublishEvidence[]>(`/publishing/jobs/${job.id}/evidence`),
-        api<PublishConfirmation[]>(`/publishing/jobs/${job.id}/confirmations`),
+      const [evidencePage, confirmationPage] = await Promise.all([
+        apiAllPages<PublishEvidence>(`/publishing/jobs/${job.id}/evidence`),
+        apiAllPages<PublishConfirmation>(`/publishing/jobs/${job.id}/confirmations`),
       ]);
       setEvidenceJobId(job.id);
-      setEvidence(items);
-      setConfirmations(reviews);
+      setEvidence(evidencePage.items);
+      setConfirmations(confirmationPage.items);
+      if (evidencePage.truncated || confirmationPage.truncated) {
+        setError("发布证据历史已达到安全加载上限 2000 条，请联系管理员导出完整记录。");
+      }
     } catch (caught) {
       setError(messageOf(caught));
     } finally {

@@ -35,10 +35,16 @@ class ScriptPublishFlowTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         self.settings = Settings(
+            _env_file=None,
+            environment="development",
             database_url=f"sqlite:///{(root / 'script-publish.db').as_posix()}",
             secret_key="script-publish-test-secret",
             local_storage_dir=root / "storage",
+            storage_backend="local",
             allow_registration=True,
+            require_governed_prompts=False,
+            metrics_enabled=False,
+            embedding_provider="hash",
             text_provider="mock",
             image_provider="mock",
             video_provider="mock",
@@ -287,6 +293,17 @@ class ScriptPublishFlowTest(unittest.TestCase):
         self.assertEqual(evidence.status_code, 201, evidence.text)
         evidence_payload = evidence.json()
         self.assertEqual(evidence_payload["mime_type"], "image/png")
+        evidence_list = self.client.get(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=self.headers,
+            params={"limit": 1},
+        )
+        self.assertEqual(evidence_list.status_code, 200, evidence_list.text)
+        self.assertEqual(evidence_list.headers["x-contentflow-page-limit"], "1")
+        self.assertEqual(
+            [item["id"] for item in evidence_list.json()],
+            [evidence_payload["id"]],
+        )
         evidence_download = self.client.get(
             (
                 f"/api/v1/publishing/jobs/{scheduled['id']}/evidence/"
@@ -633,6 +650,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(confirmations.status_code, 200, confirmations.text)
+        self.assertEqual(confirmations.headers["x-contentflow-page-limit"], "100")
         confirmation_items = confirmations.json()
         self.assertEqual(len(confirmation_items), 2)
         self.assertEqual(

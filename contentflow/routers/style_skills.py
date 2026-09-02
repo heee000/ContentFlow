@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -11,6 +11,7 @@ from ..audit import record_audit
 from ..db import get_db
 from ..dependencies import CurrentPrincipal, Principal, require_role
 from ..entities import StyleSkill
+from ..pagination import DEFAULT_PAGE_LIMIT, PageCursor, PageLimit, paginate
 from ..schemas import StyleSkillInstall, StyleSkillResponse, StyleSkillStatusUpdate
 from ..style_skills import (
     builtin_style_responses,
@@ -37,15 +38,27 @@ def _response(skill: StyleSkill) -> dict:
 
 
 @router.get("", response_model=list[StyleSkillResponse])
-def list_style_skills(principal: CurrentPrincipal, session: Db):
-    installed = list(
-        session.scalars(
-            select(StyleSkill)
-            .where(StyleSkill.workspace_id == principal.workspace_id)
-            .order_by(StyleSkill.name, StyleSkill.version)
-        )
+def list_style_skills(
+    principal: CurrentPrincipal,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    installed = paginate(
+        session,
+        select(StyleSkill).where(
+            StyleSkill.workspace_id == principal.workspace_id
+        ),
+        timestamp_column=StyleSkill.created_at,
+        id_column=StyleSkill.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        ascending=True,
     )
-    return [*builtin_style_responses(), *[_response(skill) for skill in installed]]
+    builtin = builtin_style_responses() if cursor is None else []
+    return [*builtin, *[_response(skill) for skill in installed]]
 
 
 @router.post("", response_model=StyleSkillResponse, status_code=status.HTTP_201_CREATED)

@@ -22,10 +22,18 @@ class ObservabilityTest(unittest.TestCase):
         root = Path(self.temp_dir.name)
         self.metrics_token = "metrics-test-token-" + "m" * 32
         self.settings = Settings(
+            _env_file=None,
+            environment="development",
             database_url=f"sqlite:///{(root / 'metrics.db').as_posix()}",
             secret_key="metrics-test-secret",
             local_storage_dir=root / "storage",
+            storage_backend="local",
             allow_registration=True,
+            require_governed_prompts=False,
+            embedding_provider="hash",
+            text_provider="mock",
+            image_provider="mock",
+            video_provider="mock",
             metrics_enabled=True,
             metrics_bearer_token=self.metrics_token,
         )
@@ -164,9 +172,17 @@ class DisabledObservabilityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings = Settings(
+                _env_file=None,
+                environment="development",
                 database_url=f"sqlite:///{(root / 'disabled-metrics.db').as_posix()}",
                 secret_key="disabled-metrics-test-secret",
                 local_storage_dir=root / "storage",
+                storage_backend="local",
+                require_governed_prompts=False,
+                embedding_provider="hash",
+                text_provider="mock",
+                image_provider="mock",
+                video_provider="mock",
                 metrics_enabled=False,
             )
             with TestClient(create_app(settings)) as client:
