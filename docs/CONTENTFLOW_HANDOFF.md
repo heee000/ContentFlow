@@ -1908,7 +1908,8 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 
 ### 当前验证与边界
 
-- Ruff 全仓通过；Worker/队列/设置定向为 `60 passed, 45 subtests passed`，本机全量为 `287 passed, 12 skipped, 173 subtests passed`、分支覆盖率 80.76%。12 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例。锁文件、公网部署 fail-closed、`pip check`、Python/npm 漏洞审计、备份脚本语法、前端 lint、Vinext/Sites 构建、2 项 SSR 测试和 Next.js 生产构建均通过；实现提交与远程 CI 证据将在本节后续更新。
+- Ruff 全仓通过；Worker/队列/设置定向为 `60 passed, 45 subtests passed`，本机全量为 `287 passed, 12 skipped, 173 subtests passed`、分支覆盖率 80.76%。12 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例。锁文件、公网部署 fail-closed、`pip check`、Python/npm 漏洞审计、备份脚本语法、前端 lint、Vinext/Sites 构建、2 项 SSR 测试和 Next.js 生产构建均通过。
+- 实现提交 `5022dfb9581893576eab140f52ada72c073b7086` 已以 John Wang 身份普通推送；[ContentFlow CI #33685818900](https://github.com/heee000/ContentFlow/actions/runs/33685818900) 四个 Job 全绿，真实 PostgreSQL/pgvector 与 MinIO 为 `299 passed, 173 subtests passed`、分支覆盖率 81.90%。Prometheus、前后端依赖审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 均通过；Artifact `9868068572` 摘要为 `sha256:daf540d85f7c8798115add306de02c973b971526bf2f18c82526c197523980b1`。
 - 该改动只减少日级存储计划的到期查询，不改变普通 Job 领取频率，也不改变发布自动对账的即时建任务路径。最多会给存储核对增加一个检查间隔的发现延迟；生产可结合 Worker 副本数与工作区规模调整，但不得低于 5 秒。
 - 公网部署继续冻结；本轮没有读取 `.env`、账号资料或受保护知识文件，没有调用平台、创建草稿/素材、发布或创建云资源。
 - 下一轮继续审查 Worker 维护查询、数据生命周期、前端历史读取和真实运维证据；FORCE RLS 与数据库角色拆分仍等待单独高影响授权。

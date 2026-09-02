@@ -1774,7 +1774,7 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 | 分布式正确性 | PostgreSQL 锁和幂等键防止重复任务 | 数据库保护不变，进程节流只用于降载 | 目标规模故障注入仍未签收 |
 | 副作用 | 自动任务固定只读报告 | 保持 `delete_orphans=false` | 数据生命周期和审批删除仍未完成 |
 
-本机完整回归为 `287 passed, 12 skipped, 173 subtests passed`、分支覆盖率 80.76%；Ruff、锁文件、部署失败关闭、依赖/漏洞审计、备份脚本语法以及前端 lint、双构建和 SSR 测试均通过。12 项跳过仍是本机没有启动的 PostgreSQL/MinIO 外部服务场景，远程真实后端结果必须绑定本阶段提交后才能记为签收。
+本机完整回归为 `287 passed, 12 skipped, 173 subtests passed`、分支覆盖率 80.76%；Ruff、锁文件、部署失败关闭、依赖/漏洞审计、备份脚本语法以及前端 lint、双构建和 SSR 测试均通过。12 项跳过仍是本机没有启动的 PostgreSQL/MinIO 外部服务场景。[CI #33685818900](https://github.com/heee000/ContentFlow/actions/runs/33685818900) 已在实现提交 `5022dfb9581893576eab140f52ada72c073b7086` 上用真实 PostgreSQL/pgvector 与 MinIO 完成 `299 passed, 173 subtests passed`、分支覆盖率 81.90%，四个 Job、Prometheus、供应链审计、可复现制品及签名证明全部通过；Artifact `9868068572` 摘要为 `sha256:daf540d85f7c8798115add306de02c973b971526bf2f18c82526c197523980b1`。
 
 ### 42.3 持续审查队列
 

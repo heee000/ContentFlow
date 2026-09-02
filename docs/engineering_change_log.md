@@ -808,9 +808,10 @@
 
 ### CF-20260903-19：日级存储计划被秒级队列轮询重复查询
 
-- 状态：独立检查节流、配置边界、Worker 行为回归、运维说明与完整本地门禁已实现；远程 CI 待本阶段提交签收。
+- 状态：独立检查节流、配置边界、Worker 行为回归、运维说明、完整本地门禁与远程 CI 均已签收。
 - 问题与影响：`Worker.run_once()` 原先在领取每个普通任务前无条件查询到期工作区。默认队列轮询为 1 秒，因此每个空闲 Worker 每秒执行一次面向 24 小时周期任务的数据库查询；副本越多，固定空闲查询开销越大。
 - 根因：工作区核对周期、每轮工作区上限已经独立配置，但没有定义“多久检查一次是否到期”的进程内调度频率，队列活跃度被错误地当作日级计划时钟。
 - 解决方案：新增 `CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_POLL_SECONDS`，默认 60 秒且限制在 5 至 3600 秒。每个 Worker 启动后立即检查一次，随后使用不受系统时钟回拨影响的单调时钟设置下一次检查；截止时间在查询前推进，连续队列轮询不会重复扫描。进程内节流只负责降低负载，跨 Worker 正确性仍由 PostgreSQL `SKIP LOCKED` 与固定幂等入口保证。
 - 验证边界：连续两次空闲 `run_once()` 只允许一次到期扫描；原有 Worker 到期核对端到端用例仍要求任务创建并以 report-only 模式成功执行。节流最多增加配置值对应的到期发现延迟，不改变 24 小时工作区周期，也不自动删除孤儿。
 - 本地证据：Ruff 全仓通过；Worker/队列/设置定向为 `60 passed, 45 subtests passed`；全量为 `287 passed, 12 skipped, 173 subtests passed`、分支覆盖率 80.76%，12 项均为本机未启动的 PostgreSQL/MinIO 外部服务场景。`uv lock --check`、公网部署 fail-closed 校验、`pip check`、Python 漏洞审计和两份 PowerShell 备份脚本语法通过；前端 ESLint、Vinext/Sites 构建、2 项 SSR 渲染测试、Next.js 生产构建与 npm 中等级别漏洞审计通过。
+- 远程证据：实现提交 `5022dfb9581893576eab140f52ada72c073b7086` 已以 John Wang 身份普通推送；[ContentFlow CI #33685818900](https://github.com/heee000/ContentFlow/actions/runs/33685818900) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `299 passed, 173 subtests passed`、分支覆盖率 81.90%；Prometheus、前后端依赖审计、双前端构建、可复现源码/SBOM、SLSA 来源证明与双 CycloneDX attestations 均通过。Artifact `9868068572` 摘要为 `sha256:daf540d85f7c8798115add306de02c973b971526bf2f18c82526c197523980b1`。
