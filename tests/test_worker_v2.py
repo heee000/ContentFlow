@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 
 from contentflow import db
 from contentflow.api import create_app
@@ -193,6 +194,125 @@ class WorkerIntegrationTest(unittest.TestCase):
                 "channel_id": channel.id,
                 "content_id": content.id,
             }
+
+    def test_database_conflict_after_dispatch_started_requires_reconciliation(self):
+        fixture = self._create_publish_fixture(status="publishing")
+        with db.SessionLocal() as session:
+            queue_job = Job(
+                workspace_id=self.workspace_id,
+                job_type="publish.dispatch",
+                status="queued",
+                payload_json={"publish_job_id": fixture["publish_job_id"]},
+                max_attempts=4,
+                run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                idempotency_key=(
+                    f"publish.dispatch:{fixture['publish_job_id']}"
+                ),
+            )
+            session.add(queue_job)
+            session.commit()
+            queue_job_id = queue_job.id
+
+        class SerializationFailure(Exception):
+            sqlstate = "40001"
+
+        def conflict_after_external_write(_session, _payload, _settings):
+            raise OperationalError(
+                "UPDATE private_publish_state",
+                {"platform_token": "sensitive-token"},
+                SerializationFailure("sensitive driver detail"),
+            )
+
+        worker = Worker(
+            settings=self.settings,
+            session_factory=db.SessionLocal,
+            worker_id="publish-database-conflict-worker",
+            handlers={"publish.dispatch": conflict_after_external_write},
+        )
+
+        self.assertTrue(worker.run_once())
+
+        with db.SessionLocal() as session:
+            publish_job = session.get(PublishJob, fixture["publish_job_id"])
+            queue_job = session.get(Job, queue_job_id)
+            actions = set(
+                session.scalars(
+                    select(AuditLog.action).where(
+                        AuditLog.entity_id == fixture["publish_job_id"]
+                    )
+                )
+            )
+            reconciliation_audit = session.scalar(
+                select(AuditLog).where(
+                    AuditLog.entity_id == fixture["publish_job_id"],
+                    AuditLog.action == "publish.reconciliation_required",
+                )
+            )
+            self.assertEqual(publish_job.status, "reconciliation_required")
+            self.assertEqual(queue_job.status, "failed")
+            self.assertIsNone(queue_job.locked_by)
+            self.assertIn("kind=transaction_retryable", queue_job.last_error)
+            self.assertIn("sqlstate=40001", queue_job.last_error)
+            self.assertNotIn("sensitive-token", queue_job.last_error)
+            self.assertNotIn("sensitive driver detail", queue_job.last_error)
+            self.assertIn("publish.reconciliation_required", actions)
+            self.assertEqual(
+                reconciliation_audit.metadata_json["reason"],
+                "database_transaction_retryable_after_dispatch",
+            )
+
+    def test_database_conflict_before_dispatch_keeps_domain_state_for_retry(self):
+        fixture = self._create_publish_fixture(status="scheduled")
+        with db.SessionLocal() as session:
+            queue_job = Job(
+                workspace_id=self.workspace_id,
+                job_type="publish.dispatch",
+                status="queued",
+                payload_json={"publish_job_id": fixture["publish_job_id"]},
+                max_attempts=4,
+                run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                idempotency_key=(
+                    f"publish.dispatch:{fixture['publish_job_id']}"
+                ),
+            )
+            session.add(queue_job)
+            session.commit()
+            queue_job_id = queue_job.id
+
+        class SerializationFailure(Exception):
+            sqlstate = "40001"
+
+        def conflict_before_external_write(_session, _payload, _settings):
+            raise OperationalError(
+                "SELECT private_publish_state",
+                {"platform_token": "sensitive-token"},
+                SerializationFailure("sensitive driver detail"),
+            )
+
+        worker = Worker(
+            settings=self.settings,
+            session_factory=db.SessionLocal,
+            worker_id="pre-publish-database-conflict-worker",
+            handlers={"publish.dispatch": conflict_before_external_write},
+        )
+
+        self.assertTrue(worker.run_once())
+
+        with db.SessionLocal() as session:
+            publish_job = session.get(PublishJob, fixture["publish_job_id"])
+            queue_job = session.get(Job, queue_job_id)
+            reconciliation_count = session.scalar(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(
+                    AuditLog.entity_id == fixture["publish_job_id"],
+                    AuditLog.action == "publish.reconciliation_required",
+                )
+            )
+            self.assertEqual(publish_job.status, "scheduled")
+            self.assertEqual(queue_job.status, "retry")
+            self.assertIn("kind=transaction_retryable", queue_job.last_error)
+            self.assertEqual(reconciliation_count, 0)
 
     def test_reconciliation_sweep_skips_active_jobs_before_limit(self):
         fixtures = [

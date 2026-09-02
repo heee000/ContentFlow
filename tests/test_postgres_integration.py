@@ -19,6 +19,7 @@ from fastapi import HTTPException
 import pytest
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.datastructures import UploadFile
 
@@ -54,7 +55,11 @@ from contentflow.storage_ledger import (
     schedule_due_storage_reconciliations,
 )
 from contentflow.worker import (
+    DatabaseErrorKind,
+    classify_database_error,
+    database_error_sqlstate,
     handle_publish_reconcile,
+    sanitized_database_error,
     schedule_pending_publish_reconciliations,
 )
 
@@ -74,6 +79,12 @@ class PostgresHarness:
     sessions: sessionmaker[Session]
     settings: Settings
     storage_dir: Path
+
+
+def _capture_postgres_error(connection, statement: str) -> DBAPIError:
+    with pytest.raises(DBAPIError) as captured:
+        connection.execute(text(statement))
+    return captured.value
 
 
 @pytest.fixture(scope="module")
@@ -243,6 +254,57 @@ def _create_publish_fixture(
             "publish_job_id": publish_job.id,
             "user_id": user.id,
         }
+
+
+def test_postgres_driver_sqlstate_classification(postgres_harness: PostgresHarness):
+    engine = postgres_harness.engine
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            connection.execute(text("SET LOCAL statement_timeout = '10ms'"))
+            query_cancelled = _capture_postgres_error(
+                connection,
+                "SELECT pg_sleep(0.05)",
+            )
+        finally:
+            transaction.rollback()
+
+    with engine.connect() as lock_owner, engine.connect() as contender:
+        owner_transaction = lock_owner.begin()
+        contender_transaction = contender.begin()
+        try:
+            lock_owner.execute(text("LOCK TABLE jobs IN ACCESS EXCLUSIVE MODE"))
+            lock_not_available = _capture_postgres_error(
+                contender,
+                "LOCK TABLE jobs IN ACCESS SHARE MODE NOWAIT",
+            )
+        finally:
+            contender_transaction.rollback()
+            owner_transaction.rollback()
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            missing_table = _capture_postgres_error(
+                connection,
+                "SELECT * FROM contentflow_missing_sqlstate_probe",
+            )
+        finally:
+            transaction.rollback()
+
+    cases = [
+        (query_cancelled, "57014", DatabaseErrorKind.QUERY_INTERRUPTED),
+        (lock_not_available, "55P03", DatabaseErrorKind.LOCK_CONTENTION),
+        (missing_table, "42P01", DatabaseErrorKind.PERMANENT),
+    ]
+    for error, sqlstate, expected_kind in cases:
+        assert database_error_sqlstate(error) == sqlstate
+        assert classify_database_error(error) == expected_kind
+        summary = sanitized_database_error(error)
+        assert f"kind={expected_kind.value}" in summary
+        assert f"sqlstate={sqlstate}" in summary
+        assert "contentflow_missing_sqlstate_probe" not in summary
 
 
 def test_postgres_migrations_reach_head(postgres_harness: PostgresHarness):

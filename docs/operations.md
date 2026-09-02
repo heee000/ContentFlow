@@ -129,7 +129,17 @@ API 无本地会话状态，可增加副本。Worker 通过 PostgreSQL `SKIP LOC
 - CONTENTFLOW_RESTART_POLICY 默认 unless-stopped，可在开发环境覆盖；API 的迁移 shell 在成功后使用 exec 把信号转交给 Uvicorn。
 - 数据库会记录 Worker 节点心跳，工作区管理员可查询 `/api/v1/admin/worker-health` 判断全局消费容量及本工作区队列是否停滞；Compose/编排层仍未自动消费该信号，也缺滚动升级故障注入。
 
-Worker 服务模式会把 SQLAlchemy 连接断开、接口/操作错误、连接池超时和已失效 DBAPI 连接识别为数据库可用性故障。它们不会进入通用 `fail_job` 业务失败路径；已领取任务保持租约，恢复后由租约、幂等键和发布对账协议决定是否重新处理，避免把基础设施故障误写成“可安全重发”。约束、数据和编程错误不在此分类中，仍立即失败并暴露。数据库重试参数如下：
+Worker 服务模式会按 PostgreSQL SQLSTATE 区分数据库异常，不再把所有 SQLAlchemy `OperationalError` 都当作断库。分类与处置如下：
+
+| 类别 | SQLSTATE/信号 | 处置 |
+| --- | --- | --- |
+| `availability` | `08xxx`、`53300`、`57P01`-`57P04`、`58030`、连接失效、连接池超时 | 不进入 `fail_job`；保留已领取任务租约并由服务级有界退避恢复 |
+| `transaction_retryable` | `40001`、`40P01` | 事务已回滚时按 Job 退避重试；若 `publish.dispatch` 已进入 `publishing`，立即终结队列尝试并转 `reconciliation_required` |
+| `lock_contention` | `55P03` | 与事务冲突相同，禁止绕过发布副作用保护 |
+| `query_interrupted` | `57014` | 允许有界恢复；持续超时最终由 Job 或 Worker 重试预算终结，不能无限循环 |
+| `permanent` | 驱动提供的其他有效 SQLSTATE，或 SQLAlchemy `DataError`/`IntegrityError`/`ProgrammingError` | Job 内立即失败、不消耗后续尝试；领取/维护阶段直接退出交给编排器和人工修复 |
+
+没有 SQLSTATE 的旧驱动 `OperationalError` 继续保守归为 `availability`，避免一次分类缺失把外部副作用误写成可安全重发。所有数据库 Job 错误、心跳与 Worker 恢复日志只记录类别、SQLSTATE 和异常类型，不持久化 SQL、参数、DSN 或驱动正文。非数据库约束、数据和编程错误继续走原业务失败路径并保留调试堆栈。数据库重试参数如下：
 
 ```dotenv
 CONTENTFLOW_WORKER_DATABASE_RETRY_INITIAL_SECONDS=1
@@ -138,9 +148,9 @@ CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_ATTEMPTS=8
 CONTENTFLOW_WORKER_DATABASE_RETRY_JITTER_RATIO=0.2
 ```
 
-服务默认按 1、2、4、8、16、30、30、30 秒名义间隔重试，每次加入最多 20% 抖动；第 8 次等待后的下一次数据库可用性失败会以脱敏终止错误退出，再由 `CONTENTFLOW_RESTART_POLICY` 对应的编排器重启。退避等待可被 SIGTERM/SIGINT 立即打断；恢复后存储与发布维护扫描会立即重新取得资格。数据库可用性日志只记录错误类型，不输出可能携带连接地址的异常正文。`contentflow-worker --once` 用于单次管理执行，不做进程内重试。
+服务默认按 1、2、4、8、16、30、30、30 秒名义间隔重试，每次加入最多 20% 抖动；第 8 次等待后的下一次可恢复数据库错误会以脱敏终止错误退出，再由 `CONTENTFLOW_RESTART_POLICY` 对应的编排器重启。退避等待可被 SIGTERM/SIGINT 立即打断；恢复后存储与发布维护扫描会立即重新取得资格。`contentflow-worker --once` 用于单次管理执行，不做进程内重试。
 
-连接完全中断时，数据库心跳本身无法写入；应联合观察 `ContentFlowNoActiveWorkers`、`ContentFlowStaleWorkerDetected`、`ContentFlowAPIDown`、队列最老等待时间和编排器重启次数。当前自动测试使用确定性异常注入，没有完成真实 PostgreSQL kill/restart、DNS、连接池耗尽、网络分区或主从切换演练；上线前必须按目标环境测量恢复时间，不能仅凭单元测试调整租约和重试预算。
+连接完全中断时，数据库心跳本身无法写入；应联合观察 `ContentFlowNoActiveWorkers`、`ContentFlowStaleWorkerDetected`、`ContentFlowAPIDown`、队列最老等待时间和编排器重启次数。PostgreSQL 集成门禁会由真实驱动产生 `57014`、`55P03` 和 `42P01` 来验证解析，连接断开路径仍使用确定性异常注入；尚未完成真实 PostgreSQL kill/restart、DNS、连接池耗尽、网络分区或主从切换演练。上线前必须按目标环境测量恢复时间，不能仅凭分类测试调整租约和重试预算。
 
 ## 数据库迁移
 

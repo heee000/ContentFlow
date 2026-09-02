@@ -1953,3 +1953,20 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 完全断库时 Worker 无法把 degraded 状态写进同一数据库；现有 API 指标只能在数据库可读时观察 stale/no-active，仍需真实 Alertmanager receiver、集中日志和编排器重启指标形成闭环。
 - `contentflow-worker --once` 保持单次失败即退出；服务模式预算耗尽后也必须退出，避免永久重试掩盖凭据、网络策略或迁移错误。公网部署仍冻结，本轮未访问 `.env`、平台账号或受保护知识文件。
 - 下一轮继续审查跨实体数据生命周期、前端历史/大型模块、数据库纵深隔离和真实运维演练；若继续深入 Worker，应先建立目标 PostgreSQL 故障注入矩阵和恢复时延预算，而不是继续堆叠未经测量的重试层。
+
+## 21.47 PostgreSQL SQLSTATE 恢复矩阵与第三十五轮复审增量交接
+
+### 本轮实现
+
+1. 对第三十四轮的“OperationalError 过宽”结论沿 `run_once → handler → fail_job/mark_domain_failure` 再次取证：死锁、序列化失败、锁竞争、语句取消和永久配置错误此前都会被视为断库，导致已领取任务保留到租约过期；若简单缩窄分类，又可能让已进入 `publishing` 的平台调用按普通失败自动重试。
+2. 新增供应商中立的数据库异常分类接口，并对 PostgreSQL SQLSTATE 建立首版矩阵：`08xxx`、`53300`、`57P01`-`57P04`、`58030` 为可用性；`40001`/`40P01` 为事务可重试；`55P03` 为锁竞争；`57014` 为查询中断；驱动提供的其他有效 SQLSTATE 及 SQLAlchemy `DataError`/`IntegrityError`/`ProgrammingError` 为永久错误。解析遍历 SQLAlchemy 包装、`orig`、cause/context 和 driver diagnostics，不通过格式化异常获取编码。
+3. 没有 SQLSTATE 的旧驱动 `OperationalError` 保持上一阶段的保守 availability 回退。事务冲突、锁竞争和查询中断在 Handler 事务回滚后进入 Job 级退避；永久错误立即终结 Job，不再浪费全部尝试。若这些数据库错误发生时 `publish.dispatch` 已持久化为 `publishing`，队列尝试立即失败并把领域任务转为 `reconciliation_required`，审计 reason 精确记录数据库类别，禁止重复平台写入。
+4. Worker 领取/维护边界允许可用性、事务冲突、锁竞争和查询中断使用已有有界进程退避；永久 SQLSTATE 直接抛出交给编排器和人工修复。Worker、Job、租约心跳和节点心跳只记录 `kind/sqlstate/error_type`，持久化错误同样不含 SQL、参数、DSN 或驱动正文。
+5. 单元回归覆盖九类 SQLSTATE、未知驱动回退、事务重排、永久错误一次终结、服务级死锁恢复/鉴权失败不重试、敏感 SQL/参数/驱动正文负向断言，以及发布开始后的事务冲突强制对账。PostgreSQL 集成门禁新增真实 `statement_timeout`、`LOCK ... NOWAIT` 和缺表语句，由 psycopg 实际产生 `57014`、`55P03`、`42P01`，防止测试只验证伪造属性。
+
+### 当前验证与边界
+
+- 全仓 Ruff 与 Worker/发布定向 `35 passed, 9 subtests passed` 通过；本机全量为 `306 passed, 14 skipped, 196 subtests passed`、分支覆盖率 80.96%。14 项均为本机未启动的 PostgreSQL/MinIO 外部服务，其中新增真实驱动分类必须由本阶段远程 CI 签收后才能写成完成证据。锁文件、`pip check`、Python 漏洞审计、编译、Alembic 单 head、双 Compose、公网 fail-closed、备份脚本语法、前端 ESLint、Vinext/Sites 构建、2 项 SSR、Next.js/TypeScript 生产构建和 npm moderate 审计 0 漏洞均通过。
+- 本轮没有新增配置、迁移或平台调用，也没有读取 `.env`、账号、模型缓存、运行数据或受保护知识文件。公网部署继续冻结。
+- SQLSTATE 是错误语义，不是端到端恢复证明。真实 PostgreSQL kill/restart、DNS、网络分区、连接池耗尽、主从切换和多 Worker 惊群仍未执行；`40001`/`40P01` 当前有确定性包装测试，尚未由真实并发事务制造。
+- 除发布任务外，AI、对象存储和纯数据库 Job 仍共享粗粒度中断策略；下一步应以副作用契约和成本为依据声明每类 Job 能否快速接管，不能因为已有 SQLSTATE 就统一降低 300 秒租约。

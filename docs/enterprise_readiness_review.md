@@ -1853,3 +1853,37 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 3. 把 Worker 日志与编排器 restart count 接入独立监控故障域，配置真实 Alertmanager receiver；必要时提供独立于业务数据库的进程健康/OTel 信号。
 4. 为纯数据库、AI 生成、对象存储和平台发布 Job 分别声明中断恢复策略，结合 fencing token/Outbox 缩短安全接管时间，不能统一压低租约。
 5. 继续推进数据生命周期、数据库角色/RLS 授权方案、企业 IAM、PITR/异地、前端 Playwright 请求预算和真实渠道/媒体质量成本矩阵。
+
+## 45. 2026-09-03 第三十五轮复审：SQLSTATE 语义、任务恢复与发布副作用
+
+### 45.1 复审结论
+
+第三十四轮的异常类边界仍不足以表达 PostgreSQL 故障语义。本轮将 SQLSTATE 纳入 Worker 决策，关闭“永久错误反复退避”和“事务冲突只能等待租约”的主要路径，同时明确保留发布外部副作用保护：一旦 `publishing` 已持久化，数据库冲突不能成为自动重发依据。项目仍为 L2+；这是错误处置矩阵，不是目标环境高可用或容灾签收。
+
+### 45.2 本轮关闭或部分关闭的风险
+
+| 维度 | 当前提升 | 验证 | 未关闭边界 |
+| --- | --- | --- | --- |
+| 错误语义 | 区分连接、事务、锁、取消和永久状态 | 9 类确定性用例；真实 `57014/55P03/42P01` 集成用例 | 尚未真实制造 `40001/40P01` 和连接故障 |
+| 恢复速度 | 事务/锁/取消不再一律等待租约；永久错误一次终结 | Job 状态与尝试数回归 | 策略仍未按全部 Job 类型和成本拆分 |
+| 发布安全 | `publishing` 后数据库错误立即进入人工/自动对账，不普通重发 | PublishJob、Job 和哈希链审计联合断言 | 平台自身幂等键和回调去重仍缺 |
+| 信息安全 | Job/Worker/两类心跳只输出 kind、SQLSTATE、类型 | SQL、参数、DSN、driver message 负向断言 | 集中日志访问审计与保留制度仍缺 |
+| 向后兼容 | 无 SQLSTATE 驱动保持 availability 保守回退 | OSError 包装回归 | 非 PostgreSQL 驱动没有独立错误矩阵 |
+
+本机全仓 Ruff、定向 `35 passed, 9 subtests passed` 和全量 `306 passed, 14 skipped, 196 subtests passed` 均通过，分支覆盖率 80.96%；14 项跳过仅对应本机未启动的 PostgreSQL/MinIO。锁文件、环境一致性、Python/npm 漏洞、编译、单 Alembic head、双 Compose、公网失败关闭、备份脚本语法、前端 lint、Vinext/Sites、2 项 SSR 与 Next.js/TypeScript 构建均通过。真实 SQLSTATE 集成用例仍以远程 PostgreSQL CI 结果为最终签收依据。
+
+### 45.3 当前仍存在的 5 个不足
+
+1. **真实连接故障仍未演练**：SQLSTATE 解析不能证明 PostgreSQL kill/restart、DNS、网络分区、池耗尽、主从切换和多 Worker 同时恢复的 RTO。
+2. **真实事务冲突证据不完整**：当前 PostgreSQL 会产生查询取消、锁 NOWAIT 和缺表状态，但 `40001` 序列化失败与 `40P01` 死锁仍由确定性异常覆盖。
+3. **非发布任务的副作用策略仍粗**：AI 调用可能重复计费，对象存储有补偿但尚未全矩阵故障注入，纯数据库任务也没有单独快速接管协议。
+4. **完全断库的健康信号仍在同一故障域**：数据库心跳无法写入，尚无独立进程健康端点、OTel Collector、真实 Alertmanager receiver 和编排器 restart 指标闭环。
+5. **企业基础能力仍不完整**：数据库纵深隔离、数据生命周期、OIDC/MFA/SCIM/KMS、PITR/异地、前端 Playwright/模块化和真实平台异常矩阵尚未共同签收。
+
+### 45.4 可以继续改进的 5 个方向
+
+1. 在固定 PostgreSQL 版本的 CI/隔离环境加入 stop/start 和 Toxiproxy 矩阵，记录短断、长断、DNS、池耗尽与恢复惊群的 P50/P95/RTO。
+2. 用真实双事务制造 `40001` 和 `40P01`，验证驱动分类、回滚、Job 重排及多 Worker 锁竞争，而不是只断言伪造 SQLSTATE。
+3. 为纯数据库、AI、对象存储、发布和对账分别建立副作用/幂等/补偿表，引入 fencing token 或 Outbox 后再缩短安全接管时间。
+4. 将结构化 Worker 故障日志和编排器 restart count 发往独立监控故障域，接通真实告警接收与演练证据。
+5. 继续推进跨实体数据生命周期、数据库角色/RLS 授权方案、企业 IAM、PITR/异地、前端 E2E/拆分以及真实渠道和媒体质量成本矩阵。

@@ -12,15 +12,19 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from io import BytesIO
 from typing import Any
 
 from sqlalchemy import literal, or_, select
 from sqlalchemy.exc import (
     DBAPIError,
+    DataError,
     DisconnectionError,
+    IntegrityError,
     InterfaceError,
     OperationalError,
+    ProgrammingError,
     TimeoutError as SQLAlchemyTimeoutError,
 )
 from sqlalchemy.orm import Session
@@ -91,6 +95,107 @@ DATABASE_AVAILABILITY_ERRORS = (
     OperationalError,
     SQLAlchemyTimeoutError,
 )
+DATABASE_PERMANENT_ERRORS = (DataError, IntegrityError, ProgrammingError)
+
+
+class DatabaseErrorKind(StrEnum):
+    """Operational categories used by the worker recovery policy."""
+
+    AVAILABILITY = "availability"
+    TRANSACTION_RETRYABLE = "transaction_retryable"
+    LOCK_CONTENTION = "lock_contention"
+    QUERY_INTERRUPTED = "query_interrupted"
+    PERMANENT = "permanent"
+
+
+POSTGRES_AVAILABILITY_SQLSTATES = {
+    "53300",  # too_many_connections
+    "57P01",  # admin_shutdown
+    "57P02",  # crash_shutdown
+    "57P03",  # cannot_connect_now
+    "57P04",  # database_dropped
+    "58030",  # io_error
+}
+POSTGRES_TRANSACTION_RETRYABLE_SQLSTATES = {
+    "40001",  # serialization_failure
+    "40P01",  # deadlock_detected
+}
+POSTGRES_LOCK_CONTENTION_SQLSTATES = {"55P03"}  # lock_not_available
+POSTGRES_QUERY_INTERRUPTED_SQLSTATES = {"57014"}  # query_canceled
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    pending = [error]
+    ordered: list[BaseException] = []
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        ordered.append(current)
+        for related in (
+            getattr(current, "orig", None),
+            current.__cause__,
+            current.__context__,
+        ):
+            if isinstance(related, BaseException) and id(related) not in seen:
+                pending.append(related)
+    return ordered
+
+
+def database_error_sqlstate(error: BaseException) -> str | None:
+    """Extract a PostgreSQL SQLSTATE without formatting the exception body."""
+
+    for current in _exception_chain(error):
+        candidates = [
+            getattr(current, "sqlstate", None),
+            getattr(current, "pgcode", None),
+        ]
+        diagnostic = getattr(current, "diag", None)
+        if diagnostic is not None:
+            candidates.append(getattr(diagnostic, "sqlstate", None))
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            normalized = candidate.strip().upper()
+            if len(normalized) == 5 and normalized.isalnum():
+                return normalized
+    return None
+
+
+def classify_database_error(error: BaseException) -> DatabaseErrorKind | None:
+    """Classify SQLAlchemy/DBAPI failures for safe worker recovery.
+
+    Known PostgreSQL states take precedence over the broad SQLAlchemy
+    ``OperationalError`` wrapper. Drivers that do not expose a SQLSTATE retain
+    the previous conservative availability behavior.
+    """
+
+    chain = _exception_chain(error)
+    sqlstate = database_error_sqlstate(error)
+    if sqlstate is not None:
+        if sqlstate.startswith("08") or sqlstate in POSTGRES_AVAILABILITY_SQLSTATES:
+            return DatabaseErrorKind.AVAILABILITY
+        if sqlstate in POSTGRES_TRANSACTION_RETRYABLE_SQLSTATES:
+            return DatabaseErrorKind.TRANSACTION_RETRYABLE
+        if sqlstate in POSTGRES_LOCK_CONTENTION_SQLSTATES:
+            return DatabaseErrorKind.LOCK_CONTENTION
+        if sqlstate in POSTGRES_QUERY_INTERRUPTED_SQLSTATES:
+            return DatabaseErrorKind.QUERY_INTERRUPTED
+
+    if any(
+        isinstance(item, DBAPIError) and item.connection_invalidated
+        for item in chain
+    ):
+        return DatabaseErrorKind.AVAILABILITY
+    if any(isinstance(item, DATABASE_PERMANENT_ERRORS) for item in chain):
+        return DatabaseErrorKind.PERMANENT
+    if sqlstate is not None and any(isinstance(item, DBAPIError) for item in chain):
+        return DatabaseErrorKind.PERMANENT
+    if any(isinstance(item, DATABASE_AVAILABILITY_ERRORS) for item in chain):
+        return DatabaseErrorKind.AVAILABILITY
+    return None
 
 
 def is_database_availability_error(error: BaseException) -> bool:
@@ -101,16 +206,31 @@ def is_database_availability_error(error: BaseException) -> bool:
     availability retry loop.
     """
 
-    current: BaseException | None = error
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, DATABASE_AVAILABILITY_ERRORS):
-            return True
-        if isinstance(current, DBAPIError) and current.connection_invalidated:
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    return classify_database_error(error) == DatabaseErrorKind.AVAILABILITY
+
+
+def is_worker_database_retryable_error(error: BaseException) -> bool:
+    """Return whether a failed worker DB operation can use bounded backoff."""
+
+    return classify_database_error(error) in {
+        DatabaseErrorKind.AVAILABILITY,
+        DatabaseErrorKind.TRANSACTION_RETRYABLE,
+        DatabaseErrorKind.LOCK_CONTENTION,
+        DatabaseErrorKind.QUERY_INTERRUPTED,
+    }
+
+
+def sanitized_database_error(error: BaseException) -> str:
+    """Return an operator-useful message without SQL, parameters, or DSNs."""
+
+    kind = classify_database_error(error)
+    sqlstate = database_error_sqlstate(error) or "unknown"
+    kind_value = kind.value if kind is not None else "unknown"
+    return (
+        "Database operation failed "
+        f"(kind={kind_value}, sqlstate={sqlstate}, "
+        f"error_type={type(error).__name__})"
+    )
 
 
 class JobNotReady(RuntimeError):
@@ -187,13 +307,29 @@ class LeaseHeartbeat:
                     session.commit()
             except Exception as error:
                 self._lost.set()
-                if is_database_availability_error(error):
+                database_error_kind = classify_database_error(error)
+                if database_error_kind == DatabaseErrorKind.AVAILABILITY:
                     logger.error(
                         "job lease heartbeat database unavailable "
-                        "id=%s worker=%s attempt=%s error_type=%s",
+                        "id=%s worker=%s attempt=%s kind=%s sqlstate=%s "
+                        "error_type=%s",
                         self.job_id,
                         self.worker_id,
                         self.attempt,
+                        database_error_kind.value,
+                        database_error_sqlstate(error) or "unknown",
+                        type(error).__name__,
+                    )
+                elif database_error_kind is not None:
+                    logger.error(
+                        "job lease heartbeat database operation failed "
+                        "id=%s worker=%s attempt=%s kind=%s sqlstate=%s "
+                        "error_type=%s",
+                        self.job_id,
+                        self.worker_id,
+                        self.attempt,
+                        database_error_kind.value,
+                        database_error_sqlstate(error) or "unknown",
                         type(error).__name__,
                     )
                 else:
@@ -283,12 +419,25 @@ class WorkerNodeHeartbeat:
                 session.commit()
             return True
         except Exception as error:
-            if is_database_availability_error(error):
+            database_error_kind = classify_database_error(error)
+            if database_error_kind == DatabaseErrorKind.AVAILABILITY:
                 logger.error(
                     "worker node heartbeat database unavailable "
-                    "id=%s status=%s error_type=%s",
+                    "id=%s status=%s kind=%s sqlstate=%s error_type=%s",
                     self.worker_id,
                     status,
+                    database_error_kind.value,
+                    database_error_sqlstate(error) or "unknown",
+                    type(error).__name__,
+                )
+            elif database_error_kind is not None:
+                logger.error(
+                    "worker node heartbeat database operation failed "
+                    "id=%s status=%s kind=%s sqlstate=%s error_type=%s",
+                    self.worker_id,
+                    status,
+                    database_error_kind.value,
+                    database_error_sqlstate(error) or "unknown",
                     type(error).__name__,
                 )
             else:
@@ -1371,6 +1520,7 @@ def mark_domain_failure(
     message: str,
     *,
     publish_outcome_uncertain: bool = False,
+    publish_outcome_reason: str = "worker_lease_exhausted",
     ai_provenance: dict[str, Any] | None = None,
 ) -> None:
     payload = dict(job.payload_json or {})
@@ -1436,7 +1586,8 @@ def mark_domain_failure(
         ):
             publish_job.status = "reconciliation_required"
             publish_job.error = (
-                f"Worker 在发布结果落库前失联，禁止自动重试；请先人工对账。{message}"
+                "发布结果落库前处理被中断，禁止自动重试；"
+                f"请先人工对账。{message}"
             )[:8000]
             record_audit(
                 session,
@@ -1445,7 +1596,7 @@ def mark_domain_failure(
                 entity_id=publish_job.id,
                 workspace_id=publish_job.workspace_id,
                 actor_user_id=None,
-                metadata={"reason": "worker_lease_exhausted"},
+                metadata={"reason": publish_outcome_reason},
             )
         elif publish_job and publish_job.status in {
             "scheduled",
@@ -1634,7 +1785,8 @@ class Worker:
                 logger.info("job succeeded id=%s type=%s", job.id, job.job_type)
             except Exception as error:
                 session.rollback()
-                if is_database_availability_error(error):
+                database_error_kind = classify_database_error(error)
+                if database_error_kind == DatabaseErrorKind.AVAILABILITY:
                     # The claim was already committed in an independent
                     # transaction. Keep its lease intact and let the lease and
                     # publish reconciliation protocols decide recovery; a
@@ -1647,7 +1799,9 @@ class Worker:
                 job = session.get(Job, job_id)
                 ai_provenance = getattr(error, "ai_provenance", None)
                 persisted_error: Exception | str = error
-                if job is not None and job.job_type == "prompt_eval.execute":
+                if database_error_kind is not None:
+                    persisted_error = sanitized_database_error(error)
+                elif job is not None and job.job_type == "prompt_eval.execute":
                     persisted_error = (
                         f"AI prompt evaluation failed ({type(error).__name__})"
                     )
@@ -1658,12 +1812,46 @@ class Worker:
                 ):
                     persisted_error = f"AI workflow failed ({type(error).__name__})"
                 if job is not None:
+                    publish_outcome_uncertain = False
+                    if (
+                        database_error_kind is not None
+                        and job.job_type == "publish.dispatch"
+                        and (job.payload_json or {}).get("publish_job_id")
+                    ):
+                        publish_job = session.get(
+                            PublishJob,
+                            job.payload_json["publish_job_id"],
+                        )
+                        publish_outcome_uncertain = (
+                            publish_job is not None
+                            and publish_job.status == "publishing"
+                        )
+                    database_retry_scheduled = database_error_kind in {
+                        DatabaseErrorKind.TRANSACTION_RETRYABLE,
+                        DatabaseErrorKind.LOCK_CONTENTION,
+                        DatabaseErrorKind.QUERY_INTERRUPTED,
+                    }
                     mark_publish_first = (
                         job.job_type == "publish.dispatch"
                         and not isinstance(error, JobNotReady)
+                        and (
+                            database_error_kind is None
+                            or database_error_kind == DatabaseErrorKind.PERMANENT
+                            or publish_outcome_uncertain
+                        )
                     )
                     if mark_publish_first:
-                        mark_domain_failure(session, job, str(error))
+                        mark_domain_failure(
+                            session,
+                            job,
+                            str(persisted_error),
+                            publish_outcome_uncertain=publish_outcome_uncertain,
+                            publish_outcome_reason=(
+                                f"database_{database_error_kind.value}_after_dispatch"
+                                if database_error_kind is not None
+                                else "worker_lease_exhausted"
+                            ),
+                        )
                     try:
                         job = fail_job(
                             session,
@@ -1681,6 +1869,8 @@ class Worker:
                                     StorageQuotaExceeded,
                                 ),
                             )
+                            or database_error_kind == DatabaseErrorKind.PERMANENT
+                            or publish_outcome_uncertain
                             or (
                                 isinstance(error, MediaProviderError)
                                 and not error.retryable
@@ -1699,8 +1889,15 @@ class Worker:
                             lease_error,
                         )
                         return True
-                    if not mark_publish_first and (
-                        not isinstance(error, JobNotReady) or job.status == "failed"
+                    if (
+                        not mark_publish_first
+                        and not (
+                            database_retry_scheduled and job.status == "retry"
+                        )
+                        and (
+                            not isinstance(error, JobNotReady)
+                            or job.status == "failed"
+                        )
                     ):
                         mark_domain_failure(
                             session,
@@ -1715,6 +1912,15 @@ class Worker:
                     logger.error(
                         "AI job failed id=%s error_type=%s",
                         job_id,
+                        type(error).__name__,
+                    )
+                elif database_error_kind is not None:
+                    logger.error(
+                        "job database operation failed id=%s kind=%s "
+                        "sqlstate=%s error_type=%s",
+                        job_id,
+                        database_error_kind.value,
+                        database_error_sqlstate(error) or "unknown",
                         type(error).__name__,
                     )
                 else:
@@ -1749,7 +1955,8 @@ class Worker:
                     try:
                         worked = self.run_once()
                     except Exception as error:
-                        if not is_database_availability_error(error):
+                        database_error_kind = classify_database_error(error)
+                        if not is_worker_database_retryable_error(error):
                             raise
                         consecutive_database_failures += 1
                         if (
@@ -1758,9 +1965,12 @@ class Worker:
                         ):
                             logger.error(
                                 "worker database retries exhausted "
-                                "id=%s attempts=%s error_type=%s",
+                                "id=%s attempts=%s kind=%s sqlstate=%s "
+                                "error_type=%s",
                                 self.worker_id,
                                 self.settings.worker_database_retry_max_attempts,
+                                database_error_kind.value,
+                                database_error_sqlstate(error) or "unknown",
                                 type(error).__name__,
                             )
                             raise WorkerDatabaseUnavailable(
@@ -1774,14 +1984,22 @@ class Worker:
                         delay = self._database_retry_delay(
                             consecutive_database_failures
                         )
+                        availability_label = (
+                            "unavailable"
+                            if database_error_kind == DatabaseErrorKind.AVAILABILITY
+                            else "retryable"
+                        )
                         logger.warning(
-                            "worker database operation unavailable; retrying "
+                            "worker database operation %s; retrying "
                             "id=%s attempt=%s/%s delay_seconds=%.3f "
-                            "error_type=%s",
+                            "kind=%s sqlstate=%s error_type=%s",
+                            availability_label,
                             self.worker_id,
                             consecutive_database_failures,
                             self.settings.worker_database_retry_max_attempts,
                             delay,
+                            database_error_kind.value,
+                            database_error_sqlstate(error) or "unknown",
                             type(error).__name__,
                         )
                         if self._stop_event.wait(delay):

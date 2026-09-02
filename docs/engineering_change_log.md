@@ -840,3 +840,11 @@
 - 验证过程：首次全量回归有 3 个新增日志断言失败，原因是其他测试加载 Alembic 后遗留 `contentflow.worker` logger disabled 状态；定向运行没有复现。测试改为显式隔离并恢复 logger 状态后，原 3 项和两次完整全量均通过。产品入口原本已在迁移后调用 `configure_worker_logging(force=True)`，因此没有借测试修复掩盖运行时缺陷。
 - 远程证据：实现提交 `b3f2d6a19516d9265d9d2c8b32ff6be14b078f8c` 已以 John Wang 身份普通推送；[ContentFlow CI #33691253662](https://github.com/heee000/ContentFlow/actions/runs/33691253662) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `312 passed, 187 subtests passed`、分支覆盖率 81.99%；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9870116498` 摘要为 `sha256:6c8207ee31365941f739509add585a8c803e1deb0023988bafcee41f8f7b76cf`。
 - 剩余边界：默认名义等待约 121 秒，随后下一次失败退出；处理中断的 Job 最多等待租约到期。没有 PostgreSQL kill/restart、DNS/网络分区、连接池耗尽、多 Worker 惊群、编排器 restart/backoff 或恢复 RTO 证据；同数据库无法在完全断连时承载 degraded 状态，仍依赖 stale/API-down、集中日志和外部编排指标。
+
+### CF-20260903-22：OperationalError 粗分类混淆事务冲突、断库和永久错误
+
+- 状态：SQLSTATE 分类、Job/Worker 分层处置、发布副作用保护、日志与持久化脱敏、单元回归和真实 PostgreSQL 驱动用例已实现；完整远程 CI 待本阶段提交后签收。
+- 问题与影响：上一阶段为避免数据库瞬断被误记为业务失败，保守地把全部 `OperationalError` 作为可用性故障。但 PostgreSQL 的序列化失败、死锁、锁竞争、语句取消、鉴权失败和坏迁移都可能由相同包装抛出；它们全部等待租约或进程退避会延迟恢复并掩盖永久错误。直接按异常类缩窄又会让已开始平台调用的发布任务进入普通自动重试，产生重复发布风险。
+- 解决方案：从 SQLAlchemy/DBAPI 异常图中安全提取 SQLSTATE，区分 availability、transaction_retryable、lock_contention、query_interrupted 和 permanent。无 SQLSTATE 的 OperationalError 保守回退 availability；Data/Integrity/Programming 错误及其他有效 SQLSTATE 作为永久错误一次终结；可恢复状态使用现有有界退避。Handler 内数据库错误只保存类别、SQLSTATE 和异常类型；SQL、参数、连接地址和驱动正文不写 Job/日志。
+- 发布一致性：当 `publish.dispatch` 的领域状态已经是 `publishing`，任何已识别数据库错误都按结果不确定处理，立即转 `reconciliation_required` 并终结原队列尝试；审计 reason 为 `database_<kind>_after_dispatch`。未开始远端写入的事务冲突仍可按 Job 退避，不统一牺牲吞吐。
+- 验证：全仓 Ruff、定向 `35 passed, 9 subtests passed` 及本机全量 `306 passed, 14 skipped, 196 subtests passed`、80.96% 分支覆盖率均通过；14 项跳过仅是本机未启动的 PostgreSQL/MinIO。锁/依赖/漏洞、编译、迁移、双 Compose、公网失败关闭、备份脚本和全部前端门禁通过。PostgreSQL 集成测试使用真实 statement timeout、表锁 NOWAIT 和缺表语句验证 psycopg 的 `57014/55P03/42P01`，等待远程 PostgreSQL 门禁运行。剩余真实 kill/restart、网络、池耗尽、主从切换和多 Worker 恢复时延不在本条完成范围内。

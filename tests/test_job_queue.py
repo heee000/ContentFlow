@@ -24,13 +24,23 @@ from contentflow.job_queue import (
 )
 from contentflow.settings import Settings
 from contentflow.worker import (
+    DatabaseErrorKind,
     LeaseHeartbeat,
     Worker,
     WorkerDatabaseUnavailable,
     WorkerNodeHeartbeat,
+    classify_database_error,
     configure_worker_logging,
+    database_error_sqlstate,
     logger as worker_logger,
+    sanitized_database_error,
 )
+
+
+class PostgresTestError(Exception):
+    def __init__(self, sqlstate: str, message: str = "sensitive database detail"):
+        super().__init__(message)
+        self.sqlstate = sqlstate
 
 
 class JobQueueLeaseTest(unittest.TestCase):
@@ -77,6 +87,19 @@ class JobQueueLeaseTest(unittest.TestCase):
             "SELECT redacted",
             {},
             OSError("postgresql://sensitive-host database unavailable"),
+        )
+
+    @staticmethod
+    def _postgres_error(
+        sqlstate: str,
+        *,
+        connection_invalidated: bool = False,
+    ) -> OperationalError:
+        return OperationalError(
+            "SELECT secret_column FROM private_table",
+            {"token": "sensitive-parameter"},
+            PostgresTestError(sqlstate),
+            connection_invalidated=connection_invalidated,
         )
 
     def test_lease_renewal_requires_current_owner_and_attempt(self):
@@ -262,6 +285,128 @@ class JobQueueLeaseTest(unittest.TestCase):
             self.assertEqual(claimed.attempts, 1)
             self.assertIsNone(claimed.last_error)
 
+    def test_postgres_sqlstate_classifier_separates_recovery_categories(self):
+        expected = {
+            "08006": DatabaseErrorKind.AVAILABILITY,
+            "57P01": DatabaseErrorKind.AVAILABILITY,
+            "53300": DatabaseErrorKind.AVAILABILITY,
+            "40001": DatabaseErrorKind.TRANSACTION_RETRYABLE,
+            "40P01": DatabaseErrorKind.TRANSACTION_RETRYABLE,
+            "55P03": DatabaseErrorKind.LOCK_CONTENTION,
+            "57014": DatabaseErrorKind.QUERY_INTERRUPTED,
+            "28P01": DatabaseErrorKind.PERMANENT,
+            "42P01": DatabaseErrorKind.PERMANENT,
+        }
+
+        for sqlstate, kind in expected.items():
+            with self.subTest(sqlstate=sqlstate):
+                error = self._postgres_error(sqlstate)
+                self.assertEqual(database_error_sqlstate(error), sqlstate)
+                self.assertEqual(classify_database_error(error), kind)
+
+        self.assertEqual(
+            classify_database_error(self._database_unavailable_error()),
+            DatabaseErrorKind.AVAILABILITY,
+        )
+        self.assertEqual(
+            classify_database_error(
+                self._postgres_error("57P05", connection_invalidated=True)
+            ),
+            DatabaseErrorKind.AVAILABILITY,
+        )
+
+    def test_database_error_summary_never_contains_sql_parameters_or_driver_text(self):
+        error = self._postgres_error("40001")
+
+        summary = sanitized_database_error(error)
+
+        self.assertIn("kind=transaction_retryable", summary)
+        self.assertIn("sqlstate=40001", summary)
+        self.assertIn("error_type=OperationalError", summary)
+        self.assertNotIn("secret_column", summary)
+        self.assertNotIn("sensitive-parameter", summary)
+        self.assertNotIn("sensitive database detail", summary)
+
+    def test_transaction_conflict_requeues_job_with_sanitized_error(self):
+        with self.session_factory() as session:
+            queued = enqueue_job(
+                session,
+                job_type="test.transaction-conflict",
+                payload={},
+                workspace_id=None,
+                idempotency_key="test.transaction-conflict",
+            )
+            session.commit()
+            job_id = queued.id
+
+        def conflicting_handler(_session, _payload, _settings):
+            raise self._postgres_error("40001")
+
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="transaction-conflict-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+            ),
+            worker_id="transaction-conflict-worker",
+            session_factory=self.session_factory,
+            handlers={"test.transaction-conflict": conflicting_handler},
+        )
+
+        with (
+            patch.object(worker_logger, "disabled", False),
+            self.assertLogs(worker_logger, level=logging.ERROR) as captured,
+        ):
+            self.assertTrue(worker.run_once())
+
+        with self.session_factory() as session:
+            current = session.get(Job, job_id)
+            self.assertEqual(current.status, "retry")
+            self.assertEqual(current.attempts, 1)
+            self.assertIn("kind=transaction_retryable", current.last_error)
+            self.assertIn("sqlstate=40001", current.last_error)
+            self.assertNotIn("secret_column", current.last_error)
+            self.assertNotIn("sensitive-parameter", current.last_error)
+        messages = "\n".join(captured.output)
+        self.assertIn("kind=transaction_retryable", messages)
+        self.assertNotIn("sensitive database detail", messages)
+
+    def test_permanent_database_error_fails_job_without_retry(self):
+        with self.session_factory() as session:
+            queued = enqueue_job(
+                session,
+                job_type="test.permanent-database-error",
+                payload={},
+                workspace_id=None,
+                idempotency_key="test.permanent-database-error",
+            )
+            session.commit()
+            job_id = queued.id
+
+        def invalid_database_handler(_session, _payload, _settings):
+            raise self._postgres_error("28P01")
+
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="permanent-database-error-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+            ),
+            worker_id="permanent-database-error-worker",
+            session_factory=self.session_factory,
+            handlers={"test.permanent-database-error": invalid_database_handler},
+        )
+
+        self.assertTrue(worker.run_once())
+
+        with self.session_factory() as session:
+            current = session.get(Job, job_id)
+            self.assertEqual(current.status, "failed")
+            self.assertEqual(current.attempts, 1)
+            self.assertIn("kind=permanent", current.last_error)
+            self.assertIn("sqlstate=28P01", current.last_error)
+            self.assertNotIn("sensitive database detail", current.last_error)
+
     def test_worker_retries_database_outage_then_recovers(self):
         settings = Settings(
             database_url="sqlite://",
@@ -303,6 +448,64 @@ class JobQueueLeaseTest(unittest.TestCase):
         self.assertIn("database operation unavailable", messages)
         self.assertIn("database operation recovered", messages)
         self.assertNotIn("sensitive-host", messages)
+
+    def test_worker_retries_transient_sqlstate_but_not_permanent_sqlstate(self):
+        settings = Settings(
+            database_url="sqlite://",
+            secret_key="sqlstate-worker-recovery-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            worker_database_retry_initial_seconds=0.1,
+            worker_database_retry_max_seconds=0.1,
+            worker_database_retry_max_attempts=2,
+            worker_database_retry_jitter_ratio=0,
+        )
+        recovering_worker = Worker(
+            settings=settings,
+            worker_id="sqlstate-recovery-worker",
+            session_factory=self.session_factory,
+        )
+
+        recovery_calls = 0
+
+        def flaky_sqlstate_run_once():
+            nonlocal recovery_calls
+            recovery_calls += 1
+            if recovery_calls == 1:
+                raise self._postgres_error("40P01")
+            recovering_worker.request_stop()
+            return False
+
+        with (
+            patch.object(worker_logger, "disabled", False),
+            patch.object(
+                recovering_worker,
+                "run_once",
+                side_effect=flaky_sqlstate_run_once,
+            ) as run_once,
+            self.assertLogs(worker_logger, level=logging.INFO) as captured,
+        ):
+            recovering_worker.run_forever()
+
+        self.assertEqual(run_once.call_count, 2)
+        messages = "\n".join(captured.output)
+        self.assertIn("database operation retryable", messages)
+        self.assertIn("kind=transaction_retryable", messages)
+        self.assertIn("sqlstate=40P01", messages)
+        self.assertNotIn("sensitive database detail", messages)
+
+        permanent_worker = Worker(
+            settings=settings,
+            worker_id="sqlstate-permanent-worker",
+            session_factory=self.session_factory,
+        )
+        permanent_error = self._postgres_error("28P01")
+        with patch.object(
+            permanent_worker,
+            "run_once",
+            side_effect=permanent_error,
+        ) as run_once, self.assertRaises(OperationalError):
+            permanent_worker.run_forever()
+        self.assertEqual(run_once.call_count, 1)
 
     def test_worker_database_retry_delay_is_exponential_capped_and_jittered(self):
         worker = Worker(
@@ -428,6 +631,10 @@ class JobQueueLeaseTest(unittest.TestCase):
             "INSERT redacted",
             {},
             ValueError("constraint failed"),
+        )
+        self.assertEqual(
+            classify_database_error(integrity_error),
+            DatabaseErrorKind.PERMANENT,
         )
 
         with patch.object(
