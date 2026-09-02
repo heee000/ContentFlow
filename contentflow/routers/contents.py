@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,13 @@ from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
 from ..entities import Asset, ContentItem, ContentRevision
 from ..job_queue import enqueue_job
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    UpdatedAfter,
+    paginate,
+)
 from ..schemas import (
     ContentResponse,
     ContentRevisionResponse,
@@ -67,9 +74,13 @@ def get_content_for_update_or_409(
 def list_contents(
     principal: CurrentPrincipal,
     session: Db,
+    response: Response,
     campaign_id: str | None = None,
     status: str | None = None,
     platform: str | None = None,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
 ):
     query = select(ContentItem).where(
         ContentItem.workspace_id == principal.workspace_id
@@ -80,7 +91,17 @@ def list_contents(
         query = query.where(ContentItem.status == status)
     if platform:
         query = query.where(ContentItem.platform == platform)
-    return list(session.scalars(query.order_by(ContentItem.updated_at.desc())))
+    if updated_after is not None:
+        query = query.where(ContentItem.updated_at > updated_after)
+    return paginate(
+        session,
+        query,
+        timestamp_column=ContentItem.updated_at,
+        id_column=ContentItem.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
 
 
 @router.get("/{content_id}", response_model=ContentResponse)

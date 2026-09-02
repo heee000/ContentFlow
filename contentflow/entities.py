@@ -309,6 +309,9 @@ class PromptEvalRun(TimestampMixin, Base):
 
 class Campaign(TimestampMixin, Base):
     __tablename__ = "campaigns"
+    __table_args__ = (
+        Index("ix_campaigns_workspace_updated_page", "workspace_id", "updated_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -363,6 +366,14 @@ class StyleSkill(TimestampMixin, Base):
 
 class KnowledgeDocument(TimestampMixin, Base):
     __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        Index(
+            "ix_knowledge_documents_workspace_updated_page",
+            "workspace_id",
+            "updated_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -400,6 +411,14 @@ class KnowledgeChunk(TimestampMixin, Base):
 
 class WorkflowRun(TimestampMixin, Base):
     __tablename__ = "workflow_runs"
+    __table_args__ = (
+        Index(
+            "ix_workflow_runs_workspace_updated_page",
+            "workspace_id",
+            "updated_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -423,6 +442,12 @@ class ContentItem(TimestampMixin, Base):
     __tablename__ = "content_items"
     __table_args__ = (
         Index("ix_content_items_workspace_status", "workspace_id", "status"),
+        Index(
+            "ix_content_items_workspace_updated_page",
+            "workspace_id",
+            "updated_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -503,6 +528,9 @@ class ContentRevision(Base):
 
 class Asset(TimestampMixin, Base):
     __tablename__ = "assets"
+    __table_args__ = (
+        Index("ix_assets_workspace_updated_page", "workspace_id", "updated_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -545,6 +573,14 @@ class ChannelConnection(TimestampMixin, Base):
 
 class PublishJob(TimestampMixin, Base):
     __tablename__ = "publish_jobs"
+    __table_args__ = (
+        Index(
+            "ix_publish_jobs_workspace_updated_page",
+            "workspace_id",
+            "updated_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -837,7 +873,10 @@ class AuditLog(Base):
 
 class Job(TimestampMixin, Base):
     __tablename__ = "jobs"
-    __table_args__ = (Index("ix_jobs_claim", "status", "run_at", "locked_at"),)
+    __table_args__ = (
+        Index("ix_jobs_claim", "status", "run_at", "locked_at"),
+        Index("ix_jobs_workspace_updated_page", "workspace_id", "updated_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str | None] = mapped_column(

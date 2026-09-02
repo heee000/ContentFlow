@@ -7,6 +7,12 @@ export type ApiOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
 };
 
+export type PaginatedResult<T> = {
+  items: T[];
+  truncated: boolean;
+  syncTime: string | null;
+};
+
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -144,6 +150,68 @@ export async function api<T>(
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+const NEXT_CURSOR_HEADER = "X-ContentFlow-Next-Cursor";
+const SYNC_TIME_HEADER = "X-ContentFlow-Sync-Time";
+const DEFAULT_PAGE_LIMIT = 100;
+const DEFAULT_MAX_PAGES = 20;
+
+function appendQuery(
+  path: string,
+  values: Record<string, string | number | undefined>,
+): string {
+  const parameters = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined) parameters.set(key, String(value));
+  }
+  const query = parameters.toString();
+  if (!query) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}${query}`;
+}
+
+async function apiPage<T>(path: string): Promise<{
+  items: T[];
+  nextCursor: string | null;
+  syncTime: string | null;
+}> {
+  const headers = new Headers({ [COOKIE_SESSION_HEADER]: "cookie" });
+  const response = await fetchWithSession(path, { headers });
+  if (!response.ok) {
+    throw await apiError(response, `请求失败（${response.status}）`);
+  }
+  return {
+    items: (await response.json()) as T[],
+    nextCursor: response.headers.get(NEXT_CURSOR_HEADER),
+    syncTime: response.headers.get(SYNC_TIME_HEADER),
+  };
+}
+
+export async function apiAllPages<T>(
+  path: string,
+  options: { maxPages?: number; pageLimit?: number } = {},
+): Promise<PaginatedResult<T>> {
+  const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
+  const pageLimit = options.pageLimit ?? DEFAULT_PAGE_LIMIT;
+  const items: T[] = [];
+  const seenCursors = new Set<string>();
+  let syncTime: string | null = null;
+  let cursor: string | undefined;
+
+  for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+    const page = await apiPage<T>(appendQuery(path, { limit: pageLimit, cursor }));
+    items.push(...page.items);
+    if (page.syncTime && (!syncTime || page.syncTime < syncTime)) {
+      syncTime = page.syncTime;
+    }
+    if (!page.nextCursor) return { items, truncated: false, syncTime };
+    if (seenCursors.has(page.nextCursor)) {
+      throw new Error("服务端返回了重复分页游标，请刷新后重试");
+    }
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  return { items, truncated: true, syncTime };
 }
 
 export async function download(

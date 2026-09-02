@@ -113,7 +113,11 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /该脚本尝试已过期/);
   assert.match(app, /生成记录/);
   assert.match(app, /提示词版本/);
-  assert.match(app, /runs\?limit=100/);
+  assert.match(app, /apiAllPages<WorkflowRun>\("\/runs"\)/);
+  assert.match(app, /pollOperationalData/);
+  assert.match(app, /updated_after=/);
+  assert.match(apiClient, /X-ContentFlow-Next-Cursor/);
+  assert.match(apiClient, /DEFAULT_MAX_PAGES/);
   assert.match(app, /系统处理中/);
   assert.match(app, /等你操作/);
   assert.match(app, /为什么需要你上传/);

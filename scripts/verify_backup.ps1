@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$BackupPath,
-    [string]$ExpectedAlembicRevision = "6d4e8f9a0b1c",
+    [string]$ExpectedAlembicRevision = "7e5f9a0b1c2d",
     [ValidateRange(1, 10000)]
     [int]$MinimumPublicTableCount = 28
 )

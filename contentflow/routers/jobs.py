@@ -2,13 +2,20 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..dependencies import CurrentPrincipal, Principal, require_role
 from ..entities import Asset, Campaign, ContentItem, Job, PublishJob, WorkflowRun
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    UpdatedAfter,
+    paginate,
+)
 from ..schemas import JobContextResponse, JobResponse
 
 
@@ -18,11 +25,29 @@ Editor = Annotated[Principal, Depends(require_role("editor"))]
 
 
 @router.get("", response_model=list[JobResponse])
-def list_jobs(principal: CurrentPrincipal, session: Db, status: str | None = None):
+def list_jobs(
+    principal: CurrentPrincipal,
+    session: Db,
+    response: Response,
+    status: str | None = None,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
+):
     query = select(Job).where(Job.workspace_id == principal.workspace_id)
     if status:
         query = query.where(Job.status == status)
-    jobs = list(session.scalars(query.order_by(Job.created_at.desc()).limit(200)))
+    if updated_after is not None:
+        query = query.where(Job.updated_at > updated_after)
+    jobs = paginate(
+        session,
+        query,
+        timestamp_column=Job.updated_at,
+        id_column=Job.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
     run_ids = {
         str(job.payload_json.get("run_id"))
         for job in jobs

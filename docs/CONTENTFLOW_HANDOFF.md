@@ -1781,3 +1781,20 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 3. 前端依赖审计新命中 `browserslist <=4.28.6` 高危公告；锁文件已把 Browserslist 更新到 `4.28.8`，连同其浏览器数据依赖做兼容范围内更新，没有扩大到应用依赖重构。更新后 moderate 审计为 0。
 4. 修复后本地 Ruff 通过，迁移/审计/恢复契约为 `19 passed`。成功运行 [ContentFlow CI #33648933471](https://github.com/heee000/ContentFlow/actions/runs/33648933471) 绑定提交 `3fa5206c4af90ffec6a09e5d2e10474386f579fc`，四个 Job 全部成功；失败运行 `33648030752` 只作为问题发现证据，不作为签收证据。
 5. 成功 CI 后端为 `262 passed, 145 subtests passed`，总覆盖率 82.03%；前端 lint/test/build/audit、Python 审计、可复现源码、SLSA 与双 CycloneDX attestation 均通过。Artifact `9853954616` 名为 `contentflow-supply-chain-3fa5206c4af90ffec6a09e5d2e10474386f579fc`，摘要 `sha256:fec0569d78774f692f9bffcd498f947c9f5ede8fbcce23419b2504519df9b9df`。
+
+## 21.39 有界游标、服务端同步水位与第二十七轮复审增量交接
+
+### 本轮实现
+
+1. `campaigns/runs/contents/assets/publishing/jobs/knowledge/documents/jobs` 七类主运营列表统一为有界 keyset 分页；数组响应保持兼容，下一页、页长和服务器同步水位通过 `X-ContentFlow-*` 响应头返回并由 CORS 暴露。游标严格校验版本、键集合、UTC 时间和 ID，`updated_after` 必须带时区。
+2. Alembic head 更新为 `7e5f9a0b1c2d`，为七张表建立 `(workspace_id, updated_at, id)` 组合索引；本地与公网备份验证默认 revision 同步，public 表门槛仍为 28。
+3. Web 初次用有界追页加载，最多 20 页/2000 条并明确提示截断。后台不再全量读取约 17 组数据，只增量刷新 8 组运营状态；隐藏标签页停止、并发轮询抑制，服务器水位加 2 秒重叠规避时钟偏差/边界竞态。超过 10 页更新时不推进水位，要求手动重载。
+4. `test_api_v2` 显式隔离本机真实 Prompt/S3/CORS/Provider 环境，未读取或修改 `.env`。新增分页、租户、篡改、时区与索引迁移回归。
+
+### 当前验证与边界
+
+- Ruff 全仓、锁文件、单 Alembic head、PowerShell 语法、公网部署校验和差异检查通过；隔离真实 `.env` 的全量后端为 `258 passed, 8 skipped, 152 subtests passed`、分支覆盖率 81.15%。8 项跳过只因本机未启动 PostgreSQL/MinIO，不能冒充外部服务签收。前端 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js/TypeScript 生产构建、moderate 依赖审计 0 漏洞均通过。远程 PostgreSQL/MinIO CI 必须在提交后继续签收，未完成前不得填写成功 Run URL。
+- 仍未分页的低频/父级集合包括审计、成员、工作区、风格 Skill、内容修订、发布证据和部分 Prompt/Eval 聚合；超过 2000 条的 Web 历史浏览、虚拟列表和服务端搜索仍需实现。
+- 前端单文件仍大，活动期仍有 8 路增量请求。下一阶段应拆分领域 query hooks/components，先做视图感知轮询和 Playwright 请求预算，再评估带恢复游标的 SSE/Inbox。
+- FORCE RLS 与 owner/migrator/API/Worker 角色拆分没有实施。它会改变数据库权限并可能导致 API/Worker 全面失去访问，必须在用户明确授权后以备份、回滚、分批迁移和跨租户负向测试执行；不得偷偷借分页阶段带入。
+- 公网部署仍按用户要求冻结；没有购买、创建或配置外部资源，也没有调用平台接口。继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、平台账密、模型缓存、备份和运行数据同样排除。

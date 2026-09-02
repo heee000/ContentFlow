@@ -21,6 +21,13 @@ from ..dependencies import (
 from ..entities import ChannelConnection, ContentItem, Job, PublishJob
 from ..job_queue import enqueue_job
 from ..object_storage import build_object_storage
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    UpdatedAfter,
+    paginate,
+)
 from ..schemas import (
     PublishJobResponse,
     PublishReconcileRequest,
@@ -57,13 +64,27 @@ def get_reconciliation_queue_job_for_update(
 
 
 @router.get("/jobs", response_model=list[PublishJobResponse])
-def list_publish_jobs(principal: CurrentPrincipal, session: Db):
-    return list(
-        session.scalars(
-            select(PublishJob)
-            .where(PublishJob.workspace_id == principal.workspace_id)
-            .order_by(PublishJob.scheduled_at.desc())
-        )
+def list_publish_jobs(
+    principal: CurrentPrincipal,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
+):
+    query = select(PublishJob).where(
+        PublishJob.workspace_id == principal.workspace_id
+    )
+    if updated_after is not None:
+        query = query.where(PublishJob.updated_at > updated_after)
+    return paginate(
+        session,
+        query,
+        timestamp_column=PublishJob.updated_at,
+        id_column=PublishJob.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
     )
 
 

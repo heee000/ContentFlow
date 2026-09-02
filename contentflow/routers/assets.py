@@ -24,6 +24,13 @@ from ..job_queue import enqueue_job
 from ..knowledge_service import local_path_from_uri
 from ..media_providers import MediaGeneration, MediaProviderError, download_generated_media
 from ..object_storage import build_object_storage
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    UpdatedAfter,
+    paginate,
+)
 from ..publish_evidence import PublishEvidenceError, normalize_publish_evidence
 from ..schemas import (
     AssetCapabilitiesResponse,
@@ -72,15 +79,29 @@ def asset_content_version(asset: Asset) -> int:
 def list_assets(
     principal: CurrentPrincipal,
     session: Db,
+    response: Response,
     content_item_id: str | None = None,
     status_filter: str | None = None,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
 ):
     query = select(Asset).where(Asset.workspace_id == principal.workspace_id)
     if content_item_id:
         query = query.where(Asset.content_item_id == content_item_id)
     if status_filter:
         query = query.where(Asset.status == status_filter)
-    return list(session.scalars(query.order_by(Asset.created_at.desc())))
+    if updated_after is not None:
+        query = query.where(Asset.updated_at > updated_after)
+    return paginate(
+        session,
+        query,
+        timestamp_column=Asset.updated_at,
+        id_column=Asset.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
 
 
 @router.get("/capabilities", response_model=AssetCapabilitiesResponse)

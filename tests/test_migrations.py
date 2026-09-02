@@ -37,6 +37,26 @@ class MigrationTest(unittest.TestCase):
                 self.assertIn("publish_confirmations", tables)
                 self.assertIn("audit_logs", tables)
                 self.assertIn("audit_chain_heads", tables)
+                pagination_indexes = {
+                    "campaigns": "ix_campaigns_workspace_updated_page",
+                    "workflow_runs": "ix_workflow_runs_workspace_updated_page",
+                    "content_items": "ix_content_items_workspace_updated_page",
+                    "assets": "ix_assets_workspace_updated_page",
+                    "publish_jobs": "ix_publish_jobs_workspace_updated_page",
+                    "knowledge_documents": (
+                        "ix_knowledge_documents_workspace_updated_page"
+                    ),
+                    "jobs": "ix_jobs_workspace_updated_page",
+                }
+                for table_name, index_name in pagination_indexes.items():
+                    indexes = {
+                        item["name"]: item
+                        for item in inspect(engine).get_indexes(table_name)
+                    }
+                    self.assertEqual(
+                        indexes[index_name]["column_names"],
+                        ["workspace_id", "updated_at", "id"],
+                    )
                 self.assertIn("worker_nodes", tables)
                 self.assertIn("auth_sessions", tables)
                 self.assertIn("auth_refresh_token_history", tables)

@@ -622,3 +622,40 @@
 - 实现提交 `52811bb64560751b500aba7bdd529b8982710627` 和 CI 修复提交 `3fa5206c4af90ffec6a09e5d2e10474386f579fc` 均以 `John Wang <182348029+heee000@users.noreply.github.com>` 普通推送到 `codex/enterprise-media-runtime`，未使用 force 或 force-with-lease。
 - [ContentFlow CI #33648933471](https://github.com/heee000/ContentFlow/actions/runs/33648933471) 四个 Job 全部成功：PostgreSQL/pgvector 与 MinIO 后端/安全门禁、前端 lint/test/生产构建/依赖审计、可复现源码/SBOM，以及签名 SLSA 来源证明和 Python/前端 CycloneDX attestation 均已签收。
 - 后端结果为 `262 passed, 145 subtests passed`，总覆盖率 82.03%，包含真实 PostgreSQL 双线程同工作区审计追加测试。供应链 Artifact `9853954616` 名为 `contentflow-supply-chain-3fa5206c4af90ffec6a09e5d2e10474386f579fc`，摘要为 `sha256:fec0569d78774f692f9bffcd498f947c9f5ede8fbcce23419b2504519df9b9df`。
+
+## 2026-09-03 有界列表与增量同步阶段
+
+### CF-20260903-01：高增长运营集合会无界读取工作区全表
+
+- 状态：实现、迁移和本地专项验证完成；远程 PostgreSQL/MinIO CI 待本阶段提交后签收。
+- 问题与影响：活动、内容、素材、发布和知识等列表没有统一上限；Job 虽硬限制 200，但无法继续读取。数据增长后会放大数据库扫描、序列化、网络和浏览器内存，并让旧记录不可达。
+- 根因：各 Router 独立实现 `order_by(...).all()`，没有共享页长、稳定次序、游标校验和响应元数据契约。
+- 解决方案：新增 `contentflow.pagination`。七类运营集合默认 100、最大 200（Run 保持既有最大 100），按 `updated_at DESC, id DESC` 做 keyset；游标是版本化、严格结构、URL-safe 的不透明载荷，畸形/超长/无时区增量输入返回 422。响应数组不变，以 `X-ContentFlow-Next-Cursor`、`X-ContentFlow-Page-Limit` 和 `X-ContentFlow-Sync-Time` 承载控制信息，并由 CORS 显式暴露。
+- 数据库：迁移 `7e5f9a0b1c2d` 为 7 张表增加 `(workspace_id, updated_at, id)` 组合索引；本地/公网备份默认 head 同步。企业大表升级仍需维护窗口测量普通建索引的锁等待和空间，不能把空库迁移结果当作在线 DDL 证明。
+- 验证：覆盖相同更新时间的稳定翻页、无重复/遗漏、跨工作区隔离、游标篡改、页长、带/不带时区增量输入、索引列序和空库升降级。
+
+### CF-20260903-02：工作台高频轮询重复读取静态控制面
+
+- 状态：前端实现和本地 lint/生产构建/SSR 测试完成，浏览器真实网络预算待后续 E2E。
+- 问题与影响：登录后一次并行请求约 17 组数据，随后每 15 秒完整重放；生成/素材处理中每 2.5 秒重放。成员、渠道、知识、Prompt 和审计等低频数据也被反复读取，标签页隐藏后仍消耗资源。
+- 解决方案：初次加载通过有界追页最多读取 2000 条并在截断时显式告知；后台只增量读取 Dashboard、Campaign、Run、Content、Asset、Publish、Job 和 Metrics。隐藏标签页暂停，重入轮询拒绝；按 ID 合并并稳定重排。同步水位来自服务端而非浏览器时钟，保留 2 秒重叠；若 10 页/1000 条仍未读完则不推进水位并要求手动全量刷新。
+- 兼容边界：没有删除语义的集合可通过增量合并收敛更新；跨页读取不是事务快照，但扫描期间的新写入会在下一轮重叠同步补回。当前不是 WebSocket/SSE，也没有超过 2000 条的专用历史浏览器。
+
+### CF-20260903-03：本地真实环境变量会污染隔离 API 回归
+
+- 状态：测试确定性修正完成。
+- 问题与影响：`test_api_v2` 只覆盖少量 Settings，本机真实 Prompt 门禁、S3 和 CORS 环境会把隔离 SQLite 测试改成连接 MinIO或拒绝本地 Origin，产生与代码无关的假失败并浪费诊断时间。
+- 解决方案：测试显式固定 development/local/hash/mock、关闭治理/指标并声明本地 CORS；没有读取或修改真实 `.env`。同一 API 测试恢复为离线确定性执行。
+
+### CF-20260903-04：持续复审新增未关闭边界
+
+- 低频/父级集合尚未统一游标：审计日志只有上限，成员、工作区、风格 Skill、内容修订、发布证据和部分 Prompt/Eval 列表仍可能增长。
+- `contentflow-app.tsx` 仍是大型单文件；活动期 8 路增量请求、2000 条客户端上限和无虚拟列表仍需 query hooks、历史浏览、SSE/Inbox、E2E 请求预算和负载证据。
+- FORCE RLS/数据库角色拆分需要改变 owner/API/Worker 权限，存在业务锁死风险。安全审查要求明确高影响迁移授权，本阶段未应用、未绕过，也没有 RLS 半成品文件。
+
+### 本阶段本地交付证据
+
+- 进程级隔离真实 `.env` 后，全量后端 `258 passed, 8 skipped, 152 subtests passed`，分支覆盖率 81.15%；8 项跳过为本机未启动的 PostgreSQL/MinIO 外部服务，不能冒充真实数据库/对象存储签收。
+- Ruff 全仓、`uv lock --check`、Alembic 单 head `7e5f9a0b1c2d`、PowerShell 备份脚本语法、公网部署 fail-closed 校验与 `git diff --check` 通过。
+- 前端 ESLint、Sites/vinext 构建和 2 项渲染测试、Next.js/TypeScript 生产构建通过；`npm audit --audit-level=moderate` 为 0 vulnerabilities。
+- 远程 Linux + PostgreSQL/pgvector + MinIO、供应链与 attestation 仍必须绑定本阶段提交重新运行；未成功前不把本阶段标为远程签收。

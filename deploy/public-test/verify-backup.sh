@@ -56,6 +56,6 @@ compose run --rm --no-deps \
     revision=$(psql --dbname "$VERIFY_DATABASE" -tA -c \
       "SELECT version_num FROM alembic_version;")
     test "$tables" -ge 28
-    test "$revision" = "6d4e8f9a0b1c"
+    test "$revision" = "7e5f9a0b1c2d"
     printf "Isolated restore passed: tables=%s alembic=%s\n" "$tables" "$revision"
   '

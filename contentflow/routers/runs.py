@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,12 @@ from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
 from ..entities import Campaign, PromptRelease, WorkflowRun
 from ..job_queue import enqueue_job
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    UpdatedAfter,
+    paginate,
+)
 from ..prompt_eval import EvalIntegrityError, require_current_passed_eval
 from ..prompt_governance import PromptIntegrityError, resolve_active_prompt_set
 from ..schemas import WorkflowRunRequest, WorkflowRunResponse
@@ -24,21 +30,28 @@ router = APIRouter(tags=["workflow-runs"])
 Db = Annotated[Session, Depends(get_db)]
 Editor = Annotated[Principal, Depends(require_role("editor"))]
 RunLimit = Annotated[int, Query(ge=1, le=100)]
-
-
 @router.get("/runs", response_model=list[WorkflowRunResponse])
 def list_workspace_runs(
     principal: CurrentPrincipal,
     session: Db,
-    limit: RunLimit = 100,
+    response: Response,
+    limit: RunLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
 ):
-    return list(
-        session.scalars(
-            select(WorkflowRun)
-            .where(WorkflowRun.workspace_id == principal.workspace_id)
-            .order_by(WorkflowRun.created_at.desc())
-            .limit(limit)
-        )
+    query = select(WorkflowRun).where(
+        WorkflowRun.workspace_id == principal.workspace_id
+    )
+    if updated_after is not None:
+        query = query.where(WorkflowRun.updated_at > updated_after)
+    return paginate(
+        session,
+        query,
+        timestamp_column=WorkflowRun.updated_at,
+        id_column=WorkflowRun.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
     )
 
 
@@ -47,19 +60,26 @@ def list_runs(
     campaign_id: str,
     principal: CurrentPrincipal,
     session: Db,
+    response: Response,
     limit: RunLimit = 20,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
 ):
     get_campaign_or_404(session, principal.workspace_id, campaign_id)
-    return list(
-        session.scalars(
-            select(WorkflowRun)
-            .where(
-                WorkflowRun.workspace_id == principal.workspace_id,
-                WorkflowRun.campaign_id == campaign_id,
-            )
-            .order_by(WorkflowRun.created_at.desc())
-            .limit(limit)
-        )
+    query = select(WorkflowRun).where(
+        WorkflowRun.workspace_id == principal.workspace_id,
+        WorkflowRun.campaign_id == campaign_id,
+    )
+    if updated_after is not None:
+        query = query.where(WorkflowRun.updated_at > updated_after)
+    return paginate(
+        session,
+        query,
+        timestamp_column=WorkflowRun.updated_at,
+        id_column=WorkflowRun.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
     )
 
 

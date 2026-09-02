@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -10,6 +10,13 @@ from ..audit import record_audit
 from ..db import get_db
 from ..dependencies import CurrentPrincipal, Principal, require_role
 from ..entities import Campaign
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    UpdatedAfter,
+    paginate,
+)
 from ..schemas import CampaignCreate, CampaignResponse, CampaignUpdate
 from ..style_skills import resolve_style_skill
 
@@ -34,13 +41,25 @@ def get_campaign_or_404(
 
 
 @router.get("", response_model=list[CampaignResponse])
-def list_campaigns(principal: CurrentPrincipal, session: Db):
-    return list(
-        session.scalars(
-            select(Campaign)
-            .where(Campaign.workspace_id == principal.workspace_id)
-            .order_by(Campaign.updated_at.desc())
-        )
+def list_campaigns(
+    principal: CurrentPrincipal,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
+):
+    query = select(Campaign).where(Campaign.workspace_id == principal.workspace_id)
+    if updated_after is not None:
+        query = query.where(Campaign.updated_at > updated_after)
+    return paginate(
+        session,
+        query,
+        timestamp_column=Campaign.updated_at,
+        id_column=Campaign.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
     )
 
 
@@ -145,4 +164,3 @@ def update_campaign(
         metadata={"changed_fields": sorted(updates)},
     )
     return campaign
-

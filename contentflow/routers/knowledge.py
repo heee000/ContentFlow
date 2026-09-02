@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,13 @@ from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_rol
 from ..entities import KnowledgeDocument
 from ..job_queue import enqueue_job
 from ..object_storage import build_object_storage
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    UpdatedAfter,
+    paginate,
+)
 from ..schemas import KnowledgeDocumentResponse
 
 
@@ -25,13 +32,27 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 @router.get("/documents", response_model=list[KnowledgeDocumentResponse])
-def list_documents(principal: CurrentPrincipal, session: Db):
-    return list(
-        session.scalars(
-            select(KnowledgeDocument)
-            .where(KnowledgeDocument.workspace_id == principal.workspace_id)
-            .order_by(KnowledgeDocument.created_at.desc())
-        )
+def list_documents(
+    principal: CurrentPrincipal,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
+):
+    query = select(KnowledgeDocument).where(
+        KnowledgeDocument.workspace_id == principal.workspace_id
+    )
+    if updated_after is not None:
+        query = query.where(KnowledgeDocument.updated_at > updated_after)
+    return paginate(
+        session,
+        query,
+        timestamp_column=KnowledgeDocument.updated_at,
+        id_column=KnowledgeDocument.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
     )
 
 
@@ -97,4 +118,3 @@ async def upload_document(
         metadata={"filename": filename, "size_bytes": stored.size_bytes},
     )
     return document
-

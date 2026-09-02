@@ -99,6 +99,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=[
+            "X-ContentFlow-Next-Cursor",
+            "X-ContentFlow-Page-Limit",
+            "X-ContentFlow-Sync-Time",
+        ],
     )
 
     @application.middleware("http")

@@ -6,11 +6,13 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
   ApiError,
   api,
+  apiAllPages,
   download,
   getApiBase,
   runtimeApiBaseConfigurable,
@@ -85,6 +87,7 @@ type WorkflowRun = {
   error: string | null;
   completed_at: string | null;
   created_at: string;
+  updated_at: string;
 };
 
 type Content = {
@@ -129,6 +132,7 @@ type Asset = {
   metadata_json: Record<string, unknown>;
   error: string | null;
   created_at: string;
+  updated_at: string;
 };
 
 type MediaSource = "manual" | "generate" | "search" | "hybrid";
@@ -192,6 +196,7 @@ type PublishJob = {
   script_confirmation_expired: boolean;
   script_requested_by_user_id: string | null;
   script_package_available: boolean;
+  updated_at: string;
 };
 
 type PublishEvidence = {
@@ -567,6 +572,28 @@ const EMPTY_DATA: DataState = {
     recommendations: [],
   },
 };
+
+function mergeUpdatedRows<T extends { id: string; updated_at: string }>(
+  current: T[],
+  updates: T[],
+): T[] {
+  const rows = new Map(current.map((item) => [item.id, item]));
+  for (const item of updates) rows.set(item.id, item);
+  return [...rows.values()].sort(
+    (left, right) =>
+      right.updated_at.localeCompare(left.updated_at)
+      || right.id.localeCompare(left.id),
+  );
+}
+
+function safeRefreshBoundary(syncTimes: Array<string | null>): string {
+  const earliest = syncTimes
+    .filter((value): value is string => Boolean(value))
+    .sort()[0];
+  const parsed = earliest ? Date.parse(earliest) : Number.NaN;
+  const timestamp = Number.isFinite(parsed) ? parsed : Date.now();
+  return new Date(timestamp - 2_000).toISOString();
+}
 
 const PLATFORM: Record<string, string> = {
   xiaohongshu: "小红书",
@@ -1081,22 +1108,25 @@ export function ContentFlowApp() {
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [pageWarning, setPageWarning] = useState("");
+  const pollInFlight = useRef(false);
+  const lastOperationalRefresh = useRef<string | null>(null);
 
-  const loadData = useCallback(async (silent = false) => {
-    if (!silent) setRefreshing(true);
+  const loadData = useCallback(async () => {
+    setRefreshing(true);
     try {
       const [
         dashboard,
-        campaigns,
-        runs,
+        campaignPage,
+        runPage,
         styleSkills,
-        contents,
-        assets,
+        contentPage,
+        assetPage,
         mediaCapabilities,
         channels,
-        publishes,
-        knowledge,
-        jobs,
+        publishPage,
+        knowledgePage,
+        jobPage,
         metrics,
         workspaces,
         members,
@@ -1105,16 +1135,16 @@ export function ContentFlowApp() {
         promptEval,
       ] = await Promise.all([
         api<DashboardSummary>("/dashboard/summary"),
-        api<Campaign[]>("/campaigns"),
-        api<WorkflowRun[]>("/runs?limit=100"),
+        apiAllPages<Campaign>("/campaigns"),
+        apiAllPages<WorkflowRun>("/runs"),
         api<StyleSkill[]>("/style-skills"),
-        api<Content[]>("/contents"),
-        api<Asset[]>("/assets"),
+        apiAllPages<Content>("/contents"),
+        apiAllPages<Asset>("/assets"),
         api<MediaCapabilities>("/assets/capabilities"),
         api<Channel[]>("/channels"),
-        api<PublishJob[]>("/publishing/jobs"),
-        api<KnowledgeDocument[]>("/knowledge/documents"),
-        api<QueueJob[]>("/jobs"),
+        apiAllPages<PublishJob>("/publishing/jobs"),
+        apiAllPages<KnowledgeDocument>("/knowledge/documents"),
+        apiAllPages<QueueJob>("/jobs"),
         api<MetricsSummary>(
           campaignFilter
             ? `/metrics/summary?campaign_id=${encodeURIComponent(campaignFilter)}`
@@ -1134,18 +1164,27 @@ export function ContentFlowApp() {
           ? api<PromptEvalGovernance>("/admin/prompt-eval")
           : Promise.resolve(null),
       ]);
+      const limitedCollections = [
+        ["活动", campaignPage.truncated],
+        ["运行记录", runPage.truncated],
+        ["内容", contentPage.truncated],
+        ["素材", assetPage.truncated],
+        ["发布任务", publishPage.truncated],
+        ["知识文档", knowledgePage.truncated],
+        ["队列任务", jobPage.truncated],
+      ].filter(([, truncated]) => truncated).map(([label]) => label);
       setData({
         dashboard,
-        campaigns,
-        runs,
+        campaigns: campaignPage.items,
+        runs: runPage.items,
         styleSkills,
-        contents,
-        assets,
+        contents: contentPage.items,
+        assets: assetPage.items,
         mediaCapabilities,
         channels,
-        publishes,
-        knowledge,
-        jobs,
+        publishes: publishPage.items,
+        knowledge: knowledgePage.items,
+        jobs: jobPage.items,
         metrics,
         workspaces,
         members,
@@ -1153,6 +1192,19 @@ export function ContentFlowApp() {
         promptGovernance,
         promptEval,
       });
+      lastOperationalRefresh.current = safeRefreshBoundary([
+        campaignPage.syncTime,
+        runPage.syncTime,
+        contentPage.syncTime,
+        assetPage.syncTime,
+        publishPage.syncTime,
+        jobPage.syncTime,
+      ]);
+      setPageWarning(
+        limitedCollections.length
+          ? `${limitedCollections.join("、")}数据量较大，当前仅显示最新 2000 条。`
+          : "",
+      );
       setError("");
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {
@@ -1162,6 +1214,84 @@ export function ContentFlowApp() {
       }
     } finally {
       setRefreshing(false);
+    }
+  }, [session, campaignFilter]);
+
+  const pollOperationalData = useCallback(async () => {
+    if (
+      !session
+      || pollInFlight.current
+      || typeof document === "undefined"
+      || document.visibilityState === "hidden"
+    ) return;
+    const updatedAfter = lastOperationalRefresh.current;
+    if (!updatedAfter) return;
+    const query = `updated_after=${encodeURIComponent(updatedAfter)}`;
+    pollInFlight.current = true;
+    try {
+      const [
+        dashboard,
+        campaignPage,
+        runPage,
+        contentPage,
+        assetPage,
+        publishPage,
+        jobPage,
+        metrics,
+      ] = await Promise.all([
+        api<DashboardSummary>("/dashboard/summary"),
+        apiAllPages<Campaign>(`/campaigns?${query}`, { maxPages: 10 }),
+        apiAllPages<WorkflowRun>(`/runs?${query}`, { maxPages: 10 }),
+        apiAllPages<Content>(`/contents?${query}`, { maxPages: 10 }),
+        apiAllPages<Asset>(`/assets?${query}`, { maxPages: 10 }),
+        apiAllPages<PublishJob>(`/publishing/jobs?${query}`, { maxPages: 10 }),
+        apiAllPages<QueueJob>(`/jobs?${query}`, { maxPages: 10 }),
+        api<MetricsSummary>(
+          campaignFilter
+            ? `/metrics/summary?campaign_id=${encodeURIComponent(campaignFilter)}`
+            : "/metrics/summary",
+        ),
+      ]);
+      setData((current) => ({
+        ...current,
+        dashboard,
+        campaigns: mergeUpdatedRows(current.campaigns, campaignPage.items),
+        runs: mergeUpdatedRows(current.runs, runPage.items),
+        contents: mergeUpdatedRows(current.contents, contentPage.items),
+        assets: mergeUpdatedRows(current.assets, assetPage.items),
+        publishes: mergeUpdatedRows(current.publishes, publishPage.items),
+        jobs: mergeUpdatedRows(current.jobs, jobPage.items),
+        metrics,
+      }));
+      const truncated = [
+        campaignPage,
+        runPage,
+        contentPage,
+        assetPage,
+        publishPage,
+        jobPage,
+      ].some((page) => page.truncated);
+      if (truncated) {
+        setPageWarning("短时间内更新的数据超过 1000 条，请手动刷新以重新同步。");
+      } else {
+        lastOperationalRefresh.current = safeRefreshBoundary([
+          campaignPage.syncTime,
+          runPage.syncTime,
+          contentPage.syncTime,
+          assetPage.syncTime,
+          publishPage.syncTime,
+          jobPage.syncTime,
+        ]);
+      }
+      setError("");
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 401) {
+        setSession(null);
+      } else {
+        setError(messageOf(caught));
+      }
+    } finally {
+      pollInFlight.current = false;
     }
   }, [session, campaignFilter]);
 
@@ -1185,15 +1315,19 @@ export function ContentFlowApp() {
   useEffect(() => {
     if (!session) return;
     const initial = window.setTimeout(() => void loadData(), 0);
+    return () => window.clearTimeout(initial);
+  }, [session, loadData]);
+
+  useEffect(() => {
+    if (!session) return;
     const timer = window.setInterval(
-      () => void loadData(true),
+      () => void pollOperationalData(),
       hasActiveWork ? 2_500 : 15_000,
     );
     return () => {
-      window.clearTimeout(initial);
       window.clearInterval(timer);
     };
-  }, [session, loadData, hasActiveWork]);
+  }, [session, pollOperationalData, hasActiveWork]);
 
   function flash(message: string) {
     setNotice(message);
@@ -1453,6 +1587,12 @@ export function ContentFlowApp() {
             <div className="toast toast-error" role="alert">
               <span>{error}</span>
               <button onClick={() => setError("")}>关闭</button>
+            </div>
+          ) : null}
+          {pageWarning ? (
+            <div className="pagination-warning" role="status">
+              <span>{pageWarning}</span>
+              <button onClick={() => setPageWarning("")}>知道了</button>
             </div>
           ) : null}
           <ActiveGenerationStrip runs={scopedRuns} campaigns={data.campaigns} />

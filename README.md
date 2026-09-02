@@ -102,6 +102,8 @@ npm run dev:local
 
 首次使用在登录页切换到“注册”，创建账户与工作区。默认 API 地址为 `http://localhost:8000/api/v1`。
 
+活动、运行、内容、素材、发布任务、知识文档和队列任务列表默认每页 100 条，使用 `limit`（最大 200；运行记录保持最大 100）与不透明 `cursor` 继续读取；响应头 `X-ContentFlow-Next-Cursor` 表示还有下一页。`updated_after` 只接受带时区时间，用于增量同步；`X-ContentFlow-Sync-Time` 提供服务端同步水位。数组响应结构保持不变，跨域 Web 可读取这些分页头。
+
 ## 一键容器部署
 
 复制 `.env.example` 为 `.env`，至少设置两个不同的 32 位以上随机密钥 `CONTENTFLOW_SECRET_KEY`、`CONTENTFLOW_CREDENTIAL_ENCRYPTION_KEY`，并替换 PostgreSQL 与 MinIO 密码。离线验收可保留 `CONTENTFLOW_ALLOW_MOCK_PROVIDERS=true`；真实生产必须设为 `false` 并配置真实 Provider。生产还必须显式设置 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true` 和 `CONTENTFLOW_METRICS_ENABLED=true`；Compose 的 API/Worker 默认启用 Prompt 门禁。指标端点必须使用与应用签名/凭据密钥不同的 32 位以上 Bearer Token，并只允许内部监控网络访问。

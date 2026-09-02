@@ -24,10 +24,22 @@ class ApiV2Test(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         settings = Settings(
+            environment="development",
             database_url=f"sqlite:///{(root / 'api.db').as_posix()}",
             secret_key="test-secret",
             local_storage_dir=root / "storage",
+            storage_backend="local",
             allow_registration=True,
+            require_governed_prompts=False,
+            metrics_enabled=False,
+            embedding_provider="hash",
+            text_provider="mock",
+            image_provider="mock",
+            video_provider="mock",
+            cors_origins=[
+                "http://localhost:3000",
+                "http://localhost:3001",
+            ],
         )
         self.client = TestClient(create_app(settings))
         self.client.__enter__()
