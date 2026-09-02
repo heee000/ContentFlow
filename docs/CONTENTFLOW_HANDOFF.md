@@ -1860,7 +1860,7 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 
 - 存储账本、迁移、素材替换和脚本包清理专项为 `40 passed`；补齐对象协议透传后定向回归为 `20 passed, 14 subtests passed`，最终本机全量为 `281 passed, 11 skipped, 167 subtests passed`，分支覆盖率 80.52%。11 项均为本机没有启动 PostgreSQL/MinIO 的外部服务用例，不能冒充真实并发或对象后端签收。
 - Ruff、Python 编译、锁文件、Alembic 单 head、PowerShell 语法、公网部署 fail-closed 校验、`pip check` 和 Python/npm 漏洞审计均通过；ESLint、Next.js/TypeScript 生产构建、Vinext/Sites 构建和 2 项 SSR 渲染测试通过。本地隔离 API/Web 登录页加载成功且控制台无 warning/error；没有使用真实账号登录或调用平台。本机 WSL Bash 服务被宿主 ACL 拒绝，`verify-backup.sh` 的 Linux 语法/运行仍由远程 CI 签收。
-- PostgreSQL 双线程工作区配额测试与 MinIO 分页/键隔离测试已经入仓，但本机未运行外部服务；只有本提交的 GitHub Linux/PostgreSQL/MinIO CI 全绿后才能写成远程签收。当前没有 commit、push 或 force。
+- 实现提交 `69786faad32e3fc231ac6a53ceaa9289972a84f1` 已以 John Wang 身份普通推送；首次 [CI #33678743444](https://github.com/heee000/ContentFlow/actions/runs/33678743444) 由 Linux 暴露暂存文件名在最终截断前已超过 255 字节，前端/SBOM 成功但后端失败，未被记为签收。修复提交 `1496cc9aaf9ab02753dd2e87377cb7a30debcef1` 将暂存名改为固定短随机名；[CI #33679198143](https://github.com/heee000/ContentFlow/actions/runs/33679198143) 四个 Job 全部成功，真实 PostgreSQL/pgvector 与 MinIO 为 `292 passed, 167 subtests passed`、覆盖率 81.62%，Prometheus、前后端依赖审计、可复现源码/SBOM、SLSA 和双 CycloneDX attestations 均签收。Artifact `9865599206` 摘要为 `sha256:5d438a812060e07e0a2d3bfa2bfa3c2f1292c96da3e84becd105daa254639be3`；全程未使用 force。
 
 ### 继续保留的边界
 

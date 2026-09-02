@@ -763,7 +763,13 @@
 
 ### CF-20260903-15：Linux 暂存文件名在最终截断前已超过文件系统上限
 
-- 状态：远程 CI 发现，跨平台修复和本地定向验证进行中；必须以修复提交重新运行完整 CI。
+- 状态：远程 CI 发现，跨平台修复、本地定向验证和修复提交完整远程 CI 均已完成。
 - 发现方式：实现提交 `69786fa` 的 CI `33678743444` 中，前端与 SBOM 成功，后端真实 PostgreSQL/MinIO 运行到 `test_generated_physical_name_stays_within_filesystem_byte_limit` 时失败。最终对象名虽已按 UTF-8 截断至 255 字节，但写入阶段先使用了“随机前缀 + 原始长文件名 + `.uploading`”，Linux 在打开暂存文件时即返回 `Errno 36`；Windows 本地没有暴露该差异。
 - 解决方案：暂存文件名改为只含固定点前缀、32 位随机十六进制和 `.uploading`，不再携带用户文件名；最终文件名、扩展名、校验和和分配 ID 规则保持不变。异常清理也因此始终操作合法短路径。
-- 证据边界：失败运行只能证明前端/SBOM和后端失败前门禁，不是最终远程签收；修复提交的 Linux 全量、依赖审计和 attestation 全绿后才可关闭本项。
+- 验证：本地对象存储/账本专项为 `16 passed, 14 subtests passed`，Ruff 通过。修复提交 `1496cc9aaf9ab02753dd2e87377cb7a30debcef1` 的 [CI #33679198143](https://github.com/heee000/ContentFlow/actions/runs/33679198143) 在 Linux 上通过该长中文文件名回归，并继续完成真实 PostgreSQL/MinIO 全量、依赖审计和供应链证明。失败运行只保留为问题发现证据，不作为最终签收。
+
+### 本阶段远程交付证据
+
+- 实现提交 `69786faad32e3fc231ac6a53ceaa9289972a84f1` 与跨平台修复提交 `1496cc9aaf9ab02753dd2e87377cb7a30debcef1` 均以 `John Wang <182348029+heee000@users.noreply.github.com>` 普通推送到 `codex/enterprise-media-runtime`，未使用 force 或 force-with-lease。
+- [ContentFlow CI #33679198143](https://github.com/heee000/ContentFlow/actions/runs/33679198143) 四个 Job 全部成功：真实 PostgreSQL/pgvector 与 MinIO 后端为 `292 passed, 167 subtests passed`，分支覆盖率 81.62%；Prometheus 配置/规则/规则单测、Python/npm 审计、前端 lint/test/两套生产构建、可复现源码与 SBOM 均通过。
+- 供应链 Artifact `9865599206` 名为 `contentflow-supply-chain-1496cc9aaf9ab02753dd2e87377cb7a30debcef1`，摘要 `sha256:5d438a812060e07e0a2d3bfa2bfa3c2f1292c96da3e84becd105daa254639be3`；SLSA 来源证明和 Python/前端 CycloneDX attestations 已发布并反向验证。
