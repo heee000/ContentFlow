@@ -152,20 +152,20 @@ python -m alembic history
 .\scripts\verify_backup.ps1 -BackupPath <path> -ExpectedAlembicRevision <revision> -MinimumPublicTableCount <count>
 ```
 
-正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `8f6a1b2c3d4e`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
+正式备份前先停止 API/Worker。脚本默认检查 Compose 写入服务与 Alembic `9a7b2c3d4e5f`；写入服务仍运行或数据库版本不符时会在创建目录前拒绝。`-AllowLiveWrites` 只用于明确接受不一致风险的临时取证，不得作为正式恢复点。
 
 `verify_backup.ps1` 默认校验 dump 哈希、至少 28 张 public 表、迁移版本、对象数量/总字节数和每个对象的大小/SHA-256；随后把数据库恢复到随机临时库、对象恢复到随机临时 bucket 并下载复验，最后清理它创建的库、bucket 和目录。历史备份需显式传入其旧 revision 和表数。
 
 真正灾难恢复时仍必须恢复到新的 PostgreSQL 数据库和空 bucket，完成应用验收后再切换流量。不要未经演练直接对当前 `contentflow` 库执行 `pg_restore --clean`。
 
-- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `8f6a1b2c3d4e` 包含审计哈希链、7 个运营列表和 11 个控制面/历史列表组合索引；持久 PostgreSQL 迁移与 28 表联合恢复需由当前 CI/恢复演练重新签收；旧证据不等于 PITR 或异地灾备。
-- 从大数据量旧版本升级到 `8f6a1b2c3d4e` 会创建普通 PostgreSQL 索引。当前自动迁移适合个人测试/低数据量环境；企业生产必须先在副本测量索引空间和锁等待，并在维护窗口由独立迁移任务执行，不能依赖多副本 API 同时启动迁移。
+- 2026-08-09 已完成上一 head `c9e7b4a2d610` 的本地静默联合恢复演练：18 张表、39 个对象、165208 字节，临时库/bucket/目录均为 0 残留。当前 head `9a7b2c3d4e5f` 在审计哈希链和分页索引之外增加可索引的素材内容版本；持久 PostgreSQL 迁移与 28 表联合恢复需由当前 CI/恢复演练重新签收；旧证据不等于 PITR 或异地灾备。
+- 从大数据量旧版本升级到 `9a7b2c3d4e5f` 会回填 `assets.content_version` 并创建普通 PostgreSQL 复合索引。当前自动迁移适合个人测试/低数据量环境；企业生产必须先在副本测量回填、索引空间和锁等待，并在维护窗口由独立迁移任务执行，不能依赖多副本 API 同时启动迁移。
 - 运营列表调用方应保存 `X-ContentFlow-Next-Cursor` 原样继续读取，不得解析或构造游标。增量同步使用上次响应的 `X-ContentFlow-Sync-Time` 并保留短重叠窗口；收到 422 游标错误应丢弃游标并从第一页重载。`updated_after` 必须包含时区。
 - MinIO/S3 生产 bucket 应启用版本控制、生命周期、服务端加密和不可变保留策略。
 - `CONTENTFLOW_SECRET_KEY`、当前/历史凭据加密密钥必须单独备份到集中密钥管理系统；丢失后访问令牌和已加密平台凭据无法恢复。
 - 审计日志按合规周期归档，不要和普通应用日志一起随意清理。管理员应定期调用 `GET /api/v1/admin/audit-integrity`；返回 `valid=false` 时暂停高风险发布/治理操作，保留数据库和对象存储快照，并依据 `reason` 与 `first_invalid_sequence` 调查。链头哈希可作为外部归档锚点，但当前数据库内哈希链只提供篡改检测，不等于 WORM、可信时间戳或管理员不可伪造。
 
-脚本发布证据默认单文件上限 10 MiB、图片解码像素上限 4000 万，且证据上限不能超过通用上传上限；通过 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_BYTES` 和 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_PIXELS` 调整。任务包确认窗口默认 1440 分钟，可用 `CONTENTFLOW_SCRIPT_CONFIRMATION_TTL_MINUTES` 在 15 至 43200 分钟之间调整；修改只影响之后生成的新尝试。
+脚本发布证据默认单文件 10 MiB、单次尝试 20 个对象/累计 50 MiB，图片解码像素上限 4000 万；通过 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_BYTES`、`CONTENTFLOW_PUBLISH_EVIDENCE_MAX_ITEMS`、`CONTENTFLOW_PUBLISH_EVIDENCE_MAX_TOTAL_BYTES` 和 `CONTENTFLOW_PUBLISH_EVIDENCE_MAX_PIXELS` 调整。累计上限不得小于单文件上限，单文件上限不得超过通用上传上限；PostgreSQL 会锁定发布任务后检查数量和累计字节，超限请求不会写对象。每个内容版本默认最多 20 个素材记录，可用 `CONTENTFLOW_ASSET_MAX_ITEMS_PER_CONTENT_VERSION` 在 1 至 100 间调整；旧版本任务会在媒体 Provider 调用前停止。任务包确认窗口默认 1440 分钟，可用 `CONTENTFLOW_SCRIPT_CONFIRMATION_TTL_MINUTES` 在 15 至 43200 分钟之间调整；修改只影响之后生成的新尝试。
 
 证据对象应纳入与数据库一致的备份、保留和访问审计。任务包或证据对象写入成功、数据库 flush/commit 失败时，API/Worker 会同步回滚数据库并尽力删除刚写入的对象；过期重建也会在新状态落盘后清理旧包。对象存储删除自身仍可能失败，系统会记录日志/审计但不会把已提交的新任务伪装成失败，因此生产环境仍需按无数据库引用的 `publish-evidence/` 和脚本包对象定期巡检并告警。
 

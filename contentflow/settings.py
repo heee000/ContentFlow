@@ -71,6 +71,12 @@ class Settings(BaseSettings):
         gt=0,
         le=100 * 1024 * 1024,
     )
+    publish_evidence_max_items: int = Field(default=20, ge=1, le=100)
+    publish_evidence_max_total_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        gt=0,
+        le=1024**3,
+    )
     publish_evidence_max_pixels: int = Field(
         default=40_000_000,
         gt=0,
@@ -125,6 +131,7 @@ class Settings(BaseSettings):
     image_search_download_allowed_hosts: list[str] = Field(
         default_factory=lambda: ["upload.wikimedia.org"]
     )
+    asset_max_items_per_content_version: int = Field(default=20, ge=1, le=100)
 
     worker_poll_seconds: float = Field(default=1.0, gt=0, le=60)
     worker_lease_seconds: int = Field(default=300, ge=3, le=86_400)
@@ -157,6 +164,11 @@ class Settings(BaseSettings):
         if self.publish_evidence_max_bytes > self.max_upload_bytes:
             raise ValueError(
                 "publish_evidence_max_bytes must not exceed max_upload_bytes"
+            )
+        if self.publish_evidence_max_total_bytes < self.publish_evidence_max_bytes:
+            raise ValueError(
+                "publish_evidence_max_total_bytes must not be less than "
+                "publish_evidence_max_bytes"
             )
         return self
 

@@ -7,7 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -67,11 +67,11 @@ def get_asset(
 
 def asset_content_version(asset: Asset) -> int:
     try:
-        version = int((asset.metadata_json or {}).get("content_version") or 1)
+        version = int(asset.content_version)
     except (TypeError, ValueError) as error:
-        raise HTTPException(status_code=409, detail="素材版本元数据无效") from error
+        raise HTTPException(status_code=409, detail="素材版本无效") from error
     if version < 1:
-        raise HTTPException(status_code=409, detail="素材版本元数据无效")
+        raise HTTPException(status_code=409, detail="素材版本无效")
     return version
 
 
@@ -413,16 +413,19 @@ def select_asset_candidate(
                 select(Asset).where(
                     Asset.content_item_id == content.id,
                     Asset.workspace_id == principal.workspace_id,
+                    Asset.content_version == content.version,
                     Asset.id != asset.id,
-                )
+                ).limit(settings.asset_max_items_per_content_version + 1)
             )
         )
+        if len(siblings) > settings.asset_max_items_per_content_version:
+            raise HTTPException(
+                status_code=409,
+                detail="当前内容版本素材数量超过配置上限，请先由管理员处理异常数据",
+            )
         for sibling in siblings:
             sibling_metadata = dict(sibling.metadata_json or {})
-            if (
-                asset_content_version(sibling) == content.version
-                and sibling_metadata.get("candidate_group") == candidate_group
-            ):
+            if sibling_metadata.get("candidate_group") == candidate_group:
                 sibling_metadata["selected"] = False
                 sibling.metadata_json = sibling_metadata
     record_audit(
@@ -569,17 +572,19 @@ async def upload_asset(
                 .where(
                     Asset.content_item_id == content.id,
                     Asset.workspace_id == principal.workspace_id,
+                    Asset.content_version == content.version,
                     Asset.kind == target_kind,
                     Asset.status.in_(["awaiting_upload", "planned", "failed"]),
                 )
+                .limit(settings.asset_max_items_per_content_version + 1)
                 .with_for_update()
             )
         )
-        candidates = [
-            candidate
-            for candidate in candidates
-            if asset_content_version(candidate) == content.version
-        ]
+        if len(candidates) > settings.asset_max_items_per_content_version:
+            raise HTTPException(
+                status_code=409,
+                detail="当前内容版本素材数量超过配置上限，请先由管理员处理异常数据",
+            )
         if len(candidates) > 1:
             raise HTTPException(
                 status_code=409,
@@ -595,6 +600,22 @@ async def upload_asset(
             raise HTTPException(status_code=409, detail="素材任务属于旧内容版本")
 
     filled_existing_task = asset is not None
+    if asset is None:
+        current_asset_count = session.scalar(
+            select(func.count(Asset.id)).where(
+                Asset.workspace_id == principal.workspace_id,
+                Asset.content_item_id == content.id,
+                Asset.content_version == content.version,
+            )
+        )
+        if int(current_asset_count or 0) >= settings.asset_max_items_per_content_version:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "当前内容版本素材数量已达到配置上限 "
+                    f"({settings.asset_max_items_per_content_version})"
+                ),
+            )
     claimed_type = file.content_type or "application/octet-stream"
     data = await file.read(settings.max_upload_bytes + 1)
     if not data:
@@ -671,6 +692,7 @@ async def upload_asset(
         asset = Asset(
             workspace_id=principal.workspace_id,
             content_item_id=content.id,
+            content_version=content.version,
             kind=target_kind,
         )
         session.add(asset)

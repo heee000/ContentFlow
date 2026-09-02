@@ -1826,3 +1826,20 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - FORCE RLS 与数据库角色拆分继续等待用户明确的高影响迁移授权；不得偷偷实施。公网部署继续冻结；本轮没有调用平台接口、创建素材/草稿/发布或外部资源。
 - 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。
 - 实现提交 `950323dbe499291fc14758d6674e276b7711e112` 已用 John Wang 身份普通推送，未使用 force；[ContentFlow CI #33663045854](https://github.com/heee000/ContentFlow/actions/runs/33663045854) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `267 passed, 160 subtests passed`、覆盖率 82.18%；前端、安全审计、Prometheus、可复现源码/SBOM、SLSA 和双 CycloneDX attestation 全部签收。Artifact `9859471526` 摘要为 `sha256:e0cdc89417ca2a5883ea878e2be375ed935bedc5de9d20e562716471675b0a27`。
+
+## 21.41 证据/素材业务配额与第二十九轮复审增量交接
+
+### 本轮实现
+
+1. 脚本发布证据新增单尝试数量与累计字节边界，默认分别为 20 个和 50 MiB；连同原有单文件 10 MiB、4000 万像素限制均可配置且有启动校验。上传在持有当前 `PublishJob` 行锁时读取数据库真实 count/sum，重复判断和配额判断均先于对象写入，成功后同步 `script_evidence_count` 与 `script_evidence_total_bytes`。
+2. `assets.content_version` 成为非空、可查询字段；迁移 `9a7b2c3d4e5f` 通过 SQLite/PostgreSQL 方言内集合更新从既有 JSON 元数据回填，非法、非正整数、32 位溢出或缺失旧值保守归为版本 1，并新增工作区/内容/版本/状态复合索引。迁移不会把全表 JSON 拉入 Python 内存；JSON 字段暂时保留用于旧客户端和媒体契约兼容，但运行时正确性查询不再依赖 JSON 扫描。
+3. 工作流初建、内容改版和无任务人工补建都显式写素材版本；当前内容版本默认最多 20 个素材。内容修改只读取上一版本非 stale 记录，审核、发布、候选互斥和人工上传都在 SQL 层限定当前版本。超过配置的异常遗留集合失败关闭，不继续放大。
+4. 已被内容改版淘汰的 `stale` 生成/轮询任务在构建媒体 Provider 之前幂等结束，不再产生无效外部调用或媒体成本。
+5. 备份、恢复和公网恢复校验默认 head 同步为 `9a7b2c3d4e5f`；public 表数仍为 28。公网部署仍冻结，没有创建云资源、调用平台 API、生成草稿或发布内容。
+
+### 当前验证与接手边界
+
+- Ruff 与编译检查通过；证据专项为 `46 passed, 37 subtests passed`，素材/迁移/安全/脚本定向回归为 `96 passed, 70 subtests passed`，最终迁移专项为 `15 passed`。本机全量为 `265 passed, 9 skipped, 167 subtests passed`、覆盖率 81.27%；9 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例。前端 ESLint、Vinext 构建与 2 项渲染测试、Next.js 生产构建通过，npm moderate 审计为 0 漏洞；Alembic 单 head、锁文件、部署清单、备份脚本语法、`pip check` 与项目 UTF-8 供应链审计也通过。新增 PostgreSQL 双线程测试验证同一尝试在上限 1 时两个并发上传只能一个落库；只有后续 CI 成功才是该并发性质的签收证据。
+- Alembic 回归覆盖从旧 head 插入版本 3 和非法版本元数据、升级回填、索引列序、空库 head 以及降级移除字段；大表生产迁移仍需维护窗口和副本容量测量。
+- 下一步资源治理不能只跨 Asset/Knowledge/Evidence/PublishJob 做临时求和。可靠的工作区总存储上限还需要统一对象分配账本，在每条写入链路锁定工作区并预留，记录删除待办/失败，处理重复物理对象、事务回滚补偿、旧数据回填与孤儿巡检。
+- 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。所有提交只显式暂存本轮文件，使用 John Wang 身份普通推送，不使用 force。

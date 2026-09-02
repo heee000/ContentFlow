@@ -703,3 +703,13 @@
 - `contentflow-app.tsx` 当前约 5031 行，活动期仍有 8 路增量轮询；缺少领域 query cache、SSE/Inbox 恢复游标、Playwright 请求预算和断线重连证据。
 - FORCE RLS、数据库 owner/migrator/API/Worker 角色拆分仍属于高影响权限迁移，未获明确授权前继续不实施；本轮没有 RLS 半成品。
 - OIDC/SAML、MFA/step-up、SCIM、集中 KMS、异地不可变审计锚点、PITR/异地恢复和目标云多副本/容量故障演练仍未形成企业签收。公网部署继续按用户要求冻结，本轮没有外部资源或平台副作用。
+
+### CF-20260903-09：发布证据与素材正确性集合缺少业务边界
+
+- 状态：证据/素材数量边界、素材版本索引、旧任务短路及本地全量门禁已完成；远程 PostgreSQL/MinIO 签收待本阶段提交后补录。
+- 问题与影响：脚本发布确认需要读取当前尝试的全部证据并计算稳定清单哈希；发布、审核、人工上传和候选选择会检查当前内容版本素材。此前单文件虽有限制，但合法用户可无限追加不同证据或通过内容改版积累历史素材，放大事务内存、哈希、对象存储和 Provider 成本。
+- 根因：证据只有单对象大小/像素边界；素材版本只存在 `metadata_json`，数据库不能按版本使用稳定索引过滤。内容修改后已标记 `stale` 的排队素材仍会进入 Worker 的生成/轮询处理器。
+- 解决方案：新增每次脚本尝试默认 20 个证据、累计 50 MiB 上限；在已锁定 `PublishJob` 的事务内聚合检查，超限发生在对象写入前，并把累计字节写回发布响应。新增 `assets.content_version` 非空列，从既有 JSON 安全回填，建立 `(workspace_id, content_item_id, content_version, status, id)` 索引；生成、改版和人工补建均显式写列，发布/审核/候选/上传直接在 SQL 中限定当前版本。每内容版本默认最多 20 个素材；`stale` 生成和轮询任务在创建 Provider 前幂等返回。
+- 迁移与运维：Alembic head 更新为 `9a7b2c3d4e5f`，备份/恢复默认版本同步，public 表数仍为 28。旧库升级使用 SQLite/PostgreSQL 方言内集合更新回填素材版本，不把全表 JSON 拉入应用内存；非法、非正整数和 32 位溢出值保守归为版本 1。普通创建索引仍可能锁大表，生产库应先在副本测量锁等待、WAL 和空间。
+- 验证：设置上下界、数量/累计字节超限、超限前后对象集合不变、素材数量超限、旧任务不调用 Provider、迁移数字/数字字符串/非法/溢出 JSON 回填和升降级均有回归；证据专项为 `46 passed, 37 subtests passed`，素材/迁移/安全/脚本定向为 `96 passed, 70 subtests passed`，最终迁移专项为 `15 passed`。本机全量为 `265 passed, 9 skipped, 167 subtests passed`，覆盖率 81.27%；9 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例。前端 ESLint、Vinext 构建与 2 项渲染测试、Next.js 生产构建均通过，`npm audit --audit-level=moderate` 为 0 漏洞；Alembic 单 head、`uv lock --check`、部署清单校验、PowerShell 备份脚本语法、`pip check` 和启用 UTF-8 的项目供应链审计均通过。并发证据上限已加入真实 PostgreSQL 双线程测试，仍须由 CI 环境执行后才能宣称签收。
+- 保留边界：这一步只让参与事务完整性校验的集合有界，不等于工作区总存储治理。知识文件、素材对象、证据和发布包仍需统一的持久分配账本、并发预留、保留/归档、删除失败重试和孤儿巡检；不能用各表临时 `SUM` 冒充可靠总配额。

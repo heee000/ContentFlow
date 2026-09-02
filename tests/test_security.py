@@ -419,19 +419,38 @@ class RuntimeSettingsTest(unittest.TestCase):
     def test_publish_evidence_limits_are_bounded(self):
         settings = Settings()
         self.assertEqual(settings.publish_evidence_max_bytes, 10 * 1024 * 1024)
+        self.assertEqual(settings.publish_evidence_max_items, 20)
+        self.assertEqual(
+            settings.publish_evidence_max_total_bytes,
+            50 * 1024 * 1024,
+        )
         self.assertEqual(settings.publish_evidence_max_pixels, 40_000_000)
         for values in (
             {"publish_evidence_max_bytes": 0},
             {"publish_evidence_max_bytes": 100 * 1024 * 1024 + 1},
+            {"publish_evidence_max_items": 0},
+            {"publish_evidence_max_items": 101},
+            {"publish_evidence_max_total_bytes": 0},
+            {"publish_evidence_max_total_bytes": 1024**3 + 1},
             {"publish_evidence_max_pixels": 0},
             {"publish_evidence_max_pixels": 100_000_001},
             {
                 "max_upload_bytes": 1024,
                 "publish_evidence_max_bytes": 1025,
             },
+            {
+                "publish_evidence_max_bytes": 1025,
+                "publish_evidence_max_total_bytes": 1024,
+            },
         ):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 Settings(**values)
+
+    def test_asset_per_content_version_limit_is_bounded(self):
+        self.assertEqual(Settings().asset_max_items_per_content_version, 20)
+        for invalid in (0, 101):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                Settings(asset_max_items_per_content_version=invalid)
 
     def test_development_live_provider_may_use_local_http_endpoint(self):
         Settings(

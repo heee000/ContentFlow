@@ -205,6 +205,52 @@ class ManualMediaFlowTest(unittest.TestCase):
         )
         self.assertEqual(stale.status_code, 409, stale.text)
 
+    def test_new_manual_asset_is_rejected_at_current_version_quota(self):
+        reviewed = self.client.post(
+            f"/api/v1/contents/{self.content_id}/review",
+            headers=self.headers,
+            json={
+                "decision": "approve",
+                "reason": "文案已核验",
+                "expected_version": 1,
+            },
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        self.settings.asset_max_items_per_content_version = 1
+        with db.SessionLocal() as session:
+            asset = session.get(Asset, self.asset_id)
+            asset.status = "ready"
+            session.commit()
+        files_before = {
+            path
+            for path in self.settings.local_storage_dir.rglob("*")
+            if path.is_file()
+        }
+
+        rejected = self.client.post(
+            "/api/v1/assets/upload",
+            headers=self.headers,
+            data={"content_item_id": self.content_id, "kind": "video"},
+            files={"file": ("not-read.mp4", b"not-read", "video/mp4")},
+        )
+
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertIn("配置上限", rejected.json()["error"]["message"])
+        with db.SessionLocal() as session:
+            asset_count = session.scalar(
+                select(func.count(Asset.id)).where(
+                    Asset.content_item_id == self.content_id,
+                    Asset.content_version == 1,
+                )
+            )
+        self.assertEqual(asset_count, 1)
+        files_after = {
+            path
+            for path in self.settings.local_storage_dir.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(files_after, files_before)
+
     def test_manual_asset_kind_does_not_accept_a_different_media_type(self):
         reviewed = self.client.post(
             f"/api/v1/contents/{self.content_id}/review",

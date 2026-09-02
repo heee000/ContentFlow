@@ -409,7 +409,7 @@ def media_generation_idempotency_key(asset: Asset) -> str:
     """Return a stable opaque key for one asset content version."""
 
     try:
-        content_version = int((asset.metadata_json or {}).get("content_version", 1))
+        content_version = int(asset.content_version)
     except (TypeError, ValueError) as error:
         raise MediaProviderError(
             "素材内容版本格式无效",
@@ -435,6 +435,8 @@ def handle_asset_generate(
     asset = session.get(Asset, payload["asset_id"])
     if asset is None:
         raise ValueError("素材任务不存在")
+    if asset.status == "stale":
+        return {"asset_id": asset.id, "status": asset.status}
     if asset.status == "ready":
         return {"asset_id": asset.id, "status": asset.status}
     configured_provider = (
@@ -510,6 +512,8 @@ def handle_asset_poll(
     asset = session.get(Asset, payload["asset_id"])
     if asset is None:
         raise ValueError("素材任务不存在")
+    if asset.status == "stale":
+        return {"asset_id": asset.id, "status": asset.status}
     if asset.status == "ready":
         return {"asset_id": asset.id, "status": asset.status}
     if not asset.external_task_id:
@@ -690,15 +694,17 @@ def handle_publish_dispatch(
         raise ValueError("发布前内容必须保持人工审核通过状态")
     if content.version != int(publish_job.request_json.get("content_version", 0)):
         raise ValueError("内容版本已变化，请重新审核并创建发布任务")
-    all_assets = list(
-        session.scalars(select(Asset).where(Asset.content_item_id == content.id))
+    current_assets = list(
+        session.scalars(
+            select(Asset).where(
+                Asset.workspace_id == publish_job.workspace_id,
+                Asset.content_item_id == content.id,
+                Asset.content_version == content.version,
+            ).limit(settings.asset_max_items_per_content_version + 1)
+        )
     )
-    current_assets = [
-        asset
-        for asset in all_assets
-        if int((asset.metadata_json or {}).get("content_version") or 1)
-        == content.version
-    ]
+    if len(current_assets) > settings.asset_max_items_per_content_version:
+        raise ValueError("当前内容版本素材数量超过配置上限，请先处理异常数据")
     assets = [
         asset
         for asset in current_assets
@@ -776,6 +782,7 @@ def handle_publish_dispatch(
             "script_confirmation_count": 0,
             "script_confirmation_decision": None,
             "script_evidence_count": 0,
+            "script_evidence_total_bytes": 0,
             "script_evidence_frozen": False,
         }
         publish_job.error = None

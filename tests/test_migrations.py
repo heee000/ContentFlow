@@ -19,6 +19,69 @@ from contentflow.settings import Settings
 
 
 class MigrationTest(unittest.TestCase):
+    def test_asset_content_version_migration_backfills_and_downgrades(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "asset-version.db"
+            url = f"sqlite:///{database.as_posix()}"
+            previous = os.environ.get("CONTENTFLOW_DATABASE_URL")
+            os.environ["CONTENTFLOW_DATABASE_URL"] = url
+            try:
+                config = Config("alembic.ini")
+                command.upgrade(config, "8f6a1b2c3d4e")
+                engine = create_engine(url)
+                now = datetime.now(timezone.utc).isoformat()
+                with engine.begin() as connection:
+                    for asset_id, metadata in (
+                        ("asset-version-three", {"content_version": 3}),
+                        ("asset-version-string", {"content_version": "4"}),
+                        ("asset-version-invalid", {"content_version": "invalid"}),
+                        ("asset-version-overflow", {"content_version": "2147483648"}),
+                    ):
+                        connection.execute(
+                            text(
+                                "INSERT INTO assets ("
+                                "id, workspace_id, content_item_id, kind, provider, "
+                                "status, prompt, storage_uri, mime_type, size_bytes, "
+                                "external_task_id, metadata_json, error, created_at, "
+                                "updated_at) VALUES ("
+                                ":id, :workspace_id, NULL, 'image', 'manual', "
+                                "'stale', NULL, NULL, NULL, NULL, NULL, :metadata, "
+                                "NULL, :created_at, :updated_at)"
+                            ),
+                            {
+                                "id": asset_id,
+                                "workspace_id": "migration-workspace",
+                                "metadata": json.dumps(metadata),
+                                "created_at": now,
+                                "updated_at": now,
+                            },
+                        )
+                engine.dispose()
+
+                command.upgrade(config, "head")
+                engine = create_engine(url)
+                with engine.connect() as connection:
+                    versions = dict(
+                        connection.execute(
+                            text("SELECT id, content_version FROM assets")
+                        ).all()
+                    )
+                self.assertEqual(versions["asset-version-three"], 3)
+                self.assertEqual(versions["asset-version-string"], 4)
+                self.assertEqual(versions["asset-version-invalid"], 1)
+                self.assertEqual(versions["asset-version-overflow"], 1)
+                command.downgrade(config, "8f6a1b2c3d4e")
+                self.assertNotIn(
+                    "content_version",
+                    {item["name"] for item in inspect(engine).get_columns("assets")},
+                )
+                engine.dispose()
+            finally:
+                if previous is None:
+                    os.environ.pop("CONTENTFLOW_DATABASE_URL", None)
+                else:
+                    os.environ["CONTENTFLOW_DATABASE_URL"] = previous
+
     def test_initial_schema_upgrades_and_downgrades(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             database = Path(temp_dir) / "migration.db"
@@ -57,6 +120,24 @@ class MigrationTest(unittest.TestCase):
                         indexes[index_name]["column_names"],
                         ["workspace_id", "updated_at", "id"],
                     )
+                asset_columns = {
+                    item["name"] for item in inspect(engine).get_columns("assets")
+                }
+                self.assertIn("content_version", asset_columns)
+                asset_indexes = {
+                    item["name"]: item["column_names"]
+                    for item in inspect(engine).get_indexes("assets")
+                }
+                self.assertEqual(
+                    asset_indexes["ix_assets_workspace_item_version_status"],
+                    [
+                        "workspace_id",
+                        "content_item_id",
+                        "content_version",
+                        "status",
+                        "id",
+                    ],
+                )
                 control_plane_pagination_indexes = {
                     "memberships": {
                         "ix_memberships_workspace_created_page": [

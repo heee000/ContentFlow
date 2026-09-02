@@ -432,6 +432,7 @@ class MediaContractAdapterTest(unittest.TestCase):
             id="asset-1",
             workspace_id="workspace-1",
             kind="video_storyboard",
+            content_version=2,
             metadata_json={"content_version": 2},
         )
         first = media_generation_idempotency_key(asset)
@@ -440,11 +441,11 @@ class MediaContractAdapterTest(unittest.TestCase):
         self.assertRegex(first, r"^cfm-[0-9a-f]{64}$")
         self.assertNotIn(asset.id, first)
         self.assertNotIn(asset.workspace_id, first)
-        asset.metadata_json = {"content_version": 3}
+        asset.content_version = 3
         self.assertNotEqual(first, media_generation_idempotency_key(asset))
         for invalid_version in (0, "invalid"):
             with self.subTest(invalid_version=invalid_version):
-                asset.metadata_json = {"content_version": invalid_version}
+                asset.content_version = invalid_version
                 with self.assertRaises(MediaProviderError) as captured:
                     media_generation_idempotency_key(asset)
                 self.assertFalse(captured.exception.retryable)
@@ -497,6 +498,7 @@ class MediaContractAdapterTest(unittest.TestCase):
             id="asset-video-2",
             workspace_id="workspace-1",
             kind="video_storyboard",
+            content_version=1,
             status="pending",
             prompt="create a short video",
             metadata_json={"content_version": 1},
@@ -527,6 +529,34 @@ class MediaContractAdapterTest(unittest.TestCase):
         )
         self.assertEqual(asset.metadata_json["request_id"], "request-2")
         enqueue.assert_called_once()
+
+    def test_stale_asset_jobs_stop_before_media_provider_calls(self):
+        settings = http_settings()
+        stale = Asset(
+            id="asset-stale",
+            workspace_id="workspace-1",
+            kind="image",
+            content_version=1,
+            status="stale",
+            external_task_id="should-not-be-polled",
+            metadata_json={"content_version": 1},
+        )
+        session = Mock()
+        session.get.return_value = stale
+        with patch("contentflow.worker.build_media_provider") as build_provider:
+            generated = handle_asset_generate(
+                session,
+                {"asset_id": stale.id},
+                settings,
+            )
+            polled = handle_asset_poll(
+                session,
+                {"asset_id": stale.id},
+                settings,
+            )
+        self.assertEqual(generated["status"], "stale")
+        self.assertEqual(polled["status"], "stale")
+        build_provider.assert_not_called()
 
     def test_redirect_and_non_json_success_are_permanent_contract_errors(self):
         responses = (

@@ -9,7 +9,7 @@ from typing import Annotated
 from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/publishing", tags=["publishing"])
 Db = Annotated[Session, Depends(get_db)]
 Reviewer = Annotated[Principal, Depends(require_role("reviewer"))]
+MAX_EVIDENCE_MANIFEST_ITEMS = 100
 
 
 def _publish_job(
@@ -98,8 +99,28 @@ def _current_evidence(
                 PublishEvidence.script_attempt_id == script_attempt_id,
             )
             .order_by(PublishEvidence.created_at, PublishEvidence.id)
+            .limit(MAX_EVIDENCE_MANIFEST_ITEMS + 1)
         )
     )
+
+
+def _current_evidence_usage(
+    session: Session,
+    *,
+    job: PublishJob,
+    script_attempt_id: str,
+) -> tuple[int, int]:
+    count, total_bytes = session.execute(
+        select(
+            func.count(PublishEvidence.id),
+            func.coalesce(func.sum(PublishEvidence.size_bytes), 0),
+        ).where(
+            PublishEvidence.workspace_id == job.workspace_id,
+            PublishEvidence.publish_job_id == job.id,
+            PublishEvidence.script_attempt_id == script_attempt_id,
+        )
+    ).one()
+    return int(count), int(total_bytes)
 
 
 @router.get(
@@ -192,6 +213,29 @@ async def upload_publish_evidence(
             detail="Equivalent evidence is already attached to this script attempt",
         )
 
+    evidence_count, evidence_total_bytes = _current_evidence_usage(
+        session,
+        job=job,
+        script_attempt_id=script_attempt_id,
+    )
+    if evidence_count >= settings.publish_evidence_max_items:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Script attempt evidence item quota reached "
+                f"({settings.publish_evidence_max_items})"
+            ),
+        )
+    projected_total_bytes = evidence_total_bytes + len(normalized.data)
+    if projected_total_bytes > settings.publish_evidence_max_total_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Script attempt evidence storage quota exceeded "
+                f"({settings.publish_evidence_max_total_bytes} bytes)"
+            ),
+        )
+
     storage = build_object_storage(settings)
     stored = None
     try:
@@ -233,12 +277,8 @@ async def upload_publish_evidence(
         )
         session.add(evidence)
         session.flush()
-        evidence_items = _current_evidence(
-            session,
-            job=job,
-            script_attempt_id=script_attempt_id,
-        )
-        response_json["script_evidence_count"] = len(evidence_items)
+        response_json["script_evidence_count"] = evidence_count + 1
+        response_json["script_evidence_total_bytes"] = projected_total_bytes
         job.response_json = response_json
         record_audit(
             session,
@@ -396,6 +436,11 @@ def confirm_script_publish_result(
         job=job,
         script_attempt_id=script_attempt_id,
     )
+    if len(evidence_items) > MAX_EVIDENCE_MANIFEST_ITEMS:
+        raise HTTPException(
+            status_code=409,
+            detail="Evidence set exceeds the supported manifest safety limit",
+        )
     if not evidence_items:
         raise HTTPException(
             status_code=409,

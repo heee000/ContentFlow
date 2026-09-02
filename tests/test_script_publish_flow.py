@@ -213,6 +213,24 @@ class ScriptPublishFlowTest(unittest.TestCase):
             session.commit()
             return queue_job.id
 
+    def _prepare_script_job(self) -> dict:
+        scheduled = self._schedule()
+        self._make_dispatch_due(scheduled["id"])
+        self.assertTrue(self.worker.run_once())
+        current = self.client.get(
+            "/api/v1/publishing/jobs", headers=self.headers
+        ).json()[0]
+        self.assertEqual(current["status"], "script_ready")
+        return scheduled
+
+    def _upload_json_evidence(self, publish_job_id: str, name: str, data: bytes):
+        return self.client.post(
+            f"/api/v1/publishing/jobs/{publish_job_id}/evidence",
+            headers=self.headers,
+            data={"kind": "platform_export"},
+            files={"file": (name, data, "application/json")},
+        )
+
     def test_script_channel_rejects_credentials_and_remote_test(self):
         credentialed = self.client.post(
             "/api/v1/channels",
@@ -230,6 +248,76 @@ class ScriptPublishFlowTest(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(tested.status_code, 409, tested.text)
+
+    def test_script_evidence_item_quota_rejects_before_object_write(self):
+        self.settings.publish_evidence_max_items = 2
+        scheduled = self._prepare_script_job()
+
+        first = self._upload_json_evidence(
+            scheduled["id"], "first.json", b'{"proof":"first"}'
+        )
+        second = self._upload_json_evidence(
+            scheduled["id"], "second.json", b'{"proof":"second"}'
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual(second.status_code, 201, second.text)
+        files_before = {
+            path
+            for path in self.settings.local_storage_dir.rglob("*")
+            if path.is_file()
+        }
+
+        rejected = self._upload_json_evidence(
+            scheduled["id"], "third.json", b'{"proof":"third"}'
+        )
+
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertIn("item quota", rejected.json()["error"]["message"])
+        evidence = self.client.get(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=self.headers,
+        )
+        self.assertEqual(evidence.status_code, 200, evidence.text)
+        self.assertEqual(len(evidence.json()), 2)
+        files_after = {
+            path
+            for path in self.settings.local_storage_dir.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(files_after, files_before)
+
+    def test_script_evidence_byte_quota_rejects_before_object_write(self):
+        self.settings.publish_evidence_max_bytes = 256
+        self.settings.publish_evidence_max_total_bytes = 300
+        scheduled = self._prepare_script_job()
+        payload = b'{"proof":"' + (b"a" * 180) + b'"}'
+        first = self._upload_json_evidence(scheduled["id"], "first.json", payload)
+        self.assertEqual(first.status_code, 201, first.text)
+        files_before = {
+            path
+            for path in self.settings.local_storage_dir.rglob("*")
+            if path.is_file()
+        }
+
+        rejected = self._upload_json_evidence(
+            scheduled["id"],
+            "second.json",
+            b'{"proof":"' + (b"b" * 180) + b'"}',
+        )
+
+        self.assertEqual(rejected.status_code, 413, rejected.text)
+        self.assertIn("storage quota", rejected.json()["error"]["message"])
+        evidence = self.client.get(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=self.headers,
+        )
+        self.assertEqual(len(evidence.json()), 1)
+        files_after = {
+            path
+            for path in self.settings.local_storage_dir.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(files_after, files_before)
 
     def test_script_schedule_worker_download_and_human_result(self):
         scheduled = self._schedule()

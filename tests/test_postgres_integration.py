@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import os
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from threading import Barrier
 from datetime import datetime, timezone
+from threading import Barrier
+from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 from alembic import command
-from fastapi import HTTPException
 from alembic.config import Config
+from fastapi import HTTPException
+import pytest
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.datastructures import UploadFile
 
 from contentflow.auth_rate_limit import RateLimitKey, consume_rate_limits
 from contentflow.audit import record_audit, verify_audit_chain
@@ -29,12 +33,14 @@ from contentflow.entities import (
     ContentItem,
     Job,
     PublishJob,
+    PublishEvidence,
     User,
     WorkflowRun,
     Workspace,
 )
 from contentflow.migrate import HEAD_REVISION, PROJECT_ROOT
 from contentflow.observability import ObservabilityMetrics
+from contentflow.routers.publish_evidence import upload_publish_evidence
 from contentflow.security import hash_rate_limit_key
 from contentflow.settings import Settings
 from contentflow.worker import (
@@ -223,6 +229,7 @@ def _create_publish_fixture(
         return {
             "workspace_id": workspace.id,
             "publish_job_id": publish_job.id,
+            "user_id": user.id,
         }
 
 
@@ -562,6 +569,78 @@ def test_postgres_auth_rate_limit_serializes_same_key(
         assert row is not None
         assert row.attempts == 2
         assert row.blocked_until is not None
+
+
+def test_postgres_serializes_concurrent_publish_evidence_quota(
+    postgres_harness: PostgresHarness,
+):
+    fixture = _create_publish_fixture(
+        postgres_harness,
+        status="script_ready",
+        external_id=None,
+    )
+    attempt_id = str(uuid.uuid4())
+    with postgres_harness.sessions() as session:
+        publish_job = session.get(PublishJob, fixture["publish_job_id"])
+        assert publish_job is not None
+        publish_job.request_json = {
+            "content_version": 1,
+            "delivery_mode": "script",
+        }
+        publish_job.response_json = {
+            "script_attempt_id": attempt_id,
+            "package_uri": "memory://script-package.zip",
+            "package_sha256": "a" * 64,
+            "script_confirmation_expires_at": "2999-01-01T00:00:00+00:00",
+            "script_evidence_frozen": False,
+        }
+        session.commit()
+
+    settings = postgres_harness.settings.model_copy(
+        update={"publish_evidence_max_items": 1}
+    )
+    principal = SimpleNamespace(
+        workspace_id=fixture["workspace_id"],
+        user_id=fixture["user_id"],
+    )
+    barrier = Barrier(2)
+
+    def upload(index: int) -> int:
+        with postgres_harness.sessions() as session:
+            barrier.wait(timeout=10)
+            try:
+                asyncio.run(
+                    upload_publish_evidence(
+                        publish_job_id=fixture["publish_job_id"],
+                        principal=principal,
+                        session=session,
+                        settings=settings,
+                        kind="platform_export",
+                        file=UploadFile(
+                            filename=f"evidence-{index}.json",
+                            file=io.BytesIO(f'{{"proof":{index}}}'.encode()),
+                        ),
+                    )
+                )
+                session.commit()
+            except HTTPException as error:
+                return error.status_code
+            return 201
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = sorted(executor.map(upload, range(2)))
+    assert statuses == [201, 409]
+
+    with postgres_harness.sessions() as session:
+        evidence = list(
+            session.scalars(
+                select(PublishEvidence).where(
+                    PublishEvidence.publish_job_id == fixture["publish_job_id"],
+                    PublishEvidence.script_attempt_id == attempt_id,
+                )
+            )
+        )
+    assert len(evidence) == 1
 
 
 def test_postgres_operational_metrics_collector(postgres_harness: PostgresHarness):

@@ -237,7 +237,7 @@ def execute_workflow_run(
                 ),
             )
         )
-        for task in build_asset_tasks(
+        asset_tasks = build_asset_tasks(
             platform,
             brief,
             plan,
@@ -248,11 +248,18 @@ def execute_workflow_run(
                 or plan.get("image_search_query")
                 or ""
             ),
-        ):
+        )
+        if len(asset_tasks) > settings.asset_max_items_per_content_version:
+            raise ValueError(
+                "生成的单内容版本素材任务超过配置上限 "
+                f"({settings.asset_max_items_per_content_version})"
+            )
+        for task in asset_tasks:
             session.add(
                 Asset(
                     workspace_id=run.workspace_id,
                     content_item_id=item.id,
+                    content_version=1,
                     kind=str(task["type"]),
                     provider=str(task.get("provider") or "manual"),
                     status="planned",

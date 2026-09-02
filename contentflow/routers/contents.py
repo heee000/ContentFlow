@@ -143,6 +143,7 @@ def update_content(
     payload: ContentUpdate,
     principal: Editor,
     session: Db,
+    settings: AppSettings,
 ):
     item = get_content_for_update_or_409(
         session,
@@ -164,11 +165,21 @@ def update_content(
     review["last_human_edit_at"] = datetime.now(timezone.utc).isoformat()
     item.review_json = review
     existing_assets = list(
-        session.scalars(select(Asset).where(Asset.content_item_id == item.id))
+        session.scalars(
+            select(Asset).where(
+                Asset.workspace_id == item.workspace_id,
+                Asset.content_item_id == item.id,
+                Asset.content_version == item.version - 1,
+                Asset.status != "stale",
+            ).limit(settings.asset_max_items_per_content_version + 1)
+        )
     )
+    if len(existing_assets) > settings.asset_max_items_per_content_version:
+        raise HTTPException(
+            status_code=409,
+            detail="当前内容版本素材数量超过配置上限，请先由管理员处理异常数据",
+        )
     for asset in existing_assets:
-        if asset.status == "stale":
-            continue
         asset.status = "stale"
         metadata = dict(asset.metadata_json or {})
         metadata["content_version"] = item.version
@@ -176,6 +187,7 @@ def update_content(
             Asset(
                 workspace_id=item.workspace_id,
                 content_item_id=item.id,
+                content_version=item.version,
                 kind=asset.kind,
                 provider=asset.provider,
                 status="planned",
@@ -250,11 +262,18 @@ def review_content(
         assets = list(
             session.scalars(
                 select(Asset).where(
+                    Asset.workspace_id == item.workspace_id,
                     Asset.content_item_id == item.id,
+                    Asset.content_version == item.version,
                     Asset.status.in_(["planned", "failed"]),
-                )
+                ).limit(settings.asset_max_items_per_content_version + 1)
             )
         )
+        if len(assets) > settings.asset_max_items_per_content_version:
+            raise HTTPException(
+                status_code=409,
+                detail="当前内容版本素材数量超过配置上限，请先由管理员处理异常数据",
+            )
         for asset in assets:
             requested_provider = asset.provider
             if requested_provider == "openverse":

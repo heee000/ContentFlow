@@ -573,6 +573,14 @@ class Asset(TimestampMixin, Base):
     __tablename__ = "assets"
     __table_args__ = (
         Index("ix_assets_workspace_updated_page", "workspace_id", "updated_at", "id"),
+        Index(
+            "ix_assets_workspace_item_version_status",
+            "workspace_id",
+            "content_item_id",
+            "content_version",
+            "status",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -581,6 +589,12 @@ class Asset(TimestampMixin, Base):
     )
     content_item_id: Mapped[str | None] = mapped_column(
         ForeignKey("content_items.id", ondelete="SET NULL"), index=True
+    )
+    content_version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
     )
     kind: Mapped[str] = mapped_column(String(32), index=True)
     provider: Mapped[str] = mapped_column(String(80), default="upload")
