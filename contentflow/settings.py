@@ -157,6 +157,25 @@ class Settings(BaseSettings):
     worker_heartbeat_seconds: int = Field(default=10, ge=1, le=300)
     worker_stale_seconds: int = Field(default=45, ge=3, le=1800)
     worker_queue_stall_seconds: int = Field(default=300, ge=10, le=86_400)
+    worker_database_retry_initial_seconds: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=60,
+        allow_inf_nan=False,
+    )
+    worker_database_retry_max_seconds: float = Field(
+        default=30.0,
+        ge=0.1,
+        le=600,
+        allow_inf_nan=False,
+    )
+    worker_database_retry_max_attempts: int = Field(default=8, ge=1, le=100)
+    worker_database_retry_jitter_ratio: float = Field(
+        default=0.2,
+        ge=0,
+        le=1,
+        allow_inf_nan=False,
+    )
     publish_reconciliation_initial_delay_seconds: int = Field(default=15, ge=1, le=3600)
     publish_reconciliation_max_attempts: int = Field(default=20, ge=1, le=100)
     publish_reconciliation_sweep_poll_seconds: int = Field(
@@ -184,6 +203,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "worker_stale_seconds must be greater than twice "
                 "worker_heartbeat_seconds"
+            )
+        if (
+            self.worker_database_retry_max_seconds
+            < self.worker_database_retry_initial_seconds
+        ):
+            raise ValueError(
+                "worker_database_retry_max_seconds must not be less than "
+                "worker_database_retry_initial_seconds"
             )
         if self.publish_evidence_max_bytes > self.max_upload_bytes:
             raise ValueError(

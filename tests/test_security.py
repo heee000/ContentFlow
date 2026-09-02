@@ -510,6 +510,30 @@ class RuntimeSettingsTest(unittest.TestCase):
         ):
             Settings(worker_heartbeat_seconds=10, worker_stale_seconds=20)
 
+    def test_worker_database_retry_policy_is_bounded(self):
+        settings = Settings()
+        self.assertEqual(settings.worker_database_retry_initial_seconds, 1.0)
+        self.assertEqual(settings.worker_database_retry_max_seconds, 30.0)
+        self.assertEqual(settings.worker_database_retry_max_attempts, 8)
+        self.assertEqual(settings.worker_database_retry_jitter_ratio, 0.2)
+        for values in (
+            {"worker_database_retry_initial_seconds": 0},
+            {"worker_database_retry_max_seconds": 601},
+            {"worker_database_retry_max_attempts": 0},
+            {"worker_database_retry_max_attempts": 101},
+            {"worker_database_retry_jitter_ratio": -0.01},
+            {"worker_database_retry_jitter_ratio": 1.01},
+            {"worker_database_retry_initial_seconds": float("nan")},
+            {"worker_database_retry_max_seconds": float("inf")},
+            {"worker_database_retry_jitter_ratio": float("nan")},
+            {
+                "worker_database_retry_initial_seconds": 10,
+                "worker_database_retry_max_seconds": 9,
+            },
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Settings(**values)
+
 
 if __name__ == "__main__":
     unittest.main()

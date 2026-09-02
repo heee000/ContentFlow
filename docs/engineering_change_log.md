@@ -828,3 +828,14 @@
 - 初步证据：SQLite 公平性用例把两个活动任务放在批次前方并设 `limit=1`，后续缺失任务仍被补建；连续两次空闲 Worker 只执行一次存储和发布维护扫描。设置边界、迁移升降级、Compose 参数透传和公网恢复契约共同通过 7 项定向回归，公网配置通过 fail-closed 渲染；完整证据将在本阶段签收后补充。
 - 本地证据：Ruff 全仓、Alembic 单 head、两套 Compose 渲染和公网 fail-closed 校验通过；相关完整定向为 `81 passed, 10 skipped, 49 subtests passed`，本机全量为 `290 passed, 13 skipped, 177 subtests passed`、分支覆盖率 80.77%。`uv lock --check`、`pip check`、Python 漏洞审计、两份 PowerShell 备份脚本语法、前端 ESLint、Vinext/Sites 构建、2 项 SSR 渲染测试、Next.js/TypeScript 生产构建与 npm moderate 审计 0 漏洞均通过。13 项跳过均为本机未启动的 PostgreSQL/MinIO 外部服务场景，不能代替远程 PostgreSQL 公平性和 MinIO 签收。
 - 远程证据：实现提交 `1ba8251be9f75c1c4d52d41cba0ff317c6acffe0` 已以 John Wang 身份普通推送；[ContentFlow CI #33688561251](https://github.com/heee000/ContentFlow/actions/runs/33688561251) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `303 passed, 177 subtests passed`、分支覆盖率 81.91%；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9869112197` 摘要为 `sha256:c716780bb2f62e63f443e2ae0ff2c247a0fbb85e0aced27d1cffaad0913862e5`。
+
+### CF-20260903-21：Worker 把数据库可用性故障混入业务失败且立即退出
+
+- 状态：严格异常分类、有界抖动退避、可中断停机、脱敏终止、配置透传与完整本地回归已实现；真实 PostgreSQL/MinIO CI 和目标环境断网演练待签收。
+- 问题与影响：领取/维护查询遇到数据库错误会让服务立即退出；Handler 或完成提交阶段的数据库错误会先进入通用 `fail_job`，可能把基础设施瞬断错误持久化为业务失败，并使已发生外部副作用的任务看起来可以按普通失败恢复。
+- 根因：`run_forever()` 没有数据库故障边界，`run_once()` 又用单个 `except Exception` 同时处理 Provider/领域失败和 SQLAlchemy 基础设施异常；Compose 只透传 heartbeat/stale/queue 参数，poll/lease/max-attempts 及新的恢复预算无法由 env 实际调整。
+- 解决方案：只将连接断开、接口/操作错误、连接池超时和 invalidated DBAPI 连接归为可用性故障，在 `fail_job` 前重新抛出；约束/编程错误不重试。服务模式按 1 秒至 30 秒指数退避，默认 8 次、20% 抖动，成功后清零，停机 Event 可中断等待；耗尽后用脱敏错误退出交给编排器。维护扫描截止在故障后重置。数据库可用性心跳/恢复日志不输出异常正文。
+- 配置交付：本地 API/Worker 与公网共享 backend environment 显式传递 poll、lease、Job max-attempts、heartbeat、stale、queue-stall 和四个数据库恢复参数；env 模板、设置模型、公网 fail-closed 校验与文本契约同步。
+- 本地证据：定向 `61 passed, 59 subtests passed`；全量 `299 passed, 13 skipped, 187 subtests passed`、分支覆盖率 80.86%。覆盖一次恢复、退避/抖动/上限、终止可中断、耗尽、非可用性错误不重试、Job 不被误记失败、日志脱敏、设置和公网部署边界。全仓 Ruff、锁文件、`pip check`、Python 漏洞审计、编译、Alembic 单 head、双 Compose、公网 fail-closed、备份脚本语法、前端 lint/双构建/2 项 SSR/npm moderate 审计均通过。13 项跳过仍是本机未启动的 PostgreSQL/MinIO，不能冒充真实断网/主从切换演练。
+- 验证过程：首次全量回归有 3 个新增日志断言失败，原因是其他测试加载 Alembic 后遗留 `contentflow.worker` logger disabled 状态；定向运行没有复现。测试改为显式隔离并恢复 logger 状态后，原 3 项和两次完整全量均通过。产品入口原本已在迁移后调用 `configure_worker_logging(force=True)`，因此没有借测试修复掩盖运行时缺陷。
+- 剩余边界：默认名义等待约 121 秒，随后下一次失败退出；处理中断的 Job 最多等待租约到期。没有 PostgreSQL kill/restart、DNS/网络分区、连接池耗尽、多 Worker 惊群、编排器 restart/backoff 或恢复 RTO 证据；同数据库无法在完全断连时承载 degraded 状态，仍依赖 stale/API-down、集中日志和外部编排指标。

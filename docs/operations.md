@@ -129,6 +129,19 @@ API 无本地会话状态，可增加副本。Worker 通过 PostgreSQL `SKIP LOC
 - CONTENTFLOW_RESTART_POLICY 默认 unless-stopped，可在开发环境覆盖；API 的迁移 shell 在成功后使用 exec 把信号转交给 Uvicorn。
 - 数据库会记录 Worker 节点心跳，工作区管理员可查询 `/api/v1/admin/worker-health` 判断全局消费容量及本工作区队列是否停滞；Compose/编排层仍未自动消费该信号，也缺滚动升级故障注入。
 
+Worker 服务模式会把 SQLAlchemy 连接断开、接口/操作错误、连接池超时和已失效 DBAPI 连接识别为数据库可用性故障。它们不会进入通用 `fail_job` 业务失败路径；已领取任务保持租约，恢复后由租约、幂等键和发布对账协议决定是否重新处理，避免把基础设施故障误写成“可安全重发”。约束、数据和编程错误不在此分类中，仍立即失败并暴露。数据库重试参数如下：
+
+```dotenv
+CONTENTFLOW_WORKER_DATABASE_RETRY_INITIAL_SECONDS=1
+CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_SECONDS=30
+CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_ATTEMPTS=8
+CONTENTFLOW_WORKER_DATABASE_RETRY_JITTER_RATIO=0.2
+```
+
+服务默认按 1、2、4、8、16、30、30、30 秒名义间隔重试，每次加入最多 20% 抖动；第 8 次等待后的下一次数据库可用性失败会以脱敏终止错误退出，再由 `CONTENTFLOW_RESTART_POLICY` 对应的编排器重启。退避等待可被 SIGTERM/SIGINT 立即打断；恢复后存储与发布维护扫描会立即重新取得资格。数据库可用性日志只记录错误类型，不输出可能携带连接地址的异常正文。`contentflow-worker --once` 用于单次管理执行，不做进程内重试。
+
+连接完全中断时，数据库心跳本身无法写入；应联合观察 `ContentFlowNoActiveWorkers`、`ContentFlowStaleWorkerDetected`、`ContentFlowAPIDown`、队列最老等待时间和编排器重启次数。当前自动测试使用确定性异常注入，没有完成真实 PostgreSQL kill/restart、DNS、连接池耗尽、网络分区或主从切换演练；上线前必须按目标环境测量恢复时间，不能仅凭单元测试调整租约和重试预算。
+
 ## 数据库迁移
 
 ```powershell

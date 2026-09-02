@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import logging
 import os
+import random
 import signal
 import socket
 import threading
@@ -15,6 +16,13 @@ from io import BytesIO
 from typing import Any
 
 from sqlalchemy import literal, or_, select
+from sqlalchemy.exc import (
+    DBAPIError,
+    DisconnectionError,
+    InterfaceError,
+    OperationalError,
+    TimeoutError as SQLAlchemyTimeoutError,
+)
 from sqlalchemy.orm import Session
 
 from . import db
@@ -77,8 +85,40 @@ def configure_worker_logging() -> None:
     logger.setLevel(logging.INFO)
 
 
+DATABASE_AVAILABILITY_ERRORS = (
+    DisconnectionError,
+    InterfaceError,
+    OperationalError,
+    SQLAlchemyTimeoutError,
+)
+
+
+def is_database_availability_error(error: BaseException) -> bool:
+    """Return whether an exception represents a retryable database outage.
+
+    Constraint, data, and programming errors intentionally stay outside this
+    classifier so a broken migration or invariant cannot become an infinite
+    availability retry loop.
+    """
+
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, DATABASE_AVAILABILITY_ERRORS):
+            return True
+        if isinstance(current, DBAPIError) and current.connection_invalidated:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class JobNotReady(RuntimeError):
     """The external task is healthy but has not reached a terminal state."""
+
+
+class WorkerDatabaseUnavailable(RuntimeError):
+    """Sanitized terminal error after the database retry budget is exhausted."""
 
 
 class PublishReconciliationRequired(RuntimeError):
@@ -145,14 +185,24 @@ class LeaseHeartbeat:
                         )
                         return
                     session.commit()
-            except Exception:
+            except Exception as error:
                 self._lost.set()
-                logger.exception(
-                    "job lease heartbeat failed id=%s worker=%s attempt=%s",
-                    self.job_id,
-                    self.worker_id,
-                    self.attempt,
-                )
+                if is_database_availability_error(error):
+                    logger.error(
+                        "job lease heartbeat database unavailable "
+                        "id=%s worker=%s attempt=%s error_type=%s",
+                        self.job_id,
+                        self.worker_id,
+                        self.attempt,
+                        type(error).__name__,
+                    )
+                else:
+                    logger.exception(
+                        "job lease heartbeat failed id=%s worker=%s attempt=%s",
+                        self.job_id,
+                        self.worker_id,
+                        self.attempt,
+                    )
                 return
 
 
@@ -232,12 +282,21 @@ class WorkerNodeHeartbeat:
                     node.stopped_at = None
                 session.commit()
             return True
-        except Exception:
-            logger.exception(
-                "worker node heartbeat failed id=%s status=%s",
-                self.worker_id,
-                status,
-            )
+        except Exception as error:
+            if is_database_availability_error(error):
+                logger.error(
+                    "worker node heartbeat database unavailable "
+                    "id=%s status=%s error_type=%s",
+                    self.worker_id,
+                    status,
+                    type(error).__name__,
+                )
+            else:
+                logger.exception(
+                    "worker node heartbeat failed id=%s status=%s",
+                    self.worker_id,
+                    status,
+                )
             return False
 
     def _run(self) -> None:
@@ -1575,6 +1634,13 @@ class Worker:
                 logger.info("job succeeded id=%s type=%s", job.id, job.job_type)
             except Exception as error:
                 session.rollback()
+                if is_database_availability_error(error):
+                    # The claim was already committed in an independent
+                    # transaction. Keep its lease intact and let the lease and
+                    # publish reconciliation protocols decide recovery; a
+                    # database outage is not a domain failure and must not
+                    # make an external side effect look safe to repeat.
+                    raise
                 if isinstance(error, JobLeaseLost):
                     logger.error("stale worker stopped id=%s error=%s", job_id, error)
                     return True
@@ -1655,6 +1721,20 @@ class Worker:
                     logger.exception("job failed id=%s", job_id)
             return True
 
+    def _database_retry_delay(self, retry_attempt: int) -> float:
+        exponent = min(max(retry_attempt - 1, 0), 30)
+        delay = min(
+            self.settings.worker_database_retry_max_seconds,
+            self.settings.worker_database_retry_initial_seconds * (2**exponent),
+        )
+        jitter = delay * self.settings.worker_database_retry_jitter_ratio
+        if jitter:
+            delay += random.uniform(-jitter, jitter)
+        return min(
+            self.settings.worker_database_retry_max_seconds,
+            max(0.0, delay),
+        )
+
     def run_forever(self) -> None:
         logger.info("worker started id=%s", self.worker_id)
         node_heartbeat = WorkerNodeHeartbeat(
@@ -1662,10 +1742,59 @@ class Worker:
             worker_id=self.worker_id,
             interval_seconds=self.settings.worker_heartbeat_seconds,
         )
+        consecutive_database_failures = 0
         try:
             with node_heartbeat:
                 while not self.stop_requested:
-                    worked = self.run_once()
+                    try:
+                        worked = self.run_once()
+                    except Exception as error:
+                        if not is_database_availability_error(error):
+                            raise
+                        consecutive_database_failures += 1
+                        if (
+                            consecutive_database_failures
+                            > self.settings.worker_database_retry_max_attempts
+                        ):
+                            logger.error(
+                                "worker database retries exhausted "
+                                "id=%s attempts=%s error_type=%s",
+                                self.worker_id,
+                                self.settings.worker_database_retry_max_attempts,
+                                type(error).__name__,
+                            )
+                            raise WorkerDatabaseUnavailable(
+                                "worker database retry budget exhausted"
+                            ) from None
+                        # A failed maintenance query must be eligible again as
+                        # soon as the database recovers rather than waiting for
+                        # a deadline that was advanced before the failed call.
+                        self._next_storage_reconciliation_sweep_at = 0.0
+                        self._next_publish_reconciliation_sweep_at = 0.0
+                        delay = self._database_retry_delay(
+                            consecutive_database_failures
+                        )
+                        logger.warning(
+                            "worker database operation unavailable; retrying "
+                            "id=%s attempt=%s/%s delay_seconds=%.3f "
+                            "error_type=%s",
+                            self.worker_id,
+                            consecutive_database_failures,
+                            self.settings.worker_database_retry_max_attempts,
+                            delay,
+                            type(error).__name__,
+                        )
+                        if self._stop_event.wait(delay):
+                            break
+                        continue
+                    if consecutive_database_failures:
+                        logger.info(
+                            "worker database operation recovered "
+                            "id=%s after_failures=%s",
+                            self.worker_id,
+                            consecutive_database_failures,
+                        )
+                        consecutive_database_failures = 0
                     if not worked:
                         self._stop_event.wait(self.settings.worker_poll_seconds)
         finally:

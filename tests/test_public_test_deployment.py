@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from runpy import run_path
 
 from contentflow.migrate import (
     HEAD_REVISION,
     MINIMUM_PUBLIC_TABLE_COUNT,
     validate_public_restore_contract,
 )
+
+
+validate_worker_runtime_environment = run_path(
+    "scripts/validate_public_test_deployment.py"
+)["validate_worker_runtime_environment"]
 
 
 def test_public_restore_contract_tracks_current_schema() -> None:
@@ -26,7 +32,7 @@ def test_public_restore_contract_rejects_stale_schema_guards() -> None:
     assert len(errors) == 2
 
 
-def test_compose_files_plumb_reconciliation_runtime_bounds() -> None:
+def test_compose_files_plumb_operational_runtime_bounds() -> None:
     required_keys = (
         "CONTENTFLOW_WORKSPACE_STORAGE_MAX_BYTES",
         "CONTENTFLOW_WORKSPACE_STORAGE_MAX_OBJECTS",
@@ -42,6 +48,16 @@ def test_compose_files_plumb_reconciliation_runtime_bounds() -> None:
         "CONTENTFLOW_PUBLISH_RECONCILIATION_MAX_ATTEMPTS",
         "CONTENTFLOW_PUBLISH_RECONCILIATION_SWEEP_POLL_SECONDS",
         "CONTENTFLOW_PUBLISH_RECONCILIATION_SWEEP_BATCH_SIZE",
+        "CONTENTFLOW_WORKER_POLL_SECONDS",
+        "CONTENTFLOW_WORKER_LEASE_SECONDS",
+        "CONTENTFLOW_WORKER_MAX_ATTEMPTS",
+        "CONTENTFLOW_WORKER_HEARTBEAT_SECONDS",
+        "CONTENTFLOW_WORKER_STALE_SECONDS",
+        "CONTENTFLOW_WORKER_QUEUE_STALL_SECONDS",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_INITIAL_SECONDS",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_SECONDS",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_ATTEMPTS",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_JITTER_RATIO",
     )
     local_compose = Path("docker-compose.yml").read_text(encoding="utf-8")
     public_compose = Path("deploy/public-test/compose.yml").read_text(encoding="utf-8")
@@ -56,3 +72,45 @@ def test_compose_files_plumb_reconciliation_runtime_bounds() -> None:
             for line in public_compose.splitlines()
         ) == 1
         assert f"{key}=" in public_env
+
+
+def test_public_worker_runtime_validation_fails_closed() -> None:
+    valid = {
+        "CONTENTFLOW_WORKER_POLL_SECONDS": "1",
+        "CONTENTFLOW_WORKER_LEASE_SECONDS": "300",
+        "CONTENTFLOW_WORKER_MAX_ATTEMPTS": "4",
+        "CONTENTFLOW_WORKER_HEARTBEAT_SECONDS": "10",
+        "CONTENTFLOW_WORKER_STALE_SECONDS": "45",
+        "CONTENTFLOW_WORKER_QUEUE_STALL_SECONDS": "300",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_INITIAL_SECONDS": "1",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_SECONDS": "30",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_ATTEMPTS": "8",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_JITTER_RATIO": "0.2",
+    }
+    assert validate_worker_runtime_environment(valid) == []
+
+    invalid_cases = (
+        ({"CONTENTFLOW_WORKER_POLL_SECONDS": "nan"}, "positive number"),
+        ({"CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_ATTEMPTS": "0"}, "positive integer"),
+        ({"CONTENTFLOW_WORKER_DATABASE_RETRY_JITTER_RATIO": "1.1"}, "between 0 and 1"),
+        (
+            {
+                "CONTENTFLOW_WORKER_DATABASE_RETRY_INITIAL_SECONDS": "31",
+                "CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_SECONDS": "30",
+            },
+            "maximum must not be less",
+        ),
+        (
+            {
+                "CONTENTFLOW_WORKER_HEARTBEAT_SECONDS": "10",
+                "CONTENTFLOW_WORKER_STALE_SECONDS": "20",
+            },
+            "stale threshold",
+        ),
+    )
+    for overrides, expected in invalid_cases:
+        candidate = {**valid, **overrides}
+        assert any(
+            expected in error
+            for error in validate_worker_runtime_environment(candidate)
+        )

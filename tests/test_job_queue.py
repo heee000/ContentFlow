@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import ANY, patch
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from contentflow.db import Base, build_engine
@@ -25,6 +26,7 @@ from contentflow.settings import Settings
 from contentflow.worker import (
     LeaseHeartbeat,
     Worker,
+    WorkerDatabaseUnavailable,
     WorkerNodeHeartbeat,
     configure_worker_logging,
     logger as worker_logger,
@@ -68,6 +70,14 @@ class JobQueueLeaseTest(unittest.TestCase):
             attempt = job.attempts
             session.commit()
         return job_id, attempt
+
+    @staticmethod
+    def _database_unavailable_error() -> OperationalError:
+        return OperationalError(
+            "SELECT redacted",
+            {},
+            OSError("postgresql://sensitive-host database unavailable"),
+        )
 
     def test_lease_renewal_requires_current_owner_and_attempt(self):
         job_id, attempt = self._claim_job()
@@ -216,6 +226,218 @@ class JobQueueLeaseTest(unittest.TestCase):
             ANY,
             settings=settings,
         )
+
+    def test_database_outage_during_handler_is_not_recorded_as_domain_failure(self):
+        with self.session_factory() as session:
+            queued = enqueue_job(
+                session,
+                job_type="test.database-outage",
+                payload={},
+                workspace_id=None,
+                idempotency_key="test.database-outage",
+            )
+            session.commit()
+            job_id = queued.id
+
+        def unavailable_handler(_session, _payload, _settings):
+            raise self._database_unavailable_error()
+
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="database-outage-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+            ),
+            worker_id="database-outage-worker",
+            session_factory=self.session_factory,
+            handlers={"test.database-outage": unavailable_handler},
+        )
+
+        with self.assertRaises(OperationalError):
+            worker.run_once()
+
+        with self.session_factory() as session:
+            claimed = session.get(Job, job_id)
+            self.assertEqual(claimed.status, "running")
+            self.assertEqual(claimed.attempts, 1)
+            self.assertIsNone(claimed.last_error)
+
+    def test_worker_retries_database_outage_then_recovers(self):
+        settings = Settings(
+            database_url="sqlite://",
+            secret_key="database-recovery-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            worker_database_retry_initial_seconds=0.1,
+            worker_database_retry_max_seconds=0.1,
+            worker_database_retry_max_attempts=2,
+            worker_database_retry_jitter_ratio=0,
+        )
+        worker = Worker(
+            settings=settings,
+            worker_id="database-recovery-worker",
+            session_factory=self.session_factory,
+        )
+        worker._next_storage_reconciliation_sweep_at = 123.0
+        worker._next_publish_reconciliation_sweep_at = 456.0
+        calls = 0
+
+        def flaky_run_once():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise self._database_unavailable_error()
+            worker.request_stop()
+            return False
+
+        with (
+            patch.object(worker_logger, "disabled", False),
+            patch.object(worker, "run_once", side_effect=flaky_run_once),
+            self.assertLogs(worker_logger, level=logging.INFO) as captured,
+        ):
+            worker.run_forever()
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(worker._next_storage_reconciliation_sweep_at, 0.0)
+        self.assertEqual(worker._next_publish_reconciliation_sweep_at, 0.0)
+        messages = "\n".join(captured.output)
+        self.assertIn("database operation unavailable", messages)
+        self.assertIn("database operation recovered", messages)
+        self.assertNotIn("sensitive-host", messages)
+
+    def test_worker_database_retry_delay_is_exponential_capped_and_jittered(self):
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="database-delay-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+                worker_database_retry_initial_seconds=1,
+                worker_database_retry_max_seconds=5,
+                worker_database_retry_max_attempts=8,
+                worker_database_retry_jitter_ratio=0.2,
+            ),
+            session_factory=self.session_factory,
+        )
+
+        with patch("contentflow.worker.random.uniform", return_value=0):
+            self.assertEqual(
+                [worker._database_retry_delay(attempt) for attempt in range(1, 6)],
+                [1, 2, 4, 5, 5],
+            )
+        with patch("contentflow.worker.random.uniform", return_value=-0.2):
+            self.assertEqual(worker._database_retry_delay(1), 0.8)
+        with patch("contentflow.worker.random.uniform", return_value=0.2):
+            self.assertEqual(worker._database_retry_delay(1), 1.2)
+
+    def test_worker_node_database_error_log_is_redacted(self):
+        def unavailable_session_factory():
+            raise self._database_unavailable_error()
+
+        heartbeat = WorkerNodeHeartbeat(
+            session_factory=unavailable_session_factory,
+            worker_id="redacted-heartbeat-worker",
+            interval_seconds=10,
+        )
+
+        with (
+            patch.object(worker_logger, "disabled", False),
+            self.assertLogs(worker_logger, level=logging.ERROR) as captured,
+        ):
+            self.assertFalse(heartbeat.pulse())
+
+        messages = "\n".join(captured.output)
+        self.assertIn("heartbeat database unavailable", messages)
+        self.assertNotIn("sensitive-host", messages)
+
+    def test_worker_database_retry_wait_is_interruptible(self):
+        settings = Settings(
+            database_url="sqlite://",
+            secret_key="database-stop-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            worker_database_retry_initial_seconds=30,
+            worker_database_retry_max_seconds=30,
+            worker_database_retry_max_attempts=2,
+            worker_database_retry_jitter_ratio=0,
+        )
+        worker = Worker(
+            settings=settings,
+            worker_id="database-stop-worker",
+            session_factory=self.session_factory,
+        )
+        attempted = threading.Event()
+
+        def unavailable_run_once():
+            attempted.set()
+            raise self._database_unavailable_error()
+
+        with patch.object(worker, "run_once", side_effect=unavailable_run_once):
+            thread = threading.Thread(target=worker.run_forever, daemon=True)
+            thread.start()
+            self.assertTrue(attempted.wait(timeout=1))
+            started = time.monotonic()
+            worker.request_stop(15)
+            thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertLess(time.monotonic() - started, 1)
+
+    def test_worker_exits_after_bounded_database_retries(self):
+        settings = Settings(
+            database_url="sqlite://",
+            secret_key="database-exhaustion-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            worker_database_retry_initial_seconds=0.1,
+            worker_database_retry_max_seconds=0.1,
+            worker_database_retry_max_attempts=1,
+            worker_database_retry_jitter_ratio=0,
+        )
+        worker = Worker(
+            settings=settings,
+            worker_id="database-exhaustion-worker",
+            session_factory=self.session_factory,
+        )
+
+        with (
+            patch.object(worker_logger, "disabled", False),
+            patch.object(
+                worker,
+                "run_once",
+                side_effect=self._database_unavailable_error(),
+            ) as run_once,
+            self.assertLogs(worker_logger, level=logging.ERROR) as captured,
+            self.assertRaisesRegex(
+                WorkerDatabaseUnavailable,
+                "retry budget exhausted",
+            ),
+        ):
+            worker.run_forever()
+
+        self.assertEqual(run_once.call_count, 2)
+        self.assertNotIn("sensitive-host", "\n".join(captured.output))
+
+    def test_worker_does_not_retry_non_availability_database_error(self):
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="database-integrity-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+            ),
+            worker_id="database-integrity-worker",
+            session_factory=self.session_factory,
+        )
+        integrity_error = IntegrityError(
+            "INSERT redacted",
+            {},
+            ValueError("constraint failed"),
+        )
+
+        with patch.object(
+            worker,
+            "run_once",
+            side_effect=integrity_error,
+        ) as run_once, self.assertRaises(IntegrityError):
+            worker.run_forever()
+
+        self.assertEqual(run_once.call_count, 1)
 
     def test_worker_logging_is_reenabled_after_migrations(self):
         previous_disabled = worker_logger.disabled

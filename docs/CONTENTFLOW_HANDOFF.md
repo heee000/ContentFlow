@@ -1933,3 +1933,22 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 普通 `CREATE INDEX` 在大表可能产生锁等待、WAL 与额外空间；个人/低数据量可随常规迁移升级，企业生产应在副本测量并安排维护窗口或改用受控在线索引流程。
 - 公网部署继续冻结；本轮未读取 `.env`、平台账密或受保护知识文件，未调用平台、创建素材/草稿、发布或创建云资源。
 - 下一轮优先审查 Worker 在数据库瞬断时依赖进程退出/容器重启的恢复与退避证据，并继续保留数据生命周期、数据库纵深隔离、企业 IAM 和真实外部异常矩阵。
+
+## 21.46 Worker 数据库可用性恢复与第三十四轮复审增量交接
+
+### 本轮实现
+
+1. 沿 `run_forever → run_once → handler/fail_job` 复核确认：领取/维护阶段的数据库异常会直接退出进程；处理阶段的异常先进入通用业务失败分支，基础设施瞬断可能被错误记录为 Job/领域失败。对于已经发生外部副作用的任务，这一混淆会放大误重试风险。
+2. 新增严格数据库可用性分类，仅覆盖 SQLAlchemy `DisconnectionError`、`InterfaceError`、`OperationalError`、连接池 `TimeoutError`，以及显式标记 `connection_invalidated` 的 DBAPI 错误；约束、数据和编程错误不重试。异常 cause/context 链也会受同一分类，避免包装异常逃逸。
+3. `run_once()` 在通用 `fail_job` 前重新抛出可用性故障。已经提交领取状态的 Job 保持 running/租约，不把数据库故障伪装成业务失败；后续由租约过期、幂等键和发布对账协议恢复。该策略刻意接受最多一个租约周期的恢复延迟，以换取不盲目重放外部副作用。
+4. 服务模式新增有界指数退避：默认从 1 秒增长到 30 秒、最多 8 次重试、20% 抖动，名义等待总计约 121 秒。连续一次成功即重置计数；等待使用可中断 Event，停机信号不会被 30 秒 sleep 阻塞。失败的维护扫描截止会重置，数据库恢复后立即重新检查。
+5. 重试预算耗尽后抛出不含原始连接异常正文的 `WorkerDatabaseUnavailable`，再由 Compose/编排器重启；数据库可用性相关的 Job/节点心跳日志同样只保留错误类型。非可用性错误继续输出完整堆栈，不能靠重试掩盖坏迁移或代码错误。
+6. 本地和公网 Compose 现在显式透传原有 poll/lease/max-attempts/heartbeat/stale/queue-stall 以及四个数据库恢复参数；两份 env 模板给出供应商中立默认值，公网校验器检查正数、抖动范围、max ≥ initial 和 stale > 2 × heartbeat。没有数据库迁移或平台副作用。
+
+### 当前验证与边界
+
+- 定向测试覆盖处理阶段不写业务失败、一次故障后恢复、指数上限/抖动、30 秒等待被停机立即唤醒、预算耗尽后脱敏退出、IntegrityError 不重试、节点心跳日志脱敏、设置上下界和公网配置失败关闭；相关门禁为 `61 passed, 59 subtests passed`。本机全量为 `299 passed, 13 skipped, 187 subtests passed`、分支覆盖率 80.86%，13 项均为未启动的 PostgreSQL/MinIO 外部服务用例。全仓 Ruff、锁文件、`pip check`、Python 漏洞审计、编译、Alembic 单 head、双 Compose、公网 fail-closed、PowerShell 备份脚本语法、前端 ESLint、Vinext/Sites 构建、2 项 SSR 测试、Next.js/TypeScript 生产构建和 npm moderate 审计 0 漏洞均通过。
+- 当前证据是 SQLAlchemy 确定性异常注入，不是 PostgreSQL 容器 kill/restart、DNS 失败、连接池耗尽、网络分区、故障主从切换或多 Worker 惊群演练。默认预算是安全基线，不是生产 RTO/SLO 结论。
+- 完全断库时 Worker 无法把 degraded 状态写进同一数据库；现有 API 指标只能在数据库可读时观察 stale/no-active，仍需真实 Alertmanager receiver、集中日志和编排器重启指标形成闭环。
+- `contentflow-worker --once` 保持单次失败即退出；服务模式预算耗尽后也必须退出，避免永久重试掩盖凭据、网络策略或迁移错误。公网部署仍冻结，本轮未访问 `.env`、平台账号或受保护知识文件。
+- 下一轮继续审查跨实体数据生命周期、前端历史/大型模块、数据库纵深隔离和真实运维演练；若继续深入 Worker，应先建立目标 PostgreSQL 故障注入矩阵和恢复时延预算，而不是继续堆叠未经测量的重试层。

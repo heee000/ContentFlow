@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 from pathlib import Path
@@ -36,6 +37,62 @@ def _render_compose(compose_file: Path, env_file: Path) -> dict:
         message = (error.stderr or error.stdout or "Docker Compose render failed").strip()
         raise RuntimeError(message) from error
     return json.loads(completed.stdout)
+
+
+def validate_worker_runtime_environment(environment: dict) -> list[str]:
+    errors: list[str] = []
+    positive_integers: dict[str, int] = {}
+    for key in (
+        "CONTENTFLOW_WORKER_LEASE_SECONDS",
+        "CONTENTFLOW_WORKER_MAX_ATTEMPTS",
+        "CONTENTFLOW_WORKER_HEARTBEAT_SECONDS",
+        "CONTENTFLOW_WORKER_STALE_SECONDS",
+        "CONTENTFLOW_WORKER_QUEUE_STALL_SECONDS",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_ATTEMPTS",
+    ):
+        value = str(environment.get(key) or "")
+        if not value.isdigit() or int(value) <= 0:
+            errors.append(f"{key} must be explicitly passed as a positive integer")
+        else:
+            positive_integers[key] = int(value)
+
+    positive_numbers: dict[str, float] = {}
+    for key in (
+        "CONTENTFLOW_WORKER_POLL_SECONDS",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_INITIAL_SECONDS",
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_SECONDS",
+    ):
+        try:
+            value = float(environment.get(key))
+        except (TypeError, ValueError):
+            value = 0
+        if not math.isfinite(value) or value <= 0:
+            errors.append(f"{key} must be explicitly passed as a positive number")
+        else:
+            positive_numbers[key] = value
+
+    try:
+        jitter_ratio = float(
+            environment.get("CONTENTFLOW_WORKER_DATABASE_RETRY_JITTER_RATIO")
+        )
+    except (TypeError, ValueError):
+        jitter_ratio = -1
+    if not math.isfinite(jitter_ratio) or not 0 <= jitter_ratio <= 1:
+        errors.append(
+            "CONTENTFLOW_WORKER_DATABASE_RETRY_JITTER_RATIO must be between 0 and 1"
+        )
+
+    retry_initial = positive_numbers.get(
+        "CONTENTFLOW_WORKER_DATABASE_RETRY_INITIAL_SECONDS"
+    )
+    retry_max = positive_numbers.get("CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_SECONDS")
+    if retry_initial is not None and retry_max is not None and retry_max < retry_initial:
+        errors.append("worker database retry maximum must not be less than initial delay")
+    heartbeat = positive_integers.get("CONTENTFLOW_WORKER_HEARTBEAT_SECONDS")
+    stale = positive_integers.get("CONTENTFLOW_WORKER_STALE_SECONDS")
+    if heartbeat is not None and stale is not None and stale <= heartbeat * 2:
+        errors.append("worker stale threshold must exceed two heartbeat intervals")
+    return errors
 
 
 def validate_document(document: dict, *, caddyfile: str) -> list[str]:
@@ -105,6 +162,7 @@ def validate_document(document: dict, *, caddyfile: str) -> list[str]:
         value = str(environment.get(key) or "")
         if not value.isdigit() or int(value) <= 0:
             errors.append(f"{key} must be explicitly passed as a positive integer")
+    errors.extend(validate_worker_runtime_environment(environment))
     if str(environment.get("CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_ENABLED", "")).lower() != "true":
         errors.append("public-test storage reconciliation schedule must be enabled")
     if environment.get("CONTENTFLOW_EMBEDDING_PROVIDER") in {"hash", "mock"}:
