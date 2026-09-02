@@ -587,7 +587,7 @@
 
 ### CF-20260902-01：审计记录只能查询，数据库误改后产品无法发现
 
-- 状态：实现与本地专项/全量验证完成；真实 PostgreSQL 并发追加已进入集成测试，等待本阶段 GitHub CI 签收。
+- 状态：实现、本地专项/全量验证、真实 PostgreSQL 并发追加和 GitHub CI/供应链签收完成。
 - 问题与影响：`audit_logs` 过去只有脱敏与 API 只读，没有记录间完整性关系。数据库误改、漏行、错误恢复或越权写入后，管理工作台仍会把被改变的记录当成正常证据，审批、发布、凭据和 Prompt 治理的追责链不足。
 - 根因：审计模型没有稳定序号、前序摘要、记录摘要和独立链头；并发 API/Worker 也没有同一工作区审计追加的数据库串行化协议。
 - 解决方案：Alembic head 升级为 `6d4e8f9a0b1c`，新增 `audit_chain_heads`，并为 `audit_logs` 增加 scope、sequence、previous hash、entry hash 与 integrity version。迁移按 `created_at + id` 确定性回填旧记录；新写入对脱敏后规范载荷计算 SHA-256，PostgreSQL 使用基于 scope 的事务 advisory lock 与链头行锁串行追加。唯一约束、正序约束、哈希长度和版本约束在数据库层失败关闭。
@@ -611,8 +611,14 @@
 
 ### CF-20260902-04：远程 CI 暴露 Linux 导入差异与新披露前端依赖漏洞
 
-- 状态：修复和本地定向验证完成，等待修复提交的远程 CI 复验。
+- 状态：修复、本地定向验证和修复提交的远程 CI 复验完成。
 - 发现方式：实现提交 `52811bb64560751b500aba7bdd529b8982710627` 的首次手工 CI `33648030752` 中，Python 收集阶段在 Linux 找不到未安装的 `scripts` 命名空间；前端 lint、测试和生产构建通过，但 `npm audit` 命中新披露的 Browserslist 高危公告。
 - 根因：恢复契约测试直接导入仓库维护脚本，本地 Windows 测试路径偶然可见，正式 Python 包配置却只安装 `contentflow*`；前端锁文件仍固定 `browserslist 4.28.2`，而审计源要求高于 `4.28.6`。
 - 解决方案：把恢复门槛校验移入正式安装的 `contentflow.migrate.validate_public_restore_contract`，部署脚本与测试共用同一实现，不把整个 `scripts/` 目录加入生产包；仅更新锁文件中的 Browserslist 及其浏览器数据库依赖到兼容安全版本 `4.28.8`。
 - 验证：相关 Ruff 检查通过，迁移/审计/恢复契约 `19 passed`；`npm audit --audit-level=moderate` 为 `0 vulnerabilities`。本机沙箱首次重跑因系统临时目录 ACL 无法创建 SQLite 文件而失败，提升为普通宿主用户权限后同一测试集通过；该权限噪声没有作为代码失败处理。
+
+### 本阶段远程交付证据
+
+- 实现提交 `52811bb64560751b500aba7bdd529b8982710627` 和 CI 修复提交 `3fa5206c4af90ffec6a09e5d2e10474386f579fc` 均以 `John Wang <182348029+heee000@users.noreply.github.com>` 普通推送到 `codex/enterprise-media-runtime`，未使用 force 或 force-with-lease。
+- [ContentFlow CI #33648933471](https://github.com/heee000/ContentFlow/actions/runs/33648933471) 四个 Job 全部成功：PostgreSQL/pgvector 与 MinIO 后端/安全门禁、前端 lint/test/生产构建/依赖审计、可复现源码/SBOM，以及签名 SLSA 来源证明和 Python/前端 CycloneDX attestation 均已签收。
+- 后端结果为 `262 passed, 145 subtests passed`，总覆盖率 82.03%，包含真实 PostgreSQL 双线程同工作区审计追加测试。供应链 Artifact `9853954616` 名为 `contentflow-supply-chain-3fa5206c4af90ffec6a09e5d2e10474386f579fc`，摘要为 `sha256:fec0569d78774f692f9bffcd498f947c9f5ede8fbcce23419b2504519df9b9df`。
