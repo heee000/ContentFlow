@@ -87,6 +87,75 @@ def _capture_postgres_error(connection, statement: str) -> DBAPIError:
     return captured.value
 
 
+def _run_serializable_increment(
+    engine: Engine,
+    barrier: Barrier,
+) -> DBAPIError | None:
+    with engine.connect().execution_options(
+        isolation_level="SERIALIZABLE"
+    ) as connection:
+        transaction = connection.begin()
+        try:
+            connection.execute(text("SET LOCAL statement_timeout = '10s'"))
+            connection.execute(
+                text(
+                    "SELECT value FROM contentflow_sqlstate_probe "
+                    "WHERE id = 1"
+                )
+            ).scalar_one()
+            barrier.wait(timeout=10)
+            connection.execute(
+                text(
+                    "UPDATE contentflow_sqlstate_probe "
+                    "SET value = value + 1 WHERE id = 1"
+                )
+            )
+            transaction.commit()
+        except DBAPIError as exc:
+            transaction.rollback()
+            return exc
+        except BaseException:
+            transaction.rollback()
+            raise
+    return None
+
+
+def _run_deadlocking_update(
+    engine: Engine,
+    barrier: Barrier,
+    *,
+    first_id: int,
+    second_id: int,
+) -> DBAPIError | None:
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            connection.execute(text("SET LOCAL statement_timeout = '10s'"))
+            connection.execute(
+                text(
+                    "UPDATE contentflow_sqlstate_probe "
+                    "SET value = value + 1 WHERE id = :row_id"
+                ),
+                {"row_id": first_id},
+            )
+            barrier.wait(timeout=10)
+            connection.execute(
+                text(
+                    "UPDATE contentflow_sqlstate_probe "
+                    "SET value = value + 1 WHERE id = :row_id"
+                ),
+                {"row_id": second_id},
+            )
+            transaction.commit()
+        except DBAPIError as exc:
+            transaction.rollback()
+            return exc
+        except BaseException:
+            transaction.rollback()
+            raise
+    return None
+
+
 @pytest.fixture(scope="module")
 def postgres_harness(tmp_path_factory: pytest.TempPathFactory):
     source_url = make_url(TEST_DATABASE_URL or "")
@@ -293,10 +362,72 @@ def test_postgres_driver_sqlstate_classification(postgres_harness: PostgresHarne
         finally:
             transaction.rollback()
 
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE contentflow_sqlstate_probe ("
+                "id INTEGER PRIMARY KEY, value INTEGER NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO contentflow_sqlstate_probe (id, value) "
+                "VALUES (1, 0), (2, 0)"
+            )
+        )
+
+    try:
+        serialization_barrier = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            serialization_futures = [
+                executor.submit(
+                    _run_serializable_increment,
+                    engine,
+                    serialization_barrier,
+                )
+                for _index in range(2)
+            ]
+            serialization_results = [
+                future.result(timeout=15) for future in serialization_futures
+            ]
+        serialization_errors = [
+            error for error in serialization_results if error is not None
+        ]
+        assert len(serialization_errors) == 1
+        serialization_failure = serialization_errors[0]
+
+        deadlock_barrier = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            deadlock_futures = [
+                executor.submit(
+                    _run_deadlocking_update,
+                    engine,
+                    deadlock_barrier,
+                    first_id=first_id,
+                    second_id=second_id,
+                )
+                for first_id, second_id in ((1, 2), (2, 1))
+            ]
+            deadlock_results = [
+                future.result(timeout=15) for future in deadlock_futures
+            ]
+        deadlock_errors = [error for error in deadlock_results if error is not None]
+        assert len(deadlock_errors) == 1
+        deadlock_detected = deadlock_errors[0]
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DROP TABLE contentflow_sqlstate_probe"))
+
     cases = [
         (query_cancelled, "57014", DatabaseErrorKind.QUERY_INTERRUPTED),
         (lock_not_available, "55P03", DatabaseErrorKind.LOCK_CONTENTION),
         (missing_table, "42P01", DatabaseErrorKind.PERMANENT),
+        (
+            serialization_failure,
+            "40001",
+            DatabaseErrorKind.TRANSACTION_RETRYABLE,
+        ),
+        (deadlock_detected, "40P01", DatabaseErrorKind.TRANSACTION_RETRYABLE),
     ]
     for error, sqlstate, expected_kind in cases:
         assert database_error_sqlstate(error) == sqlstate
@@ -305,6 +436,7 @@ def test_postgres_driver_sqlstate_classification(postgres_harness: PostgresHarne
         assert f"kind={expected_kind.value}" in summary
         assert f"sqlstate={sqlstate}" in summary
         assert "contentflow_missing_sqlstate_probe" not in summary
+        assert "contentflow_sqlstate_probe" not in summary
 
 
 def test_postgres_migrations_reach_head(postgres_harness: PostgresHarness):
