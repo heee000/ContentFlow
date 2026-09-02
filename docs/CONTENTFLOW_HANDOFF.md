@@ -1882,11 +1882,12 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 5. 告警增加存储完整性、核对超期/失败和删除超过一天三类规则；Grafana 只读看板从 11 增至 14 个面板。运维手册说明核对、备份、人工删除和告警恢复边界。
 6. Alembic head 更新为 `c1d2e3f4a5b6`，新增 `(last_reconciled_at, workspace_id)` 调度索引和不受失败重试刷新影响的 `delete_requested_at`；既有待删记录以旧 `updated_at` 保守回填，不改写已发布迁移。备份、恢复和公网隔离恢复默认 head 同步，public 表门槛保持 30。
 
-### 当前验证与待签收
+### 当前验证与签收
 
-- Ruff、锁文件、公网部署 fail-closed 校验和 Alembic 单 head 通过；设置上下界、SQLite 迁移升降级、存储计划周期/禁用/冷却、Worker 自动执行、管理 API、指标低基数、Prometheus/Grafana 资产和公网恢复契约均已回归。本机全量为 `286 passed, 12 skipped, 171 subtests passed`、分支覆盖率 80.75%。12 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例；远程固定 Prometheus/PostgreSQL/pgvector/MinIO CI 结果必须绑定本阶段提交后再补写，不能预填成功数字。
+- Ruff、锁文件、公网部署 fail-closed 校验和 Alembic 单 head 通过；设置上下界、SQLite 迁移升降级、存储计划周期/禁用/冷却、Worker 自动执行、管理 API、指标低基数、Prometheus/Grafana 资产和公网恢复契约均已回归。本机全量为 `286 passed, 12 skipped, 171 subtests passed`、分支覆盖率 80.75%。12 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例；远程固定 Prometheus/PostgreSQL/pgvector/MinIO 的补充签收见本节后续证据。
 - 本机 Docker/WSL 约束不变；Prometheus 规则行为和真实 PostgreSQL `SKIP LOCKED` 并发以远程 CI 为最终签收。本地 SQLite 通过不能冒充生产并发结论。
 - 公网部署继续按用户要求冻结。本轮未读取 `.env`/账号资料，未调用微信公众号或其他平台，未创建素材、草稿、发布或云资源。
+- 实现提交 `9c822cc3b175b53d29e5dabb868dc754c0ad795e` 已以 John Wang 身份普通推送，未使用 force。[ContentFlow CI #33683730898](https://github.com/heee000/ContentFlow/actions/runs/33683730898) 四个 Job 全部成功：固定 Prometheus 配置/规则/行为测试、前端与依赖审计、可复现源码/SBOM、SLSA 和双 CycloneDX attestations 均通过；真实 PostgreSQL/pgvector 与 MinIO 为 `298 passed, 171 subtests passed`、覆盖率 81.89%。Artifact `9867276819` 摘要为 `sha256:0401d311bbb01c36c1fa8216c8c7902446a5510b70b18756b3b7bafe02345b2c`。
 
 ### 继续保留的边界
 

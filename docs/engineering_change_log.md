@@ -801,6 +801,7 @@
 
 ### 本阶段验证与交付边界
 
-- Ruff、锁文件、公网部署 fail-closed 校验和 Alembic 单 head 通过；本机全量为 `286 passed, 12 skipped, 171 subtests passed`、分支覆盖率 80.75%。12 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例，其中包含本阶段双 Worker 调度去重；Prometheus 固定镜像、真实 PostgreSQL `SKIP LOCKED` 与 MinIO 结果将在提交并跑完远程 CI 后补写。
+- Ruff、锁文件、公网部署 fail-closed 校验和 Alembic 单 head 通过；本机全量为 `286 passed, 12 skipped, 171 subtests passed`、分支覆盖率 80.75%。12 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例，其中包含本阶段双 Worker 调度去重；固定 Prometheus、真实 PostgreSQL `SKIP LOCKED` 与 MinIO 的补充签收见本节末尾远程证据。
 - 本轮没有读取或修改 `.env`、平台账密、模型缓存、备份或运行数据，没有调用微信公众号/其他平台，也没有恢复公网部署。`knowledge/北京周末 CityWalk 路线助手产品资料.txt` 继续保持未跟踪且禁止读取、修改、暂存或提交。
 - 只显式暂存本阶段文件，使用 John Wang 身份普通推送；不使用 force 或 force-with-lease。
+- 实现提交 `9c822cc3b175b53d29e5dabb868dc754c0ad795e` 已以 John Wang 身份普通推送。[ContentFlow CI #33683730898](https://github.com/heee000/ContentFlow/actions/runs/33683730898) 四个 Job 全部成功：固定 Prometheus 3.13.1 的配置、规则与行为测试通过；真实 PostgreSQL/pgvector 与 MinIO 为 `298 passed, 171 subtests passed`、覆盖率 81.89%，从而签收双 Worker 调度去重、迁移和对象后端；前端 lint/test/build/audit、Python 审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9867276819` 摘要为 `sha256:0401d311bbb01c36c1fa8216c8c7902446a5510b70b18756b3b7bafe02345b2c`。
