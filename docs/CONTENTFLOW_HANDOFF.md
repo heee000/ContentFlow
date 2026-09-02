@@ -1839,7 +1839,8 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 
 ### 当前验证与接手边界
 
-- Ruff 与编译检查通过；证据专项为 `46 passed, 37 subtests passed`，素材/迁移/安全/脚本定向回归为 `96 passed, 70 subtests passed`，最终迁移专项为 `15 passed`。本机全量为 `265 passed, 9 skipped, 167 subtests passed`、覆盖率 81.27%；9 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例。前端 ESLint、Vinext 构建与 2 项渲染测试、Next.js 生产构建通过，npm moderate 审计为 0 漏洞；Alembic 单 head、锁文件、部署清单、备份脚本语法、`pip check` 与项目 UTF-8 供应链审计也通过。新增 PostgreSQL 双线程测试验证同一尝试在上限 1 时两个并发上传只能一个落库；只有后续 CI 成功才是该并发性质的签收证据。
+- Ruff 与编译检查通过；证据专项为 `46 passed, 37 subtests passed`，素材/迁移/安全/脚本定向回归为 `96 passed, 70 subtests passed`，最终迁移专项为 `15 passed`。本机全量为 `265 passed, 9 skipped, 167 subtests passed`、覆盖率 81.27%；9 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例。前端 ESLint、Vinext 构建与 2 项渲染测试、Next.js 生产构建通过，npm moderate 审计为 0 漏洞；Alembic 单 head、锁文件、部署清单、备份脚本语法、`pip check` 与项目 UTF-8 供应链审计也通过。新增 PostgreSQL 双线程测试验证同一尝试在上限 1 时两个并发上传只能一个落库；本机结果不包含该性质，远程签收见下一条。
+- 实现提交 `7bf99aa0b16cf9977faaedfcdf375c05d1c1d031` 已用 John Wang 身份普通推送，未使用 force；[ContentFlow CI #33668048927](https://github.com/heee000/ContentFlow/actions/runs/33668048927) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `274 passed, 167 subtests passed`、覆盖率 82.19%，并发证据上限已被真实数据库签收；前端、安全审计、Prometheus、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9861374770` 摘要为 `sha256:facce3722cb5ca1ffb4627fc43b0788a0acc7134810e38faf0414b2c1e3e1c07`。
 - Alembic 回归覆盖从旧 head 插入版本 3 和非法版本元数据、升级回填、索引列序、空库 head 以及降级移除字段；大表生产迁移仍需维护窗口和副本容量测量。
 - 下一步资源治理不能只跨 Asset/Knowledge/Evidence/PublishJob 做临时求和。可靠的工作区总存储上限还需要统一对象分配账本，在每条写入链路锁定工作区并预留，记录删除待办/失败，处理重复物理对象、事务回滚补偿、旧数据回填与孤儿巡检。
 - 继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`；`.env`、账号资料、模型缓存、备份和运行数据同样排除。所有提交只显式暂存本轮文件，使用 John Wang 身份普通推送，不使用 force。
