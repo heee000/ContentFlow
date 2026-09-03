@@ -46,6 +46,12 @@ from .entities import (
 )
 from .embeddings import build_embedding_provider
 from .image_search import build_image_search_provider
+from .job_recovery import (
+    JOB_RECOVERY_POLICIES,
+    MANUAL_REVIEW_JOB_TYPES as MANUAL_REVIEW_JOB_TYPES,
+    JobRecoveryPolicy,
+    manual_review_job_types,
+)
 from .job_queue import (
     JobLeaseLost,
     claim_next_job,
@@ -1515,43 +1521,6 @@ HANDLERS: dict[str, Handler] = {
 }
 
 
-class JobRecoveryPolicy(StrEnum):
-    REPLAY_SAFE = "replay_safe"
-    PROVIDER_IDEMPOTENT = "provider_idempotent"
-    DOMAIN_GUARDED = "domain_guarded"
-    CONFIGURATION_GUARDED = "configuration_guarded"
-    MANUAL_REVIEW = "manual_review"
-
-
-JOB_RECOVERY_POLICIES: dict[str, JobRecoveryPolicy] = {
-    "knowledge.index": JobRecoveryPolicy.CONFIGURATION_GUARDED,
-    "prompt_eval.execute": JobRecoveryPolicy.MANUAL_REVIEW,
-    "workflow.execute": JobRecoveryPolicy.MANUAL_REVIEW,
-    "connector.test": JobRecoveryPolicy.REPLAY_SAFE,
-    "asset.generate": JobRecoveryPolicy.PROVIDER_IDEMPOTENT,
-    "asset.search": JobRecoveryPolicy.REPLAY_SAFE,
-    "asset.poll": JobRecoveryPolicy.REPLAY_SAFE,
-    "publish.dispatch": JobRecoveryPolicy.DOMAIN_GUARDED,
-    "publish.reconcile": JobRecoveryPolicy.DOMAIN_GUARDED,
-    "storage.delete": JobRecoveryPolicy.DOMAIN_GUARDED,
-    "storage.reconcile": JobRecoveryPolicy.REPLAY_SAFE,
-    "metrics.pull": JobRecoveryPolicy.REPLAY_SAFE,
-}
-
-MANUAL_REVIEW_JOB_TYPES = frozenset(
-    job_type
-    for job_type, policy in JOB_RECOVERY_POLICIES.items()
-    if policy == JobRecoveryPolicy.MANUAL_REVIEW
-)
-
-
-def manual_review_job_types(settings: Settings) -> frozenset[str]:
-    job_types = set(MANUAL_REVIEW_JOB_TYPES)
-    if settings.embedding_provider == "openai-compatible":
-        job_types.add("knowledge.index")
-    return frozenset(job_types)
-
-
 def mark_domain_failure(
     session: Session,
     job: Job,
@@ -1942,10 +1911,14 @@ class Worker:
                             )
                             or database_error_kind == DatabaseErrorKind.PERMANENT
                             or publish_outcome_uncertain
-                            or job.job_type in self.manual_review_job_types
                             or (
                                 isinstance(error, MediaProviderError)
                                 and not error.retryable
+                            ),
+                            manual_review_reason_code=(
+                                "provider_outcome_unknown_after_error"
+                                if job.job_type in self.manual_review_job_types
+                                else None
                             ),
                             retry_after_seconds=getattr(
                                 error,

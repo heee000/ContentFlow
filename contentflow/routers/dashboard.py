@@ -50,6 +50,6 @@ def dashboard_summary(principal: CurrentPrincipal, session: Db):
         "publishes_scheduled": count(
             PublishJob, PublishJob.status == "scheduled"
         ),
+        "jobs_manual_review": count(Job, Job.status == "manual_review"),
         "jobs_failed": count(Job, Job.status == "failed"),
     }
-

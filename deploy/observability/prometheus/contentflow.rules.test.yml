@@ -33,6 +33,8 @@ tests:
         values: 600x20
       - series: contentflow_publish_reconciliation_required
         values: 1x20
+      - series: contentflow_job_manual_review_oldest_age_seconds
+        values: 7200x20
       - series: contentflow_storage_allocations{status="missing"}
         values: 1x20
       - series: contentflow_storage_allocations{status="integrity_error"}
@@ -118,6 +120,16 @@ tests:
               summary: ContentFlow publish jobs require manual reconciliation
               description: One or more publish jobs have required manual reconciliation for five minutes.
               runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#发布自动对账与人工处置
+      - eval_time: 17m
+        alertname: ContentFlowJobManualReviewOverdue
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: warning
+            exp_annotations:
+              summary: ContentFlow job manual review exceeds one hour
+              description: At least one provider-side-effect review has remained unresolved for more than one hour.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#job-自动恢复与人工核对
       - eval_time: 12m
         alertname: ContentFlowStorageIntegrityAnomaly
         exp_alerts:

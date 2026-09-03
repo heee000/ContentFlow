@@ -40,6 +40,7 @@ from contentflow.entities import (
     ChannelConnection,
     ContentItem,
     Job,
+    JobManualReview,
     PublishJob,
     PublishEvidence,
     StorageObjectAllocation,
@@ -1522,7 +1523,10 @@ def test_expired_provider_job_requires_manual_review_on_postgres(
     with postgres_harness.sessions() as session:
         stored_job = session.get(Job, job_id)
         workflow_run = session.get(WorkflowRun, workflow_run_id)
-        assert stored_job.status == "failed"
+        manual_review = session.scalar(
+            select(JobManualReview).where(JobManualReview.job_id == job_id)
+        )
+        assert stored_job.status == "manual_review"
         assert stored_job.attempts == 1
         assert stored_job.locked_by is None
         assert stored_job.locked_at is None
@@ -1530,3 +1534,9 @@ def test_expired_provider_job_requires_manual_review_on_postgres(
         assert workflow_run.status == "failed"
         assert workflow_run.current_stage == "failed"
         assert "Automatic retry was blocked" in workflow_run.error
+        assert manual_review is not None
+        assert (
+            manual_review.reason_code
+            == "worker_lease_expired_provider_outcome_unknown"
+        )
+        assert manual_review.resolved_at is None

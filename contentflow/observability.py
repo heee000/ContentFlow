@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from .entities import (
     Job,
+    JobManualReview,
     PromptEvalRun,
     PublishJob,
     StorageObjectAllocation,
@@ -26,7 +27,14 @@ from .entities import (
 from .settings import Settings
 
 
-JOB_STATUSES = ("queued", "retry", "running", "failed", "succeeded")
+JOB_STATUSES = (
+    "queued",
+    "retry",
+    "running",
+    "manual_review",
+    "failed",
+    "succeeded",
+)
 WORKFLOW_STATUSES = ("queued", "running", "awaiting_review", "failed", "error")
 PROMPT_EVAL_STATUSES = ("queued", "running", "passed", "failed", "error")
 STORAGE_ALLOCATION_STATUSES = (
@@ -104,6 +112,19 @@ class DatabaseOperationalCollector:
             oldest_ready_age = (
                 max(0.0, (now - _aware(oldest_ready_at)).total_seconds())
                 if oldest_ready_at is not None
+                else 0.0
+            )
+            oldest_manual_review_at = session.scalar(
+                select(func.min(JobManualReview.requested_at)).where(
+                    JobManualReview.resolved_at.is_(None)
+                )
+            )
+            oldest_manual_review_age = (
+                max(
+                    0.0,
+                    (now - _aware(oldest_manual_review_at)).total_seconds(),
+                )
+                if oldest_manual_review_at is not None
                 else 0.0
             )
             stale_cutoff = now - timedelta(seconds=self.settings.worker_stale_seconds)
@@ -229,6 +250,11 @@ class DatabaseOperationalCollector:
             "contentflow_queue_oldest_ready_age_seconds",
             "Age in seconds of the oldest ready queue job, or zero when empty.",
             value=oldest_ready_age,
+        )
+        yield GaugeMetricFamily(
+            "contentflow_job_manual_review_oldest_age_seconds",
+            "Age of the oldest unresolved job manual review, or zero.",
+            value=oldest_manual_review_age,
         )
 
         workers = GaugeMetricFamily(

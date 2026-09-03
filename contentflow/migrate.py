@@ -13,8 +13,8 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "d2e3f4a5b6c7"
-MINIMUM_PUBLIC_TABLE_COUNT = 30
+HEAD_REVISION = "e3f4a5b6c7d8"
+MINIMUM_PUBLIC_TABLE_COUNT = 31
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
 LAYOUT_REVISION = "8b6c1f3a9d21"
@@ -39,6 +39,8 @@ AUDIT_CHAIN_REVISION = "6d4e8f9a0b1c"
 WORKSPACE_STORAGE_USAGE_TABLE = "workspace_storage_usage"
 STORAGE_OBJECT_ALLOCATION_TABLE = "storage_object_allocations"
 STORAGE_LEDGER_REVISION = "b0c1d2e3f4a5"
+JOB_MANUAL_REVIEW_TABLE = "job_manual_reviews"
+JOB_MANUAL_REVIEW_REVISION = "e3f4a5b6c7d8"
 AUDIT_CHAIN_COLUMNS = {
     "chain_scope",
     "chain_sequence",
@@ -104,6 +106,7 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         AUDIT_CHAIN_HEAD_TABLE,
         WORKSPACE_STORAGE_USAGE_TABLE,
         STORAGE_OBJECT_ALLOCATION_TABLE,
+        JOB_MANUAL_REVIEW_TABLE,
     }
     expected_tables = set(db.Base.metadata.tables)
     missing_tables = (expected_tables - incrementally_added) - tables
@@ -145,6 +148,7 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
     audit_chain_head_exists = AUDIT_CHAIN_HEAD_TABLE in tables
     workspace_storage_usage_exists = WORKSPACE_STORAGE_USAGE_TABLE in tables
     storage_object_allocation_exists = STORAGE_OBJECT_ALLOCATION_TABLE in tables
+    job_manual_review_exists = JOB_MANUAL_REVIEW_TABLE in tables
     audit_log_columns = {
         column["name"] for column in inspector.get_columns("audit_logs")
     }
@@ -237,7 +241,16 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             "Back up the database and repair the schema before continuing."
         )
 
-    if workspace_storage_usage_exists:
+    if job_manual_review_exists and not workspace_storage_usage_exists:
+        raise RuntimeError(
+            "The job manual review table exists without the storage ledger "
+            "migration. Back up the database and repair the schema before "
+            "continuing."
+        )
+
+    if job_manual_review_exists:
+        revision = JOB_MANUAL_REVIEW_REVISION
+    elif workspace_storage_usage_exists:
         revision = STORAGE_LEDGER_REVISION
     elif audit_chain_head_exists:
         revision = AUDIT_CHAIN_REVISION

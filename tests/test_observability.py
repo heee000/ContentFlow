@@ -14,6 +14,7 @@ from contentflow import db
 from contentflow.api import create_app
 from contentflow.entities import (
     Job,
+    JobManualReview,
     StorageObjectAllocation,
     WorkerNode,
     WorkspaceStorageUsage,
@@ -134,6 +135,24 @@ class ObservabilityTest(unittest.TestCase):
                     idempotency_key="metrics-storage-reconcile-failed",
                 )
             )
+            manual_job = Job(
+                workspace_id=usage.workspace_id,
+                job_type="workflow.execute",
+                status="manual_review",
+                run_at=now - timedelta(hours=2),
+                idempotency_key="metrics-manual-review",
+            )
+            session.add(manual_job)
+            session.flush()
+            session.add(
+                JobManualReview(
+                    workspace_id=usage.workspace_id,
+                    job_id=manual_job.id,
+                    reason_code="provider_outcome_unknown_after_error",
+                    context_json={},
+                    requested_at=now - timedelta(hours=2),
+                )
+            )
             session.add(
                 WorkerNode(
                     id="metrics-worker",
@@ -171,7 +190,19 @@ class ObservabilityTest(unittest.TestCase):
         )
         self.assertNotIn(campaign_id, body)
         self.assertIn('contentflow_queue_jobs{status="queued"} 1.0', body)
+        self.assertIn(
+            'contentflow_queue_jobs{status="manual_review"} 1.0',
+            body,
+        )
         self.assertIn("contentflow_queue_ready_jobs 1.0", body)
+        manual_review_age = next(
+            float(line.rsplit(" ", 1)[1])
+            for line in body.splitlines()
+            if line.startswith(
+                "contentflow_job_manual_review_oldest_age_seconds "
+            )
+        )
+        self.assertGreater(manual_review_age, 119 * 60)
         self.assertIn('contentflow_worker_nodes{state="active"} 1.0', body)
         self.assertIn('contentflow_worker_nodes{state="stale"} 1.0', body)
         self.assertIn("contentflow_publish_reconciliation_required 0.0", body)

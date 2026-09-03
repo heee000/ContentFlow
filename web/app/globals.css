@@ -585,6 +585,21 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 .form-panel { margin-bottom: 24px; }
 .form-panel form { padding: 24px; }
+.manual-review-panel { margin-bottom: 24px; border-top: 4px solid var(--danger); }
+.manual-review-body { display: grid; gap: 20px; padding: 0 24px 24px; }
+.manual-review-body ol { margin: 0; padding-left: 24px; color: var(--ink-muted); line-height: 1.75; }
+.manual-review-warning { padding: 16px; border-left: 4px solid var(--danger); background: var(--danger-soft); }
+.manual-review-warning p { margin: 8px 0; color: #750e13; }
+.manual-review-warning code { font-size: 11px; overflow-wrap: anywhere; }
+.manual-review-confirmation {
+  display: grid !important;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.manual-review-confirmation input { width: 18px; min-height: auto; accent-color: var(--blue); }
 .permission-note {
   margin: -12px 0 20px;
   padding: 12px 16px;

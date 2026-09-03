@@ -1056,7 +1056,7 @@ class WorkerIntegrationTest(unittest.TestCase):
         with db.SessionLocal() as session:
             stored_job = session.get(Job, queue_job_id)
             workflow_run = session.get(WorkflowRun, run.json()["id"])
-            self.assertEqual(stored_job.status, "failed")
+            self.assertEqual(stored_job.status, "manual_review")
             self.assertEqual(stored_job.attempts, 1)
             self.assertIsNone(stored_job.locked_by)
             self.assertIsNone(stored_job.locked_at)
@@ -1065,13 +1065,27 @@ class WorkerIntegrationTest(unittest.TestCase):
             self.assertEqual(workflow_run.current_stage, "failed")
             self.assertIn("Automatic retry was blocked", workflow_run.error)
 
-        retried = self.client.post(
+        blocked_retry = self.client.post(
             f"/api/v1/jobs/{queue_job_id}/retry",
             headers=self.headers,
         )
-        self.assertEqual(retried.status_code, 200, retried.text)
-        self.assertEqual(retried.json()["status"], "retry")
-        self.assertEqual(retried.json()["attempts"], 0)
+        self.assertEqual(blocked_retry.status_code, 409, blocked_retry.text)
+        reviewed = self.client.post(
+            f"/api/v1/jobs/{queue_job_id}/manual-review",
+            headers=self.headers,
+            json={
+                "decision": "retry",
+                "provider_checked": True,
+                "note": "已核对供应商控制台，该时段没有对应请求或计费记录。",
+            },
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        self.assertEqual(reviewed.json()["status"], "retry")
+        self.assertEqual(reviewed.json()["attempts"], 0)
+        self.assertEqual(
+            reviewed.json()["manual_review"]["decision"],
+            "retry",
+        )
 
     def test_knowledge_index_workflow_assets_and_export(self):
         uploaded = self.client.post(

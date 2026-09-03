@@ -796,6 +796,67 @@
                                    ],
                        "title":  "Oldest storage deletion",
                        "type":  "stat"
+                   },
+                   {
+                       "datasource":  {
+                                          "type":  "prometheus",
+                                          "uid":  "contentflow-prometheus"
+                                      },
+                       "fieldConfig":  {
+                                           "defaults":  {
+                                                            "color":  {
+                                                                          "mode":  "thresholds"
+                                                                      },
+                                                            "unit":  "s",
+                                                            "thresholds":  {
+                                                                               "mode":  "absolute",
+                                                                               "steps":  [
+                                                                                             {
+                                                                                                 "color":  "green",
+                                                                                                 "value":  null
+                                                                                             },
+                                                                                             {
+                                                                                                 "color":  "orange",
+                                                                                                 "value":  3600
+                                                                                             }
+                                                                                         ]
+                                                                           }
+                                                        },
+                                           "overrides":  [
+
+                                                         ]
+                                       },
+                       "gridPos":  {
+                                       "h":  8,
+                                       "w":  8,
+                                       "x":  0,
+                                       "y":  28
+                                   },
+                       "id":  15,
+                       "options":  {
+                                       "colorMode":  "value",
+                                       "graphMode":  "area",
+                                       "justifyMode":  "auto",
+                                       "orientation":  "auto",
+                                       "reduceOptions":  {
+                                                             "calcs":  [
+                                                                           "lastNotNull"
+                                                                       ],
+                                                             "fields":  "",
+                                                             "values":  false
+                                                         },
+                                       "textMode":  "auto",
+                                       "wideLayout":  true
+                                   },
+                       "targets":  [
+                                       {
+                                           "expr":  "max(contentflow_job_manual_review_oldest_age_seconds)",
+                                           "legendFormat":  "oldest unresolved review",
+                                           "refId":  "A"
+                                       }
+                                   ],
+                       "title":  "Oldest provider review",
+                       "type":  "stat"
                    }
                ],
     "refresh":  "30s",

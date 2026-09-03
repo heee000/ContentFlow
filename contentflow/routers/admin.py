@@ -13,6 +13,7 @@ from ..dependencies import AppSettings, Principal, require_role
 from ..entities import (
     AuditLog,
     Job,
+    JobManualReview,
     Membership,
     PromptEvalRun,
     PromptEvalSuite,
@@ -1122,7 +1123,13 @@ def worker_health(
         else:
             active_workers += 1
 
-    queue_counts = {"queued": 0, "retry": 0, "running": 0, "failed": 0}
+    queue_counts = {
+        "queued": 0,
+        "retry": 0,
+        "running": 0,
+        "manual_review": 0,
+        "failed": 0,
+    }
     for job_status, count in session.execute(
         select(Job.status, func.count(Job.id))
         .where(
@@ -1147,12 +1154,25 @@ def worker_health(
         if oldest_ready_at is not None
         else None
     )
+    oldest_manual_review_at = session.scalar(
+        select(func.min(JobManualReview.requested_at)).where(
+            JobManualReview.workspace_id == principal.workspace_id,
+            JobManualReview.resolved_at.is_(None),
+        )
+    )
+    oldest_manual_review_age = (
+        heartbeat_age_seconds(oldest_manual_review_at, now)
+        if oldest_manual_review_at is not None
+        else None
+    )
 
     issues: list[str] = []
     if active_workers == 0:
         issues.append("no_active_workers")
     if stale_workers:
         issues.append("stale_worker_nodes")
+    if queue_counts["manual_review"]:
+        issues.append("manual_review_pending")
     if ready_jobs and active_workers == 0:
         issues.append("ready_jobs_without_active_workers")
     if (
@@ -1185,6 +1205,11 @@ def worker_health(
             ready=ready_jobs,
             oldest_ready_age_seconds=(
                 round(oldest_ready_age, 3) if oldest_ready_age is not None else None
+            ),
+            oldest_manual_review_age_seconds=(
+                round(oldest_manual_review_age, 3)
+                if oldest_manual_review_age is not None
+                else None
             ),
         ),
     )

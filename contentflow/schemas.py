@@ -11,6 +11,9 @@ WorkspaceRole = Literal["viewer", "editor", "reviewer", "admin"]
 EvidenceReason = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
 ]
+ManualReviewNote = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=8, max_length=2000)
+]
 
 
 class ORMModel(BaseModel):
@@ -537,6 +540,24 @@ class JobContextResponse(BaseModel):
     platform: str | None = None
 
 
+class JobManualReviewAction(BaseModel):
+    decision: Literal["retry", "abandon"]
+    provider_checked: Literal[True]
+    note: ManualReviewNote
+
+
+class JobManualReviewResponse(ORMModel):
+    id: str
+    reason_code: str
+    context_json: dict[str, Any]
+    requested_at: datetime
+    resolved_at: datetime | None
+    resolved_by_user_id: str | None
+    provider_checked: bool
+    decision: Literal["retry", "abandon"] | None
+    note: str | None
+
+
 class JobResponse(ORMModel):
     id: str
     job_type: str
@@ -547,6 +568,7 @@ class JobResponse(ORMModel):
     last_error: str | None
     result_json: dict[str, Any]
     context: JobContextResponse = Field(default_factory=JobContextResponse)
+    manual_review: JobManualReviewResponse | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -555,9 +577,11 @@ class WorkerQueueHealthResponse(BaseModel):
     queued: int
     retry: int
     running: int
+    manual_review: int
     failed: int
     ready: int
     oldest_ready_age_seconds: float | None
+    oldest_manual_review_age_seconds: float | None
 
 
 class WorkerHealthResponse(BaseModel):

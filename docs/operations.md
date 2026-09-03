@@ -281,7 +281,7 @@ HTTP Counter/Histogram 来自各 API 进程，应按实例聚合。队列、Work
 - 发布失败：先看发布页是否标记“可安全重试”及失败阶段，再确认内容版本、素材状态、渠道 scope 与外部响应
 - 取消发布返回 409：Worker 已先锁定任务并开始分发，不能再保证取消；等待发布结果，不要把 409 当成取消成功
 - 渠道 invalid：重新授权、修复白名单或更新凭据后执行连接测试
-- 非发布 Job 最终 failed：修复根因后在任务队列点击“重试”；发布 Job 必须回到发布页按副作用边界处理
+- 普通非发布 Job 最终 failed：修复根因后在任务队列点击“重试”；`manual_review` 必须按下述供应商核对流程处置，发布 Job 必须回到发布页按副作用边界处理
 
 ### Job 自动恢复与人工核对
 
@@ -295,7 +295,19 @@ Worker 不会把所有失败或过期租约机械地视为可安全重放。当�
 | 配置决定 | `knowledge.index` | `hash`/`bge-m3-local` 可恢复；`openai-compatible` 必须人工核对 |
 | 必须人工核对 | `workflow.execute`、`prompt_eval.execute` | 当前没有可证明的 Provider 请求幂等；异常或租约过期均不自动重跑 |
 
-若 Job 错误包含 `Automatic retry was blocked`，先在模型/Embedding 供应商控制台核对同一时间段的请求、费用和结果，再由有权限人员决定是否在任务队列显式重试。不要仅凭 ContentFlow 没有保存结果就认定供应商没有执行；队列 idempotency key 只去重 Job 记录，不等于外部请求 exactly-once。当前仍使用通用 failed 状态承载此流程，尚无专用负责人、证据附件或 SLA 队列，生产接管必须在外部工单中留痕。
+需要人工核对的 Job 会进入独立 `manual_review` 状态并创建 `job_manual_reviews` 历史记录，不会进入自动退避或被过期租约重新领取。普通 `POST /jobs/{id}/retry` 同时拒绝当前及旧版 failed 形式的高风险 Provider Job，不能绕过核对流程。
+
+处置步骤：
+
+1. 由 reviewer 或 admin 打开“任务队列 → 核对处理”，按任务时间窗口进入当前模型/Embedding 供应商控制台。
+2. 同时核对请求、费用和结果；不要仅凭 ContentFlow 没有保存结果就认定供应商没有执行。队列 idempotency key 只去重 Job 记录，不等于外部请求 exactly-once。
+3. 勾选已经完成供应商侧核对，并写入至少 8 个字符的核对记录，说明检查范围、结果和决策依据。
+4. 只有确认供应商未处理时选择“允许重试”；已有结果或仍无法确认时选择“放弃任务”，再按领域记录人工对账。API 等价入口为 `POST /api/v1/jobs/{job_id}/manual-review`，请求体必须包含 `decision=retry|abandon`、`provider_checked=true` 和 `note`。
+5. 每次请求人工核对与最终处置均进入防篡改审计链；核对表保留每轮原因码、结构化检查步骤、确认位、处置人、时间、结论和备注。数据库部分唯一索引保证同一 Job 最多只有一个未关闭核对。
+
+Prometheus 暴露 `contentflow_queue_jobs{status="manual_review"}` 和 `contentflow_job_manual_review_oldest_age_seconds`。默认规则在最老未处理核对超过 1 小时并持续 15 分钟时触发 `ContentFlowJobManualReviewOverdue`；这是一条全局低基数告警，不包含工作区或任务 ID，值班人员应回到受权限保护的任务队列定位。
+
+当前仍没有 Provider 请求/费用账本、供应商请求 ID 自动查询、核对证据附件、负责人认领或双人确认。`manual_review` 关闭的是机械误重试和无留痕处置，不是 Provider exactly-once；企业生产仍需把这些缺口纳入外部工单和审批控制。
 
 ## 发布安全重试
 

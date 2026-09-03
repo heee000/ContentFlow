@@ -3,12 +3,23 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
+from ..audit import record_audit
 from ..db import get_db
-from ..dependencies import CurrentPrincipal, Principal, require_role
-from ..entities import Asset, Campaign, ContentItem, Job, PublishJob, WorkflowRun
+from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
+from ..entities import (
+    Asset,
+    Campaign,
+    ContentItem,
+    Job,
+    JobManualReview,
+    PublishJob,
+    WorkflowRun,
+)
+from ..job_queue import utcnow
+from ..job_recovery import manual_review_job_types
 from ..pagination import (
     DEFAULT_PAGE_LIMIT,
     PageCursor,
@@ -16,12 +27,68 @@ from ..pagination import (
     UpdatedAfter,
     paginate,
 )
-from ..schemas import JobContextResponse, JobResponse
+from ..schemas import (
+    JobContextResponse,
+    JobManualReviewAction,
+    JobManualReviewResponse,
+    JobResponse,
+)
 
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 Db = Annotated[Session, Depends(get_db)]
 Editor = Annotated[Principal, Depends(require_role("editor"))]
+Reviewer = Annotated[Principal, Depends(require_role("reviewer"))]
+
+
+def latest_manual_reviews(
+    session: Session,
+    jobs: list[Job],
+) -> dict[str, JobManualReview]:
+    job_ids = [job.id for job in jobs]
+    if not job_ids:
+        return {}
+    latest_requested = (
+        select(
+            JobManualReview.job_id.label("job_id"),
+            func.max(JobManualReview.requested_at).label("requested_at"),
+        )
+        .where(JobManualReview.job_id.in_(job_ids))
+        .group_by(JobManualReview.job_id)
+        .subquery()
+    )
+    reviews: dict[str, JobManualReview] = {}
+    for review in session.scalars(
+        select(JobManualReview)
+        .join(
+            latest_requested,
+            and_(
+                JobManualReview.job_id == latest_requested.c.job_id,
+                JobManualReview.requested_at == latest_requested.c.requested_at,
+            ),
+        )
+        .order_by(JobManualReview.id.desc())
+    ):
+        reviews.setdefault(review.job_id, review)
+    return reviews
+
+
+def job_response(
+    job: Job,
+    *,
+    context: JobContextResponse | None = None,
+    manual_review: JobManualReview | None = None,
+) -> JobResponse:
+    return JobResponse.model_validate(job).model_copy(
+        update={
+            "context": context or JobContextResponse(),
+            "manual_review": (
+                JobManualReviewResponse.model_validate(manual_review)
+                if manual_review is not None
+                else None
+            ),
+        }
+    )
 
 
 @router.get("", response_model=list[JobResponse])
@@ -134,6 +201,7 @@ def list_jobs(
         if campaign_ids
         else {}
     )
+    reviews = latest_manual_reviews(session, jobs)
 
     responses: list[JobResponse] = []
     for job in jobs:
@@ -160,13 +228,22 @@ def list_jobs(
             platform=content.platform if content else None,
         )
         responses.append(
-            JobResponse.model_validate(job).model_copy(update={"context": context})
+            job_response(
+                job,
+                context=context,
+                manual_review=reviews.get(job.id),
+            )
         )
     return responses
 
 
 @router.post("/{job_id}/retry", response_model=JobResponse)
-def retry_job(job_id: str, principal: Editor, session: Db):
+def retry_job(
+    job_id: str,
+    principal: Editor,
+    session: Db,
+    settings: AppSettings,
+):
     job = session.scalar(
         select(Job).where(
             Job.id == job_id,
@@ -175,8 +252,18 @@ def retry_job(job_id: str, principal: Editor, session: Db):
     )
     if job is None:
         raise HTTPException(status_code=404, detail="任务不存在")
+    if job.status == "manual_review":
+        raise HTTPException(
+            status_code=409,
+            detail="该任务必须由审核者核对供应商活动后处置",
+        )
     if job.status != "failed":
         raise HTTPException(status_code=409, detail="只有失败任务可以重试")
+    if job.job_type in manual_review_job_types(settings):
+        raise HTTPException(
+            status_code=409,
+            detail="该任务的供应商结果无法自动确认，不能通过通用入口重试",
+        )
     if job.job_type == "publish.dispatch":
         publish_job_id = dict(job.payload_json or {}).get("publish_job_id")
         publish_job = session.scalar(
@@ -199,4 +286,70 @@ def retry_job(job_id: str, principal: Editor, session: Db):
     job.status = "retry"
     job.attempts = 0
     job.last_error = None
-    return job
+    return job_response(
+        job,
+        manual_review=latest_manual_reviews(session, [job]).get(job.id),
+    )
+
+
+@router.post("/{job_id}/manual-review", response_model=JobResponse)
+def resolve_manual_review(
+    job_id: str,
+    payload: JobManualReviewAction,
+    principal: Reviewer,
+    session: Db,
+):
+    job_query = select(Job).where(
+        Job.id == job_id,
+        Job.workspace_id == principal.workspace_id,
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        job_query = job_query.with_for_update()
+    job = session.scalar(job_query)
+    if job is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if job.status != "manual_review":
+        raise HTTPException(status_code=409, detail="该任务当前不在人工核对状态")
+
+    review_query = select(JobManualReview).where(
+        JobManualReview.job_id == job.id,
+        JobManualReview.workspace_id == principal.workspace_id,
+        JobManualReview.resolved_at.is_(None),
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        review_query = review_query.with_for_update()
+    review = session.scalar(review_query)
+    if review is None:
+        raise HTTPException(status_code=409, detail="人工核对记录缺失，禁止处置")
+
+    review.resolved_at = utcnow()
+    review.resolved_by_user_id = principal.user_id
+    review.provider_checked = True
+    review.decision = payload.decision
+    review.note = payload.note
+    job.locked_by = None
+    job.locked_at = None
+    if payload.decision == "retry":
+        job.status = "retry"
+        job.attempts = 0
+        job.run_at = utcnow()
+        job.last_error = None
+    else:
+        job.status = "failed"
+
+    record_audit(
+        session,
+        action="job.manual_review_resolved",
+        entity_type="job",
+        entity_id=job.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "job_type": job.job_type,
+            "reason_code": review.reason_code,
+            "decision": payload.decision,
+            "provider_checked": True,
+        },
+    )
+    session.flush()
+    return job_response(job, manual_review=review)

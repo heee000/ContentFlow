@@ -100,6 +100,42 @@ class MigrationTest(unittest.TestCase):
                 self.assertIn("publish_confirmations", tables)
                 self.assertIn("audit_logs", tables)
                 self.assertIn("audit_chain_heads", tables)
+                self.assertIn("job_manual_reviews", tables)
+                manual_review_checks = {
+                    item["name"]
+                    for item in inspect(engine).get_check_constraints(
+                        "job_manual_reviews"
+                    )
+                }
+                self.assertIn(
+                    "ck_job_manual_reviews_decision",
+                    manual_review_checks,
+                )
+                self.assertIn(
+                    "ck_job_manual_reviews_resolution_consistent",
+                    manual_review_checks,
+                )
+                self.assertIn(
+                    "ck_job_manual_reviews_reason_code_non_empty",
+                    manual_review_checks,
+                )
+                manual_review_indexes = {
+                    item["name"]: item
+                    for item in inspect(engine).get_indexes(
+                        "job_manual_reviews"
+                    )
+                }
+                self.assertTrue(
+                    manual_review_indexes["uq_job_manual_reviews_open_job"][
+                        "unique"
+                    ]
+                )
+                self.assertEqual(
+                    manual_review_indexes[
+                        "ix_job_manual_reviews_workspace_requested_page"
+                    ]["column_names"],
+                    ["workspace_id", "requested_at", "id"],
+                )
                 pagination_indexes = {
                     "campaigns": "ix_campaigns_workspace_updated_page",
                     "workflow_runs": "ix_workflow_runs_workspace_updated_page",

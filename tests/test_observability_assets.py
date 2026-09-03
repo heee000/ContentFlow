@@ -39,7 +39,7 @@ def test_alert_rules_have_bounded_operations_contracts():
         "contentflow-alerts",
     }
     alerts = [rule for group in groups for rule in group["rules"] if "alert" in rule]
-    assert len(alerts) == 11
+    assert len(alerts) == 12
     assert {rule["labels"]["severity"] for rule in alerts} == {
         "warning",
         "critical",
@@ -61,6 +61,7 @@ def test_alert_rules_have_bounded_operations_contracts():
     assert "contentflow_storage_allocations" in all_expressions
     assert "contentflow_storage_reconciliation_overdue_workspaces" in all_expressions
     assert "contentflow_storage_delete_pending_oldest_age_seconds" in all_expressions
+    assert "contentflow_job_manual_review_oldest_age_seconds" in all_expressions
 
 
 def test_grafana_assets_are_immutable_and_use_safe_global_aggregation():
@@ -92,7 +93,7 @@ def test_grafana_assets_are_immutable_and_use_safe_global_aggregation():
     )
     assert dashboard["uid"] == "contentflow-operations"
     assert dashboard["editable"] is False
-    assert len(dashboard["panels"]) == 14
+    assert len(dashboard["panels"]) == 15
     expressions = [
         target["expr"] for panel in dashboard["panels"] for target in panel["targets"]
     ]
@@ -111,6 +112,7 @@ def test_grafana_assets_are_immutable_and_use_safe_global_aggregation():
     assert (
         "max(contentflow_storage_delete_pending_oldest_age_seconds)" in expressions
     )
+    assert "max(contentflow_job_manual_review_oldest_age_seconds)" in expressions
     assert any(
         "sum by (route, status_class)" in expression for expression in expressions
     )

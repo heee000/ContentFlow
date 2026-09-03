@@ -1102,6 +1102,60 @@ class Job(TimestampMixin, Base):
     idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
 
 
+class JobManualReview(Base):
+    __tablename__ = "job_manual_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IS NULL OR decision IN ('retry', 'abandon')",
+            name="decision",
+        ),
+        CheckConstraint(
+            "length(reason_code) > 0",
+            name="reason_code_non_empty",
+        ),
+        CheckConstraint(
+            "((resolved_at IS NULL AND decision IS NULL AND note IS NULL "
+            "AND provider_checked = false) OR "
+            "(resolved_at IS NOT NULL AND decision IS NOT NULL "
+            "AND length(note) >= 8 AND provider_checked = true))",
+            name="resolution_consistent",
+        ),
+        Index(
+            "ix_job_manual_reviews_workspace_requested_page",
+            "workspace_id",
+            "requested_at",
+            "id",
+        ),
+        Index(
+            "uq_job_manual_reviews_open_job",
+            "job_id",
+            unique=True,
+            postgresql_where=text("resolved_at IS NULL"),
+            sqlite_where=text("resolved_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), index=True
+    )
+    reason_code: Mapped[str] = mapped_column(String(80), index=True)
+    context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    provider_checked: Mapped[bool] = mapped_column(Boolean, default=False)
+    decision: Mapped[str | None] = mapped_column(String(24))
+    note: Mapped[str | None] = mapped_column(Text)
+
+
 class WorkerNode(Base):
     __tablename__ = "worker_nodes"
     __table_args__ = (

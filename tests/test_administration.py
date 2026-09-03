@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from contentflow import db
 from contentflow.api import create_app
-from contentflow.entities import Job, WorkerNode
+from contentflow.entities import Job, JobManualReview, WorkerNode
 from contentflow.object_storage import LocalObjectStorage
 from contentflow.settings import Settings
 from contentflow.storage_ledger import LedgeredObjectStorage
@@ -299,6 +299,24 @@ class AdministrationTest(unittest.TestCase):
     def test_worker_health_reports_tenant_scoped_queue_and_global_capacity(self):
         now = datetime.now(timezone.utc)
         with db.SessionLocal() as session:
+            manual_job = Job(
+                workspace_id=self.primary_workspace_id,
+                job_type="workflow.execute",
+                status="manual_review",
+                run_at=now - timedelta(minutes=20),
+                idempotency_key="health-manual-review",
+            )
+            session.add(manual_job)
+            session.flush()
+            session.add(
+                JobManualReview(
+                    workspace_id=self.primary_workspace_id,
+                    job_id=manual_job.id,
+                    reason_code="provider_outcome_unknown_after_error",
+                    context_json={},
+                    requested_at=now - timedelta(minutes=20),
+                )
+            )
             session.add_all(
                 [
                     WorkerNode(
@@ -364,9 +382,15 @@ class AdministrationTest(unittest.TestCase):
         self.assertEqual(payload["stopped_workers"], 0)
         self.assertEqual(payload["queue"]["queued"], 2)
         self.assertEqual(payload["queue"]["running"], 1)
+        self.assertEqual(payload["queue"]["manual_review"], 1)
         self.assertEqual(payload["queue"]["ready"], 1)
         self.assertGreaterEqual(payload["queue"]["oldest_ready_age_seconds"], 25)
+        self.assertGreaterEqual(
+            payload["queue"]["oldest_manual_review_age_seconds"],
+            19 * 60,
+        )
         self.assertIn("stale_worker_nodes", payload["issues"])
+        self.assertIn("manual_review_pending", payload["issues"])
         self.assertIn("queue_ready_age_exceeded", payload["issues"])
         self.assertNotIn("no_active_workers", payload["issues"])
         self.assertNotIn("ready_jobs_without_active_workers", payload["issues"])

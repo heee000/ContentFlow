@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from contentflow.db import Base, build_engine
-from contentflow.entities import Job, WorkerNode
+from contentflow.entities import AuditLog, Job, JobManualReview, WorkerNode
 from contentflow.job_queue import (
     JobLeaseLost,
     claim_next_job,
@@ -217,11 +217,22 @@ class JobQueueLeaseTest(unittest.TestCase):
         with self.session_factory() as session:
             unsafe = session.get(Job, unsafe_id)
             safe = session.get(Job, safe_id)
-            self.assertEqual(unsafe.status, "failed")
+            self.assertEqual(unsafe.status, "manual_review")
             self.assertEqual(unsafe.attempts, 1)
             self.assertIsNone(unsafe.locked_by)
             self.assertIsNone(unsafe.locked_at)
             self.assertIn("Automatic retry was blocked", unsafe.last_error)
+            review = session.scalar(
+                select(JobManualReview).where(JobManualReview.job_id == unsafe_id)
+            )
+            self.assertIsNotNone(review)
+            self.assertEqual(
+                review.reason_code,
+                "worker_lease_expired_provider_outcome_unknown",
+            )
+            self.assertIsNone(review.resolved_at)
+            actions = set(session.scalars(select(AuditLog.action)))
+            self.assertIn("job.manual_review_requested", actions)
             self.assertEqual(safe.status, "running")
             self.assertEqual(safe.locked_by, "recovery-worker")
             self.assertEqual(safe.attempts, 2)
@@ -259,10 +270,18 @@ class JobQueueLeaseTest(unittest.TestCase):
         self.assertEqual(handler_calls, 1)
         with self.session_factory() as session:
             stored_job = session.get(Job, job_id)
-            self.assertEqual(stored_job.status, "failed")
+            self.assertEqual(stored_job.status, "manual_review")
             self.assertEqual(stored_job.attempts, 1)
             self.assertIsNone(stored_job.locked_by)
             self.assertIsNone(stored_job.locked_at)
+            review = session.scalar(
+                select(JobManualReview).where(JobManualReview.job_id == job_id)
+            )
+            self.assertIsNotNone(review)
+            self.assertEqual(
+                review.reason_code,
+                "provider_outcome_unknown_after_error",
+            )
 
     def test_heartbeat_renews_active_job_in_independent_session(self):
         job_id, attempt = self._claim_job()

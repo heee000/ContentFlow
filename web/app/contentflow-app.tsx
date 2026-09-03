@@ -244,6 +244,21 @@ type QueueJob = {
   run_at: string;
   last_error: string | null;
   updated_at: string;
+  manual_review: {
+    id: string;
+    reason_code: string;
+    context_json: {
+      source?: string;
+      possible_side_effect?: string;
+      required_checks?: string[];
+    };
+    requested_at: string;
+    resolved_at: string | null;
+    resolved_by_user_id: string | null;
+    provider_checked: boolean;
+    decision: "retry" | "abandon" | null;
+    note: string | null;
+  } | null;
   context: {
     campaign_id: string | null;
     campaign_name: string | null;
@@ -260,6 +275,7 @@ type DashboardSummary = {
   contents_needing_review: number;
   assets_processing: number;
   publishes_scheduled: number;
+  jobs_manual_review: number;
   jobs_failed: number;
 };
 
@@ -584,6 +600,7 @@ const EMPTY_DATA: DataState = {
     contents_needing_review: 0,
     assets_processing: 0,
     publishes_scheduled: 0,
+    jobs_manual_review: 0,
     jobs_failed: 0,
   },
   campaigns: [],
@@ -701,6 +718,7 @@ const STATUS: Record<string, string> = {
   script_published: "脚本确认发布",
   error: "执行错误",
   failed: "失败",
+  manual_review: "待人工核对",
   generating: "生成中",
   indexed: "已索引",
   indexing: "索引中",
@@ -809,7 +827,7 @@ function messageOf(error: unknown): string {
 
 function StatusBadge({ value }: { value: string }) {
   const semantic =
-    value === "failed" || value === "blocked" || value === "rejected"
+    value === "failed" || value === "manual_review" || value === "blocked" || value === "rejected"
       || value === "missing" || value === "integrity_error"
       || value === "abandoned"
       ? "danger"
@@ -1516,6 +1534,7 @@ export function ContentFlowApp() {
         contents_needing_review: scopedContents.filter((content) => content.status === "needs_review").length,
         assets_processing: scopedAssets.filter((asset) => ["pending", "processing"].includes(asset.status)).length,
         publishes_scheduled: scopedPublishes.filter((job) => job.status === "scheduled").length,
+        jobs_manual_review: scopedJobs.filter((job) => job.status === "manual_review").length,
         jobs_failed: scopedJobs.filter((job) => job.status === "failed").length,
       }
     : data.dashboard;
@@ -1963,6 +1982,7 @@ function DashboardView({
           </div>
           <div className="health-list">
             <div><span>运行中</span><strong>{data.dashboard.runs_active}</strong></div>
+            <div><span>待人工核对</span><strong className={data.dashboard.jobs_manual_review ? "danger-text" : ""}>{data.dashboard.jobs_manual_review}</strong></div>
             <div><span>失败任务</span><strong className={data.dashboard.jobs_failed ? "danger-text" : ""}>{data.dashboard.jobs_failed}</strong></div>
             <div><span>发布队列</span><strong>{data.dashboard.publishes_scheduled}</strong></div>
           </div>
@@ -5270,14 +5290,55 @@ function JobsView({
   flash: (message: string) => void;
 }) {
   const [error, setError] = useState("");
+  const [reviewJobId, setReviewJobId] = useState("");
+  const [providerChecked, setProviderChecked] = useState(false);
+  const [reviewNote, setReviewNote] = useState("");
+  const [reviewBusy, setReviewBusy] = useState<"retry" | "abandon" | "">("");
   const canRetry = roleAtLeast(role, "editor");
+  const canReview = roleAtLeast(role, "reviewer");
+  const reviewJob = jobs.find((job) => job.id === reviewJobId && job.status === "manual_review");
+
   async function retry(job: QueueJob) {
+    setError("");
     try {
       await api(`/jobs/${job.id}/retry`, { method: "POST" });
       flash("失败任务已重置并进入重试队列");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
+    }
+  }
+
+  function openReview(job: QueueJob) {
+    setReviewJobId(job.id);
+    setProviderChecked(false);
+    setReviewNote("");
+    setError("");
+  }
+
+  async function resolveReview(decision: "retry" | "abandon") {
+    if (!reviewJob || !providerChecked || reviewNote.trim().length < 8) return;
+    if (decision === "abandon" && !window.confirm("确认放弃此任务？任务会保留为失败记录，不会再次调用供应商。")) return;
+    setReviewBusy(decision);
+    setError("");
+    try {
+      await api(`/jobs/${reviewJob.id}/manual-review`, {
+        method: "POST",
+        body: {
+          decision,
+          provider_checked: true,
+          note: reviewNote.trim(),
+        },
+      });
+      flash(decision === "retry" ? "核对记录已保存，任务进入重试队列" : "核对记录已保存，任务已放弃");
+      setReviewJobId("");
+      setProviderChecked(false);
+      setReviewNote("");
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setReviewBusy("");
     }
   }
 
@@ -5290,6 +5351,74 @@ function JobsView({
       />
       {error ? <p className="inline-error">{error}</p> : null}
       {!canRetry ? <p className="permission-note">当前为只读权限，可查看任务状态与错误信息。</p> : null}
+      {canRetry && !canReview ? <p className="permission-note">你可以重试普通失败任务；供应商结果不确定的任务需由审核者核对后处置。</p> : null}
+      {reviewJob ? (
+        <section className="panel manual-review-panel" aria-labelledby="manual-review-title">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Provider safety checkpoint</p>
+              <h2 id="manual-review-title">核对供应商结果后再决定</h2>
+              <p>{reviewJob.context.campaign_name || reviewJob.context.content_title || reviewJob.job_type} · {reviewJob.id.slice(0, 8)}</p>
+            </div>
+            <StatusBadge value="manual_review" />
+          </div>
+          <div className="manual-review-body">
+            <div className="manual-review-warning">
+              <strong>为什么被拦截</strong>
+              <p>{reviewJob.manual_review?.context_json.possible_side_effect || "供应商可能已接收或计费，但系统没有保存最终结果。"}</p>
+              <code>{reviewJob.manual_review?.reason_code || "provider_outcome_unknown"}</code>
+            </div>
+            <ol>
+              {(reviewJob.manual_review?.context_json.required_checks || [
+                "打开当前供应商控制台，查看该时间窗口内的调用记录。",
+                "确认是否已有对应请求、计费或结果。",
+                "仅在确认没有结果时重试；已有结果或无法确认时应放弃并人工对账。",
+              ]).map((step) => <li key={step}>{step}</li>)}
+            </ol>
+            <div className="stack-form">
+              <label className="manual-review-confirmation">
+                <input
+                  type="checkbox"
+                  checked={providerChecked}
+                  onChange={(event) => setProviderChecked(event.target.checked)}
+                />
+                <span>我已在供应商控制台核对请求、计费和结果，不是仅凭本页错误文字判断。</span>
+              </label>
+              <label>
+                核对记录
+                <textarea
+                  value={reviewNote}
+                  onChange={(event) => setReviewNote(event.target.value)}
+                  maxLength={2000}
+                  placeholder="至少 8 个字符：核对了哪个时间窗口、看到什么结果、为什么选择重试或放弃。"
+                />
+                <small>{reviewNote.trim().length} / 2000；该记录会与处置人、时间和结论一起保留。</small>
+              </label>
+              <div className="form-actions">
+                <button
+                  className="button button-primary"
+                  type="button"
+                  disabled={!providerChecked || reviewNote.trim().length < 8 || Boolean(reviewBusy)}
+                  onClick={() => void resolveReview("retry")}
+                >
+                  {reviewBusy === "retry" ? <span className="button-spinner" aria-hidden="true" /> : null}
+                  确认没有结果，允许重试
+                </button>
+                <button
+                  className="button button-danger"
+                  type="button"
+                  disabled={!providerChecked || reviewNote.trim().length < 8 || Boolean(reviewBusy)}
+                  onClick={() => void resolveReview("abandon")}
+                >
+                  {reviewBusy === "abandon" ? <span className="button-spinner" aria-hidden="true" /> : null}
+                  已有或无法确认，放弃任务
+                </button>
+                <button className="button button-ghost" type="button" disabled={Boolean(reviewBusy)} onClick={() => setReviewJobId("")}>暂不处理</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
       <section className="panel">
         <DataTable
           headers={["项目 / 内容", "任务类型", "执行时间", "尝试次数", "状态", "最近错误", "操作"]}
@@ -5300,7 +5429,11 @@ function JobsView({
             `${job.attempts} / ${job.max_attempts}`,
             <StatusBadge key="status" value={job.status} />,
             job.last_error || "—",
-            canRetry && job.status === "failed" ? (
+            job.status === "manual_review" ? (
+              canReview ? (
+                <button className="table-link" key="review" onClick={() => openReview(job)}>核对处理</button>
+              ) : <span key="review-required">需审核者处理</span>
+            ) : canRetry && job.status === "failed" ? (
               job.job_type === "publish.dispatch" ? (
                 <button className="table-link" key="publish" onClick={() => onNavigate("publishing")}>
                   到发布页处理
