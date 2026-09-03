@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import os
 import re
+import subprocess
+import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -17,7 +21,7 @@ from alembic import command
 from alembic.config import Config
 from fastapi import HTTPException
 import pytest
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, inspect, select, text, update
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
@@ -38,10 +42,12 @@ from contentflow.entities import (
     PublishEvidence,
     StorageObjectAllocation,
     User,
+    WorkerNode,
     WorkflowRun,
     Workspace,
     WorkspaceStorageUsage,
 )
+from contentflow.job_queue import enqueue_job
 from contentflow.migrate import HEAD_REVISION, PROJECT_ROOT
 from contentflow.object_storage import LocalObjectStorage
 from contentflow.observability import ObservabilityMetrics
@@ -56,9 +62,11 @@ from contentflow.storage_ledger import (
 )
 from contentflow.worker import (
     DatabaseErrorKind,
+    Worker,
     classify_database_error,
     database_error_sqlstate,
     handle_publish_reconcile,
+    logger as worker_logger,
     sanitized_database_error,
     schedule_pending_publish_reconciliations,
 )
@@ -66,6 +74,7 @@ from contentflow.worker import (
 
 TEST_DATABASE_URL = os.getenv("CONTENTFLOW_TEST_POSTGRES_URL")
 TEST_ADMIN_DATABASE_URL = os.getenv("CONTENTFLOW_TEST_POSTGRES_ADMIN_URL")
+TEST_POSTGRES_CONTAINER_ID = os.getenv("CONTENTFLOW_TEST_POSTGRES_CONTAINER_ID")
 
 pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_URL,
@@ -154,6 +163,57 @@ def _run_deadlocking_update(
             transaction.rollback()
             raise
     return None
+
+
+def _control_disposable_postgres_container(action: str, container_id: str) -> None:
+    normalized_id = container_id.strip().lower()
+    if action not in {"start", "stop"}:
+        raise ValueError("Unsupported disposable PostgreSQL container action")
+    if not re.fullmatch(r"[a-f0-9]{12,64}", normalized_id):
+        raise ValueError("PostgreSQL test container ID is not a safe Docker ID")
+    subprocess.run(
+        ["docker", action, normalized_id],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def _wait_for_postgres_ready(engine: Engine, *, timeout_seconds: float = 30) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            with engine.connect() as connection:
+                if connection.scalar(text("SELECT 1")) == 1:
+                    return
+        except DBAPIError:
+            pass
+        time.sleep(0.2)
+    raise AssertionError("Disposable PostgreSQL did not become ready before timeout")
+
+
+def _wait_for_job_status(
+    sessions: sessionmaker[Session],
+    job_id: str,
+    expected_status: str,
+    *,
+    timeout_seconds: float = 15,
+) -> Job:
+    deadline = time.monotonic() + timeout_seconds
+    last_status: str | None = None
+    while time.monotonic() < deadline:
+        with sessions() as session:
+            job = session.get(Job, job_id)
+            if job is not None:
+                last_status = job.status
+                if job.status == expected_status:
+                    return job
+        time.sleep(0.1)
+    raise AssertionError(
+        f"Job did not reach {expected_status!r} before timeout; "
+        f"last_status={last_status!r}"
+    )
 
 
 @pytest.fixture(scope="module")
@@ -1062,3 +1122,150 @@ def test_postgres_operational_metrics_collector(postgres_harness: PostgresHarnes
     assert "contentflow_workflow_runs" in payload
     assert "contentflow_prompt_eval_runs" in payload
     assert "contentflow_publish_reconciliation_required" in payload
+
+
+@pytest.mark.skipif(
+    not TEST_POSTGRES_CONTAINER_ID,
+    reason="CONTENTFLOW_TEST_POSTGRES_CONTAINER_ID is required for restart tests",
+)
+def test_worker_recovers_after_disposable_postgres_restart(
+    postgres_harness: PostgresHarness,
+):
+    container_id = TEST_POSTGRES_CONTAINER_ID or ""
+    with postgres_harness.sessions() as session:
+        session.execute(
+            update(Job)
+            .where(Job.status.in_(["queued", "retry", "running"]))
+            .values(
+                status="succeeded",
+                result_json={"reason": "isolated_restart_probe"},
+                locked_by=None,
+                locked_at=None,
+            )
+        )
+        first_job = enqueue_job(
+            session,
+            job_type="postgres.restart.probe",
+            payload={"phase": "before_restart"},
+            workspace_id=None,
+            idempotency_key=f"postgres-restart-before:{uuid.uuid4().hex}",
+            max_attempts=2,
+        )
+        session.commit()
+        first_job_id = first_job.id
+
+    settings = postgres_harness.settings.model_copy(
+        update={
+            "storage_reconcile_schedule_enabled": False,
+            "worker_poll_seconds": 0.1,
+            "worker_heartbeat_seconds": 1,
+            "worker_database_retry_initial_seconds": 0.1,
+            "worker_database_retry_max_seconds": 0.5,
+            "worker_database_retry_max_attempts": 100,
+            "worker_database_retry_jitter_ratio": 0,
+        }
+    )
+    worker_holder: dict[str, Worker] = {}
+    processed_phases: list[str] = []
+
+    def handle_probe(
+        _session: Session,
+        payload: dict[str, str],
+        _settings: Settings,
+    ) -> dict[str, str]:
+        phase = payload["phase"]
+        processed_phases.append(phase)
+        if phase == "after_restart":
+            worker_holder["worker"].request_stop()
+        return {"phase": phase}
+
+    worker = Worker(
+        settings=settings,
+        worker_id=f"postgres-restart-{uuid.uuid4().hex[:12]}",
+        session_factory=postgres_harness.sessions,
+        handlers={"postgres.restart.probe": handle_probe},
+    )
+    worker_holder["worker"] = worker
+    retry_observed = threading.Event()
+    retry_messages: list[str] = []
+
+    class RetrySignal(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            message = record.getMessage()
+            if "worker database operation unavailable; retrying" in message:
+                retry_messages.append(message)
+                retry_observed.set()
+
+    signal_handler = RetrySignal(level=logging.WARNING)
+    previous_logger_level = worker_logger.level
+    previous_logger_disabled = worker_logger.disabled
+    worker_logger.disabled = False
+    worker_logger.setLevel(logging.INFO)
+    worker_logger.addHandler(signal_handler)
+    worker_thread = threading.Thread(
+        target=worker.run_forever,
+        name="contentflow-postgres-restart-probe",
+        daemon=True,
+    )
+    container_stopped = False
+    try:
+        worker_thread.start()
+        completed_before = _wait_for_job_status(
+            postgres_harness.sessions,
+            first_job_id,
+            "succeeded",
+        )
+        assert completed_before.attempts == 1
+        assert completed_before.last_error is None
+
+        _control_disposable_postgres_container("stop", container_id)
+        container_stopped = True
+        assert retry_observed.wait(timeout=15)
+        assert worker_thread.is_alive()
+
+        restart_started = time.monotonic()
+        _control_disposable_postgres_container("start", container_id)
+        container_stopped = False
+        _wait_for_postgres_ready(postgres_harness.engine)
+
+        with postgres_harness.sessions() as session:
+            second_job = enqueue_job(
+                session,
+                job_type="postgres.restart.probe",
+                payload={"phase": "after_restart"},
+                workspace_id=None,
+                idempotency_key=f"postgres-restart-after:{uuid.uuid4().hex}",
+                max_attempts=2,
+            )
+            session.commit()
+            second_job_id = second_job.id
+
+        completed_after = _wait_for_job_status(
+            postgres_harness.sessions,
+            second_job_id,
+            "succeeded",
+        )
+        recovery_seconds = time.monotonic() - restart_started
+        assert recovery_seconds < 15
+        assert completed_after.attempts == 1
+        assert completed_after.last_error is None
+        assert processed_phases == ["before_restart", "after_restart"]
+    finally:
+        if container_stopped:
+            _control_disposable_postgres_container("start", container_id)
+            _wait_for_postgres_ready(postgres_harness.engine)
+        worker.request_stop()
+        worker_thread.join(timeout=10)
+        worker_logger.removeHandler(signal_handler)
+        worker_logger.setLevel(previous_logger_level)
+        worker_logger.disabled = previous_logger_disabled
+
+    assert not worker_thread.is_alive()
+    assert retry_messages
+    assert all("@" not in message for message in retry_messages)
+    assert all("127.0.0.1" not in message for message in retry_messages)
+    with postgres_harness.sessions() as session:
+        worker_node = session.get(WorkerNode, worker.worker_id)
+        assert worker_node is not None
+        assert worker_node.status == "stopped"
+        assert worker_node.stopped_at is not None

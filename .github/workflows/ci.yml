@@ -106,6 +106,8 @@ jobs:
             test rules /etc/prometheus/contentflow.rules.test.yml
 
       - name: Test against PostgreSQL and MinIO and enforce coverage
+        env:
+          CONTENTFLOW_TEST_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: >-
           uv run --locked pytest -q
           --cov=contentflow
