@@ -311,18 +311,20 @@ Prometheus 暴露 `contentflow_queue_jobs{status="manual_review"}`、`contentflo
 
 ### Provider 调用账本与人工核对
 
-OpenAI-compatible 文本与远程 Embedding 调用会写入两层账本：`provider_invocations` 表示由工作区、Job、领域实体、操作序号、Provider/模型和请求摘要确定的逻辑请求，`provider_invocation_attempts` 表示每次真实尝试。Worker 使用进程内上下文把调用绑定到当前已领取 Job；工作流、Prompt Eval 和知识索引在任何网络调用前先通过独立事务提交 `started` 尝试与审计记录。若账本不能提交，调用失败关闭且不会发出 Provider 请求。
+OpenAI-compatible 文本、远程 Embedding、HTTP 图片/视频生成、异步媒体轮询和 Openverse 图片搜索都会写入两层账本：`provider_invocations` 表示由工作区、Job、领域实体、操作序号、Provider/模型和请求摘要确定的逻辑请求，`provider_invocation_attempts` 表示每次真实尝试。Worker 使用进程内上下文把调用绑定到当前已领取 Job；上述受管 Provider 方法都在网络调用前通过独立事务提交 `started` 尝试与审计记录。若账本不能提交，调用失败关闭且不会发出 Provider 请求。
 
-账本只保存稳定请求键、请求/响应 SHA-256 与字节数、受控状态、适配器报告的供应商请求 ID/来源、响应模型、Token 用量、异常类型和时间。它不保存提示词、正文、Embedding 输入、模型原始响应、API Key、Authorization、端点或异常正文。`GET /api/v1/jobs/{job_id}/provider-invocations` 只允许 reviewer/admin 访问并使用有界游标分页；任务页最多自动取 1000 条并明确提示截断。
+账本只保存稳定请求键、请求/响应 SHA-256 与字节数、受控状态、适配器报告的供应商请求 ID/来源、响应模型、Token 用量、异常类型和时间。媒体响应证据只由状态、任务 ID、媒体标签以及内容/下载 URL 的摘要组成；搜索只保存查询与候选集合摘要。账本不保存提示词、正文、Embedding 输入、搜索词、候选详情、媒体字节、下载 URL、模型原始响应、API Key、Authorization、端点或异常正文。`GET /api/v1/jobs/{job_id}/provider-invocations` 只允许 reviewer/admin 访问并使用有界游标分页；任务页最多自动取 1000 条并明确提示截断。
 
 状态解释：
 
 - `started`：调用意图已经持久化；不证明请求已经到达供应商。Worker 异常或租约过期进入人工核对时，仍为 `started` 的尝试会转为 `outcome_unknown`。
 - `succeeded`：当前进程收到并解析了可用响应，响应内容本身只以摘要留存。
-- `outcome_unknown`：本地无法证明供应商是否处理，必须到供应商控制台核对。它作为历史证据保留，即使人工决定重试或放弃也不会被伪装成成功/失败。
+- `outcome_unknown`：本地无法证明供应商是否处理。人工核对型文本/Embedding Job 必须到供应商控制台核对；通过目标 Media Contract conformance 的生成请求可使用原稳定幂等键重试；Openverse 搜索属于只读重放。历史不确定尝试始终保留，不会被后续成功伪装成已知失败。
 - `late_succeeded`：人工核对已把尝试标记为不确定后，原调用又返回了可用响应；领域 Job 仍保持人工核对，不能因迟到回执自动提交旧执行者结果。
 
-OpenAI-compatible 适配器会把 64 位稳定请求键作为 `Idempotency-Key` 发出，但不同供应商可能忽略、拒绝或只在有限窗口内支持该头。只有目标供应商的正式契约、受控 conformance、重复请求结果查询和计费核对共同通过后，才可以考虑把某类 Job 从 `manual_review` 升级为自动恢复。
+同一逻辑请求开始新的 attempt 前，仍悬空的旧 `started` 会先转为 `outcome_unknown` 并记录 `superseded_by_retry`，避免自动恢复把旧调用永久留成“仍在执行”。若旧调用随后返回成功，它只会形成 `late_succeeded` 证据，不会覆盖新执行者的领域状态。
+
+OpenAI-compatible 适配器会把 64 位稳定请求键作为 `Idempotency-Key` 发出，但不同供应商可能忽略、拒绝或只在有限窗口内支持该头。HTTP 媒体生成继续发送按 Asset 内容版本确定的 `cfm-*` 幂等键，账本不会替换它；只有目标媒体服务实际通过同键重放/冲突与账单 conformance 后，才可依赖自动恢复。Openverse GET 不发送幂等键，也不被描述成 exactly-once。
 
 Prometheus 的 `contentflow_provider_invocation_attempts{status=...}` 是累计历史状态快照；`contentflow_provider_invocation_unresolved_outcome_unknown` 与最老时长只统计 Job 仍处于 `manual_review` 的未解决尝试。`ContentFlowProviderInvocationOutcomeUnknown` 告警要求持续 5 分钟。告警恢复只表示核对队列已经处置，不表示供应商侧费用或结果已经自动对平。
 

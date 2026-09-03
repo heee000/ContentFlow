@@ -18,9 +18,13 @@ from contentflow.entities import (
     User,
     Workspace,
 )
+from contentflow.media_providers import MediaGeneration, MediaProviderError
 from contentflow.provider_invocations import (
     LedgeredEmbeddingProvider,
+    LedgeredMediaProvider,
+    LedgeredSearchProvider,
     ProviderInvocationLedger,
+    canonical_evidence,
     provider_job_context,
 )
 
@@ -254,6 +258,247 @@ class ProviderInvocationLedgerTest(unittest.TestCase):
                 }
             )
         self.assertNotIn("sensitive embedding input", serialized)
+
+    def test_retry_closes_a_previous_unfinished_attempt_before_starting_next(self):
+        ledger = ProviderInvocationLedger(self.engine)
+        evidence_sha256, evidence_bytes = canonical_evidence(
+            {"prompt": "private retry prompt"}
+        )
+        arguments = {
+            "workspace_id": self.workspace_id,
+            "job_id": self.job_id,
+            "entity_type": "asset",
+            "entity_id": "asset-retry",
+            "provider_kind": "media",
+            "provider_name": "http",
+            "model_name": "media-model-v1",
+            "operation": "media.generate",
+            "ordinal": 1,
+            "request_sha256": evidence_sha256,
+            "request_bytes": evidence_bytes,
+            "idempotency_key_sent": True,
+        }
+        first = ledger.start(**arguments)
+        second = ledger.start(**arguments)
+
+        with self.Session() as session:
+            attempts = list(
+                session.scalars(
+                    select(ProviderInvocationAttempt).order_by(
+                        ProviderInvocationAttempt.attempt_number
+                    )
+                )
+            )
+            self.assertEqual(first.invocation_id, second.invocation_id)
+            self.assertEqual(
+                [attempt.status for attempt in attempts],
+                ["outcome_unknown", "started"],
+            )
+            self.assertEqual(attempts[0].error_type, "superseded_by_retry")
+            self.assertIsNotNone(attempts[0].completed_at)
+            self.assertIsNone(attempts[1].completed_at)
+
+        ledger.finish(
+            second,
+            status="succeeded",
+            call_metadata={"usage_source": "not_reported"},
+            response_sha256="a" * 64,
+            response_bytes=1,
+        )
+        with self.Session() as session:
+            invocation = session.get(ProviderInvocation, first.invocation_id)
+            attempts = list(
+                session.scalars(
+                    select(ProviderInvocationAttempt).order_by(
+                        ProviderInvocationAttempt.attempt_number
+                    )
+                )
+            )
+            self.assertEqual(invocation.last_status, "succeeded")
+            self.assertEqual(
+                [attempt.status for attempt in attempts],
+                ["outcome_unknown", "succeeded"],
+            )
+
+    def test_media_wrapper_records_generation_and_poll_without_media_payloads(self):
+        class FakeMediaProvider:
+            def generate(self, **_kwargs):
+                return MediaGeneration(
+                    status="processing",
+                    external_task_id="media-task-123",
+                    metadata={"request_id": "media-request-123"},
+                )
+
+            def poll(self, _external_task_id):
+                return MediaGeneration(
+                    status="ready",
+                    external_task_id="media-task-123",
+                    download_url="https://assets.example/private-media-token",
+                    mime_type="video/mp4",
+                    filename="result.mp4",
+                    metadata={"request_id": "media-poll-456"},
+                )
+
+        wrapped = LedgeredMediaProvider(
+            FakeMediaProvider(),
+            ledger=ProviderInvocationLedger(self.engine),
+            workspace_id=self.workspace_id,
+            entity_id="asset-ledger",
+            provider_name="http",
+            model_name="media-model-v1",
+        )
+        with self.Session() as session:
+            job = session.get(Job, self.job_id)
+            with provider_job_context(job):
+                submitted = wrapped.generate(
+                    kind="video",
+                    prompt="private media prompt must not be stored",
+                    metadata={"shots": ["private storyboard"]},
+                    idempotency_key="media-idempotency-key",
+                )
+                completed = wrapped.poll(submitted.external_task_id or "")
+        self.assertEqual(completed.status, "ready")
+
+        with self.Session() as session:
+            invocations = list(
+                session.scalars(
+                    select(ProviderInvocation).order_by(
+                        ProviderInvocation.created_at,
+                        ProviderInvocation.id,
+                    )
+                )
+            )
+            attempts = list(
+                session.scalars(
+                    select(ProviderInvocationAttempt).order_by(
+                        ProviderInvocationAttempt.started_at,
+                        ProviderInvocationAttempt.id,
+                    )
+                )
+            )
+            self.assertEqual(
+                [invocation.provider_kind for invocation in invocations],
+                ["media", "media"],
+            )
+            self.assertEqual(
+                [invocation.operation for invocation in invocations],
+                ["media.generate", "media.poll"],
+            )
+            self.assertTrue(attempts[0].idempotency_key_sent)
+            self.assertFalse(attempts[1].idempotency_key_sent)
+            self.assertEqual(attempts[0].provider_request_id, "media-request-123")
+            self.assertEqual(attempts[1].provider_request_id, "media-poll-456")
+            self.assertEqual(attempts[1].response_model, "media-model-v1")
+            serialized = json.dumps(
+                {
+                    "invocations": [
+                        {
+                            column.name: getattr(invocation, column.name)
+                            for column in ProviderInvocation.__table__.columns
+                        }
+                        for invocation in invocations
+                    ],
+                    "attempts": [
+                        {
+                            column.name: getattr(attempt, column.name)
+                            for column in ProviderInvocationAttempt.__table__.columns
+                        }
+                        for attempt in attempts
+                    ],
+                },
+                default=str,
+            )
+        self.assertNotIn("private media prompt", serialized)
+        self.assertNotIn("private storyboard", serialized)
+        self.assertNotIn("private-media-token", serialized)
+
+    def test_media_failure_is_unknown_without_storing_error_body(self):
+        class FailingMediaProvider:
+            def generate(self, **_kwargs):
+                raise MediaProviderError(
+                    "private upstream response body",
+                    retryable=True,
+                    provider_request_id="media-failure-request",
+                    provider_request_id_source="body.request_id",
+                )
+
+        wrapped = LedgeredMediaProvider(
+            FailingMediaProvider(),
+            ledger=ProviderInvocationLedger(self.engine),
+            workspace_id=self.workspace_id,
+            entity_id="asset-failure",
+            provider_name="http",
+            model_name="media-model-v1",
+        )
+        with self.Session() as session:
+            job = session.get(Job, self.job_id)
+            with provider_job_context(job):
+                with self.assertRaisesRegex(MediaProviderError, "private upstream"):
+                    wrapped.generate(
+                        kind="image",
+                        prompt="private failed prompt",
+                        metadata={},
+                        idempotency_key="media-idempotency-key",
+                    )
+        with self.Session() as session:
+            invocation = session.scalar(select(ProviderInvocation))
+            attempt = session.scalar(select(ProviderInvocationAttempt))
+            self.assertEqual(invocation.last_status, "outcome_unknown")
+            self.assertEqual(attempt.status, "outcome_unknown")
+            self.assertEqual(attempt.error_type, "MediaProviderError")
+            self.assertEqual(attempt.provider_request_id, "media-failure-request")
+            serialized = json.dumps(
+                {
+                    "request_sha256": invocation.request_sha256,
+                    "error_type": attempt.error_type,
+                }
+            )
+        self.assertNotIn("private upstream response body", serialized)
+        self.assertNotIn("private failed prompt", serialized)
+
+    def test_search_wrapper_records_only_evidence_hashes(self):
+        class FakeSearchProvider:
+            provider_name = "openverse"
+
+            def search(self, *, query, limit=None):
+                self.query = query
+                self.limit = limit
+                return [
+                    {
+                        "title": "private result title",
+                        "download_url": "https://upload.wikimedia.org/private.jpg",
+                    }
+                ]
+
+        wrapped = LedgeredSearchProvider(
+            FakeSearchProvider(),
+            ledger=ProviderInvocationLedger(self.engine),
+            workspace_id=self.workspace_id,
+            entity_id="asset-search",
+            model_name="openverse-images-v1",
+        )
+        with self.Session() as session:
+            job = session.get(Job, self.job_id)
+            with provider_job_context(job):
+                results = wrapped.search(query="private search query", limit=3)
+        self.assertEqual(results[0]["title"], "private result title")
+
+        with self.Session() as session:
+            invocation = session.scalar(select(ProviderInvocation))
+            attempt = session.scalar(select(ProviderInvocationAttempt))
+            self.assertEqual(invocation.provider_kind, "search")
+            self.assertEqual(invocation.operation, "search.image")
+            self.assertEqual(invocation.provider_name, "openverse")
+            self.assertEqual(attempt.status, "succeeded")
+            self.assertFalse(attempt.idempotency_key_sent)
+            serialized = json.dumps(
+                {
+                    "request_sha256": invocation.request_sha256,
+                    "response_sha256": attempt.response_sha256,
+                }
+            )
+        self.assertNotIn("private search query", serialized)
+        self.assertNotIn("private result title", serialized)
 
 
 if __name__ == "__main__":

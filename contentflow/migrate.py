@@ -13,7 +13,7 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "f4a5b6c7d8e9"
+HEAD_REVISION = "a5b6c7d8e9f0"
 MINIMUM_PUBLIC_TABLE_COUNT = 33
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")

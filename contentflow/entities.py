@@ -1160,7 +1160,7 @@ class ProviderInvocation(TimestampMixin, Base):
     __tablename__ = "provider_invocations"
     __table_args__ = (
         CheckConstraint(
-            "provider_kind IN ('text', 'embedding')",
+            "provider_kind IN ('text', 'embedding', 'media', 'search')",
             name="provider_kind",
         ),
         CheckConstraint(

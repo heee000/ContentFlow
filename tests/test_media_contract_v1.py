@@ -240,6 +240,8 @@ class MediaContractAdapterTest(unittest.TestCase):
         self.assertTrue(error.retryable)
         self.assertEqual(error.status_code, 429)
         self.assertEqual(error.retry_after_seconds, 300)
+        self.assertEqual(error.provider_request_id, "request-rate-limit")
+        self.assertEqual(error.provider_request_id_source, "body.request_id")
         self.assertNotIn("private-quota-detail", str(error))
 
     def test_permanent_status_is_redacted(self):
@@ -272,6 +274,8 @@ class MediaContractAdapterTest(unittest.TestCase):
         error = captured.exception
         self.assertFalse(error.retryable)
         self.assertEqual(error.status_code, 400)
+        self.assertEqual(error.provider_request_id, "request-validation")
+        self.assertEqual(error.provider_request_id_source, "body.request_id")
         self.assertNotIn("private-validation-detail", str(error))
 
     def test_error_retryable_flag_must_match_http_status(self):
@@ -513,6 +517,7 @@ class MediaContractAdapterTest(unittest.TestCase):
         )
         with (
             patch("contentflow.worker.build_media_provider", return_value=provider),
+            patch("contentflow.worker.LedgeredMediaProvider", return_value=provider),
             patch("contentflow.worker.enqueue_job") as enqueue,
             patch("contentflow.worker.record_audit"),
         ):

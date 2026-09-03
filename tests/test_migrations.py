@@ -104,7 +104,7 @@ class MigrationTest(unittest.TestCase):
                 self.assertIn("provider_invocations", tables)
                 self.assertIn("provider_invocation_attempts", tables)
                 provider_invocation_checks = {
-                    item["name"]
+                    item["name"]: item["sqltext"]
                     for item in inspect(engine).get_check_constraints(
                         "provider_invocations"
                     )
@@ -113,6 +113,13 @@ class MigrationTest(unittest.TestCase):
                     "ck_provider_invocations_provider_kind",
                     provider_invocation_checks,
                 )
+                provider_kind_sql = provider_invocation_checks[
+                    "ck_provider_invocations_provider_kind"
+                ]
+                self.assertIn("'text'", provider_kind_sql)
+                self.assertIn("'embedding'", provider_kind_sql)
+                self.assertIn("'media'", provider_kind_sql)
+                self.assertIn("'search'", provider_kind_sql)
                 self.assertIn(
                     "ck_provider_invocations_request_sha256_length",
                     provider_invocation_checks,

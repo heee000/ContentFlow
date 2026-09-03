@@ -27,6 +27,7 @@ TERMINAL_ATTEMPT_STATUSES = {
     "late_succeeded",
     "late_failed",
 }
+PROVIDER_KINDS = frozenset({"text", "embedding", "media", "search"})
 
 
 class ProviderInvocationLedgerError(RuntimeError):
@@ -201,8 +202,8 @@ class ProviderInvocationLedger:
         request_bytes: int,
         idempotency_key_sent: bool,
     ) -> ProviderInvocationHandle:
-        if provider_kind not in {"text", "embedding"}:
-            raise ValueError("provider_kind must be text or embedding")
+        if provider_kind not in PROVIDER_KINDS:
+            raise ValueError("unsupported provider_kind")
         if ordinal < 1 or request_bytes < 0 or not HEX_SHA256.fullmatch(request_sha256):
             raise ValueError("invalid provider invocation evidence")
         bounded = {
@@ -253,6 +254,7 @@ class ProviderInvocationLedger:
                         )
                         session.add(invocation)
                         session.flush()
+                        superseded_attempts = 0
                     else:
                         expected = (
                             workspace_id,
@@ -282,6 +284,42 @@ class ProviderInvocationLedger:
                             raise ProviderInvocationLedgerError(
                                 "Provider invocation request key conflict"
                             )
+                        previous_started = list(
+                            session.scalars(
+                                select(ProviderInvocationAttempt)
+                                .where(
+                                    ProviderInvocationAttempt.invocation_id
+                                    == invocation.id,
+                                    ProviderInvocationAttempt.status == "started",
+                                )
+                                .order_by(
+                                    ProviderInvocationAttempt.attempt_number.asc()
+                                )
+                            )
+                        )
+                        completed_at = datetime.now(timezone.utc)
+                        for previous in previous_started:
+                            previous.status = "outcome_unknown"
+                            previous.completed_at = completed_at
+                            previous.error_type = "superseded_by_retry"
+                            record_audit(
+                                session,
+                                action="provider.invocation_outcome_unknown",
+                                entity_type="provider_invocation",
+                                entity_id=invocation.id,
+                                workspace_id=workspace_id,
+                                actor_user_id=None,
+                                metadata={
+                                    "attempt": previous.attempt_number,
+                                    "job_id": job_id,
+                                    "provider_kind": provider_kind,
+                                    "provider_name": invocation.provider_name,
+                                    "operation": invocation.operation,
+                                    "request_key": request_key,
+                                    "reason_code": "superseded_by_retry",
+                                },
+                            )
+                        superseded_attempts = len(previous_started)
                         invocation.last_status = "started"
 
                     attempt_number = int(
@@ -323,6 +361,7 @@ class ProviderInvocationLedger:
                             "request_key": request_key,
                             "request_sha256": request_sha256,
                             "idempotency_key_sent": idempotency_key_sent,
+                            "superseded_attempts": superseded_attempts,
                         },
                     )
                     session.commit()
@@ -369,8 +408,8 @@ class ProviderInvocationLedger:
             if session.bind and session.bind.dialect.name == "postgresql":
                 attempt_query = attempt_query.with_for_update()
                 invocation_query = invocation_query.with_for_update()
-            attempt = session.scalar(attempt_query)
             invocation = session.scalar(invocation_query)
+            attempt = session.scalar(attempt_query)
             if attempt is None or invocation is None:
                 raise ProviderInvocationLedgerError(
                     "Provider invocation attempt is missing"
@@ -570,3 +609,250 @@ class LedgeredEmbeddingProvider:
                 "Provider response was received but its ledger could not be finalized"
             ) from error
         return vectors
+
+
+def _media_call_metadata(
+    *,
+    provider: Any,
+    model_name: str,
+    generation: Any | None = None,
+    error: Exception | None = None,
+) -> dict[str, Any]:
+    metadata = getattr(provider, "last_call_metadata", None)
+    safe = dict(metadata) if isinstance(metadata, dict) else {}
+    result_metadata = getattr(generation, "metadata", None)
+    if isinstance(result_metadata, dict):
+        request_id = result_metadata.get("request_id")
+        if request_id is not None:
+            safe["provider_request_id"] = request_id
+            safe["provider_request_id_source"] = "body.request_id"
+    if error is not None:
+        request_id = getattr(error, "provider_request_id", None)
+        request_id_source = getattr(error, "provider_request_id_source", None)
+        if request_id is not None:
+            safe["provider_request_id"] = request_id
+            safe["provider_request_id_source"] = (
+                request_id_source or "body.request_id"
+            )
+    safe["response_model"] = model_name
+    return safe
+
+
+def _media_response_evidence(generation: Any) -> dict[str, Any]:
+    content = getattr(generation, "content", None)
+    download_url = getattr(generation, "download_url", None)
+    return {
+        "status": getattr(generation, "status", None),
+        "external_task_id": getattr(generation, "external_task_id", None),
+        "mime_type": getattr(generation, "mime_type", None),
+        "filename": getattr(generation, "filename", None),
+        "inline_content_sha256": (
+            hashlib.sha256(bytes(content)).hexdigest()
+            if isinstance(content, (bytes, bytearray))
+            else None
+        ),
+        "inline_content_bytes": (
+            len(content) if isinstance(content, (bytes, bytearray)) else None
+        ),
+        "download_url_sha256": (
+            hashlib.sha256(download_url.encode("utf-8")).hexdigest()
+            if isinstance(download_url, str)
+            else None
+        ),
+    }
+
+
+class LedgeredMediaProvider:
+    """Record external media generation and polling without storing media bodies."""
+
+    def __init__(
+        self,
+        provider: Any,
+        *,
+        ledger: ProviderInvocationLedger,
+        workspace_id: str,
+        entity_id: str,
+        provider_name: str,
+        model_name: str,
+    ) -> None:
+        self.provider = provider
+        self.ledger = ledger
+        self.workspace_id = workspace_id
+        self.entity_id = entity_id
+        self.provider_name = provider_name[:80]
+        self.model_name = model_name[:160]
+        self.ordinal = 0
+
+    def generate(
+        self,
+        *,
+        kind: str,
+        prompt: str,
+        metadata: dict[str, Any],
+        idempotency_key: str,
+    ) -> Any:
+        return self._call(
+            operation="media.generate",
+            request={
+                "kind": kind,
+                "model": self.model_name,
+                "prompt": prompt,
+                "metadata": metadata,
+            },
+            idempotency_key_sent=True,
+            invoke=lambda: self.provider.generate(
+                kind=kind,
+                prompt=prompt,
+                metadata=metadata,
+                idempotency_key=idempotency_key,
+            ),
+        )
+
+    def poll(self, external_task_id: str) -> Any:
+        return self._call(
+            operation="media.poll",
+            request={
+                "model": self.model_name,
+                "external_task_id": external_task_id,
+            },
+            idempotency_key_sent=False,
+            invoke=lambda: self.provider.poll(external_task_id),
+        )
+
+    def _call(
+        self,
+        *,
+        operation: str,
+        request: dict[str, Any],
+        idempotency_key_sent: bool,
+        invoke: Any,
+    ) -> Any:
+        self.ordinal += 1
+        request_sha256, request_bytes = canonical_evidence(request)
+        job_id = current_provider_job_id(self.workspace_id)
+        handle = self.ledger.start(
+            workspace_id=self.workspace_id,
+            job_id=job_id,
+            entity_type="asset",
+            entity_id=self.entity_id,
+            provider_kind="media",
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+            operation=operation,
+            ordinal=self.ordinal,
+            request_sha256=request_sha256,
+            request_bytes=request_bytes,
+            idempotency_key_sent=idempotency_key_sent,
+        )
+        try:
+            generation = invoke()
+        except Exception as error:
+            try:
+                self.ledger.finish(
+                    handle,
+                    status="outcome_unknown",
+                    call_metadata=_media_call_metadata(
+                        provider=self.provider,
+                        model_name=self.model_name,
+                        error=error,
+                    ),
+                    error_type=type(error).__name__,
+                )
+            except Exception:
+                logger.exception(
+                    "media provider invocation failure could not be finalized id=%s",
+                    handle.invocation_id,
+                )
+            raise
+        try:
+            response_sha256, response_bytes = canonical_evidence(
+                _media_response_evidence(generation)
+            )
+            self.ledger.finish(
+                handle,
+                status="succeeded",
+                call_metadata=_media_call_metadata(
+                    provider=self.provider,
+                    model_name=self.model_name,
+                    generation=generation,
+                ),
+                response_sha256=response_sha256,
+                response_bytes=response_bytes,
+            )
+        except Exception as error:
+            raise ProviderInvocationLedgerError(
+                "Media provider response was received but its ledger could not be finalized"
+            ) from error
+        return generation
+
+
+class LedgeredSearchProvider:
+    """Record read-only external search calls without storing queries or results."""
+
+    def __init__(
+        self,
+        provider: Any,
+        *,
+        ledger: ProviderInvocationLedger,
+        workspace_id: str,
+        entity_id: str,
+        model_name: str = "search-api",
+    ) -> None:
+        self.provider = provider
+        self.ledger = ledger
+        self.workspace_id = workspace_id
+        self.entity_id = entity_id
+        self.provider_name = str(getattr(provider, "provider_name", "search"))[:80]
+        self.model_name = model_name[:160]
+        self.ordinal = 0
+
+    def search(self, *, query: str, limit: int | None = None) -> list[dict[str, Any]]:
+        self.ordinal += 1
+        request_sha256, request_bytes = canonical_evidence(
+            {"query": query, "limit": limit}
+        )
+        job_id = current_provider_job_id(self.workspace_id)
+        handle = self.ledger.start(
+            workspace_id=self.workspace_id,
+            job_id=job_id,
+            entity_type="asset",
+            entity_id=self.entity_id,
+            provider_kind="search",
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+            operation="search.image",
+            ordinal=self.ordinal,
+            request_sha256=request_sha256,
+            request_bytes=request_bytes,
+            idempotency_key_sent=False,
+        )
+        try:
+            results = self.provider.search(query=query, limit=limit)
+        except Exception as error:
+            try:
+                self.ledger.finish(
+                    handle,
+                    status="outcome_unknown",
+                    call_metadata=getattr(self.provider, "last_call_metadata", {}),
+                    error_type=type(error).__name__,
+                )
+            except Exception:
+                logger.exception(
+                    "search provider invocation failure could not be finalized id=%s",
+                    handle.invocation_id,
+                )
+            raise
+        try:
+            response_sha256, response_bytes = canonical_evidence(results)
+            self.ledger.finish(
+                handle,
+                status="succeeded",
+                call_metadata=getattr(self.provider, "last_call_metadata", {}),
+                response_sha256=response_sha256,
+                response_bytes=response_bytes,
+            )
+        except Exception as error:
+            raise ProviderInvocationLedgerError(
+                "Search provider response was received but its ledger could not be finalized"
+            ) from error
+        return results

@@ -73,6 +73,8 @@ from .object_storage import build_object_storage, is_managed_storage_uri
 from .prompt_eval import execute_prompt_eval_run
 from .provider_invocations import (
     LedgeredEmbeddingProvider,
+    LedgeredMediaProvider,
+    LedgeredSearchProvider,
     ProviderInvocationLedger,
     provider_job_context,
 )
@@ -572,7 +574,13 @@ def handle_asset_search(
         raise MediaProviderError("素材任务不是开放图库搜索任务", retryable=False)
     metadata = dict(asset.metadata_json or {})
     query = str(metadata.get("search_query") or "").strip()
-    provider = build_image_search_provider(settings)
+    provider = LedgeredSearchProvider(
+        build_image_search_provider(settings),
+        ledger=ProviderInvocationLedger(session.get_bind()),
+        workspace_id=asset.workspace_id,
+        entity_id=asset.id,
+        model_name="openverse-images-v1",
+    )
     candidates = provider.search(query=query)
     asset.status = "awaiting_selection"
     asset.error = None
@@ -731,6 +739,18 @@ def handle_asset_generate(
         return {"asset_id": asset.id, "status": asset.status}
     asset.status = "generating"
     provider = build_media_provider(settings, asset.kind)
+    if configured_provider == "http":
+        model_name = (
+            settings.image_model if asset.kind == "image" else settings.video_model
+        )
+        provider = LedgeredMediaProvider(
+            provider,
+            ledger=ProviderInvocationLedger(session.get_bind()),
+            workspace_id=asset.workspace_id,
+            entity_id=asset.id,
+            provider_name=configured_provider,
+            model_name=model_name,
+        )
     provider_profile = media_provider_profile_fingerprint(settings, asset.kind)
     generation = provider.generate(
         kind=asset.kind,
@@ -803,6 +823,21 @@ def handle_asset_poll(
             retryable=False,
         )
     provider = build_media_provider(settings, asset.kind)
+    configured_provider = (
+        settings.image_provider if asset.kind == "image" else settings.video_provider
+    )
+    if configured_provider == "http":
+        model_name = (
+            settings.image_model if asset.kind == "image" else settings.video_model
+        )
+        provider = LedgeredMediaProvider(
+            provider,
+            ledger=ProviderInvocationLedger(session.get_bind()),
+            workspace_id=asset.workspace_id,
+            entity_id=asset.id,
+            provider_name=configured_provider,
+            model_name=model_name,
+        )
     generation = provider.poll(asset.external_task_id)
     if generation.status == "processing":
         raise JobNotReady("素材仍在生成中")

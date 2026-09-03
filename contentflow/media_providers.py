@@ -57,11 +57,15 @@ class MediaProviderError(RuntimeError):
         retryable: bool,
         status_code: int | None = None,
         retry_after_seconds: int | None = None,
+        provider_request_id: str | None = None,
+        provider_request_id_source: str | None = None,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.status_code = status_code
         self.retry_after_seconds = retry_after_seconds
+        self.provider_request_id = provider_request_id
+        self.provider_request_id_source = provider_request_id_source
 
 
 @dataclass(slots=True)
@@ -605,6 +609,10 @@ class HTTPMediaProvider:
             status_code=response.status_code,
             retry_after_seconds=(
                 cls._retry_after_seconds(response) if retryable else None
+            ),
+            provider_request_id=body.get("request_id"),
+            provider_request_id_source=(
+                "body.request_id" if body.get("request_id") else None
             ),
         )
 

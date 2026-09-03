@@ -32,6 +32,7 @@ from contentflow.entities import (
     WorkspaceStorageUsage,
     WorkflowRun,
 )
+from contentflow.media_providers import MediaGeneration
 from contentflow.settings import Settings
 from contentflow.provider_invocations import current_provider_job_id
 from contentflow.providers import MockProvider
@@ -209,6 +210,154 @@ class WorkerIntegrationTest(unittest.TestCase):
             self.assertEqual(len(attempts), 3)
             self.assertTrue(all(item.status == "succeeded" for item in attempts))
             self.assertTrue(all(item.idempotency_key_sent for item in attempts))
+
+    def test_http_media_generation_is_bound_to_queue_job_ledger(self):
+        settings = self.settings.model_copy(
+            update={
+                "image_provider": "http",
+                "media_api_base": "https://media.example/v1",
+                "media_api_key": "test-media-key",
+                "media_download_allowed_hosts": ["assets.example"],
+                "image_model": "image-model-v1",
+            }
+        )
+        with db.SessionLocal() as session:
+            asset = Asset(
+                workspace_id=self.workspace_id,
+                kind="image",
+                provider="http",
+                status="pending",
+                prompt="private worker media prompt",
+                content_version=1,
+                metadata_json={"ratio": "1:1"},
+            )
+            session.add(asset)
+            session.flush()
+            job = Job(
+                workspace_id=self.workspace_id,
+                job_type="asset.generate",
+                status="queued",
+                payload_json={"asset_id": asset.id},
+                run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                idempotency_key=f"asset.generate:{asset.id}:1",
+            )
+            session.add(job)
+            session.commit()
+            asset_id = asset.id
+            job_id = job.id
+
+        class FakeHTTPMediaProvider:
+            def generate(self, **_kwargs):
+                return MediaGeneration(
+                    status="ready",
+                    content=b"generated image bytes",
+                    mime_type="image/png",
+                    filename="generated.png",
+                    metadata={"request_id": "media-worker-request"},
+                )
+
+        worker = Worker(
+            settings=settings,
+            session_factory=db.SessionLocal,
+            worker_id="media-ledger-worker",
+        )
+        with patch(
+            "contentflow.worker.build_media_provider",
+            return_value=FakeHTTPMediaProvider(),
+        ):
+            self.assertTrue(worker.run_once())
+
+        with db.SessionLocal() as session:
+            asset = session.get(Asset, asset_id)
+            queue_job = session.get(Job, job_id)
+            invocation = session.scalar(
+                select(ProviderInvocation).where(
+                    ProviderInvocation.entity_id == asset_id
+                )
+            )
+            attempt = session.scalar(
+                select(ProviderInvocationAttempt).where(
+                    ProviderInvocationAttempt.invocation_id == invocation.id
+                )
+            )
+            self.assertEqual(asset.status, "ready")
+            self.assertEqual(queue_job.status, "succeeded")
+            self.assertEqual(invocation.job_id, job_id)
+            self.assertEqual(invocation.provider_kind, "media")
+            self.assertEqual(invocation.operation, "media.generate")
+            self.assertEqual(attempt.status, "succeeded")
+            self.assertTrue(attempt.idempotency_key_sent)
+            self.assertEqual(attempt.provider_request_id, "media-worker-request")
+
+    def test_openverse_search_is_bound_to_queue_job_ledger(self):
+        with db.SessionLocal() as session:
+            asset = Asset(
+                workspace_id=self.workspace_id,
+                kind="image",
+                provider="openverse",
+                status="pending",
+                metadata_json={"search_query": "private search query"},
+            )
+            session.add(asset)
+            session.flush()
+            job = Job(
+                workspace_id=self.workspace_id,
+                job_type="asset.search",
+                status="queued",
+                payload_json={"asset_id": asset.id},
+                run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                idempotency_key=f"asset.search:{asset.id}",
+            )
+            session.add(job)
+            session.commit()
+            asset_id = asset.id
+            job_id = job.id
+
+        class FakeSearchProvider:
+            provider_name = "openverse"
+
+            def search(self, *, query, limit=None):
+                self.query = query
+                self.limit = limit
+                return [
+                    {
+                        "title": "candidate",
+                        "license": "cc0",
+                        "download_url": "https://upload.wikimedia.org/image.jpg",
+                    }
+                ]
+
+        worker = Worker(
+            settings=self.settings,
+            session_factory=db.SessionLocal,
+            worker_id="search-ledger-worker",
+        )
+        with patch(
+            "contentflow.worker.build_image_search_provider",
+            return_value=FakeSearchProvider(),
+        ):
+            self.assertTrue(worker.run_once())
+
+        with db.SessionLocal() as session:
+            asset = session.get(Asset, asset_id)
+            queue_job = session.get(Job, job_id)
+            invocation = session.scalar(
+                select(ProviderInvocation).where(
+                    ProviderInvocation.entity_id == asset_id
+                )
+            )
+            attempt = session.scalar(
+                select(ProviderInvocationAttempt).where(
+                    ProviderInvocationAttempt.invocation_id == invocation.id
+                )
+            )
+            self.assertEqual(asset.status, "awaiting_selection")
+            self.assertEqual(queue_job.status, "succeeded")
+            self.assertEqual(invocation.job_id, job_id)
+            self.assertEqual(invocation.provider_kind, "search")
+            self.assertEqual(invocation.operation, "search.image")
+            self.assertEqual(attempt.status, "succeeded")
+            self.assertFalse(attempt.idempotency_key_sent)
 
     def test_worker_runs_due_storage_reconciliation_in_report_only_mode(self):
         stale_at = datetime.now(timezone.utc) - timedelta(hours=25)
