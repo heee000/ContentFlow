@@ -150,7 +150,11 @@ CONTENTFLOW_WORKER_DATABASE_RETRY_JITTER_RATIO=0.2
 
 服务默认按 1、2、4、8、16、30、30、30 秒名义间隔重试，每次加入最多 20% 抖动；第 8 次等待后的下一次可恢复数据库错误会以脱敏终止错误退出，再由 `CONTENTFLOW_RESTART_POLICY` 对应的编排器重启。退避等待可被 SIGTERM/SIGINT 立即打断；恢复后存储与发布维护扫描会立即重新取得资格。`contentflow-worker --once` 用于单次管理执行，不做进程内重试。
 
-连接完全中断时，数据库心跳本身无法写入；应联合观察 `ContentFlowNoActiveWorkers`、`ContentFlowStaleWorkerDetected`、`ContentFlowAPIDown`、队列最老等待时间和编排器重启次数。PostgreSQL 集成门禁会由真实驱动产生 `40001`、`40P01`、`57014`、`55P03` 和 `42P01` 来验证解析：两个 `SERIALIZABLE` 事务并发更新同一快照会稳定产生一个序列化失败，两个事务以相反顺序锁定两行会稳定产生一个死锁牺牲者。连接断开路径仍使用确定性异常注入；尚未完成真实 PostgreSQL kill/restart、DNS、连接池耗尽、网络分区或主从切换演练。上线前必须按目标环境测量恢复时间，不能仅凭分类测试调整租约和重试预算。
+连接完全中断时，数据库心跳本身无法写入；应联合观察 `ContentFlowNoActiveWorkers`、`ContentFlowStaleWorkerDetected`、`ContentFlowAPIDown`、队列最老等待时间和编排器重启次数。PostgreSQL 集成门禁会由真实驱动产生 `40001`、`40P01`、`57014`、`55P03` 和 `42P01` 来验证解析：两个 `SERIALIZABLE` 事务并发更新同一快照会稳定产生一个序列化失败，两个事务以相反顺序锁定两行会稳定产生一个死锁牺牲者。
+
+CI 还会把 GitHub Actions 创建的一次性 PostgreSQL service container ID 只交给集成测试。测试先让一个 Worker 完成探针任务，再优雅停止数据库；必须观察到脱敏 availability 重试且 Worker 仍存活。容器重新启动并通过就绪查询后，同一 Worker 必须在 15 秒测试上限内只执行一次新探针并正常登记停止。容器 ID 有严格格式校验，控制动作只允许 start/stop，无该 ID 的本地测试会跳过，不得手工把持久数据库容器 ID 传给此用例。
+
+该门禁使用专用的 0.1–0.5 秒、100 次加速预算；15 秒只是单次 CI 防悬挂上限，不是生产默认预算的 RTO/SLO。它没有覆盖在途 Handler/完成提交、Worker SIGKILL、数据库 crash、DNS、连接池耗尽、网络分区、主从切换或多 Worker 惊群。上线前仍必须在目标环境按真实默认参数重复演练并测量 P50/P95，不能仅凭一次 stop/start 调低租约或宣称高可用。
 
 ## 数据库迁移
 

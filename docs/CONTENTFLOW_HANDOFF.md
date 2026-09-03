@@ -1989,3 +1989,21 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 该证据关闭的是“真实驱动是否能被正确分类”，不是实际业务 Handler 在目标负载下的端到端冲突恢复，也不是数据库高可用证明。PostgreSQL kill/restart、DNS、网络分区、连接池耗尽、主从切换和多 Worker 恢复 RTO 仍未执行。
 - 下一轮应优先为无外部副作用的实际 Job 建立 live 冲突恢复测试，并形成按任务类型的副作用/幂等/补偿/fencing 矩阵；不能将发布或可能重复计费的模型调用机械套用普通自动重试。
 - 公网部署继续冻结；本轮未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，未调用平台、创建素材/草稿/发布或云资源。继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。
+
+## 21.49 PostgreSQL 停机恢复与第三十七轮复审增量交接
+
+### 本轮实现
+
+1. 第三十六轮已经证明真实 `40001/40P01` 能被正确分类，但连接不可用仍只有构造异常。本轮让 GitHub Actions 把它创建的一次性 PostgreSQL service container ID 仅注入集成测试步骤，测试可以在受控边界内实际停止和重新启动该容器。
+2. 容器控制器只接受 `start/stop`，容器 ID 必须是 12–64 位十六进制 Docker ID；命令使用参数数组、禁用 shell 并设置 30 秒超时。没有环境变量时整个恢复用例跳过，因此本机或普通 pytest 不会误停其他数据库。
+3. 恢复测试在随机临时数据库中先让同一个 `Worker.run_forever()` 处理一次探针 Job，再停止 PostgreSQL，等待 Worker 产生脱敏的 availability 重试信号并确认线程仍存活。数据库重新就绪后创建第二个探针 Job，要求仍由同一 Worker 成功处理。
+4. 两个 Job 都必须只有一次处理尝试、没有业务错误，处理顺序必须恰为 before/after restart；重试日志不得包含 DSN 标志或本机地址。Worker 收到安全停止请求后还必须把 `worker_nodes` 状态写为 `stopped`。
+5. 测试使用 0.1–0.5 秒、最多 100 次的专用快速重试预算，并要求从容器启动到第二个 Job 成功不超过 15 秒。这个上限只用于防止 CI 悬挂，不是生产默认参数的 RTO/SLO，也没有修改生产 Worker、数据库迁移或领域状态。
+
+### 当前验证与边界
+
+- 本机 `uv lock --check`、全仓 Ruff 和完整后端门禁通过：`306 passed, 15 skipped, 196 subtests passed`、分支覆盖率 80.96%；新增 skip 是因为本机没有 GitHub 一次性 service container ID。前端 ESLint、Vinext/Sites 构建、2 项 SSR 测试及 Next.js/TypeScript 生产构建也通过。
+- 实现提交 `6b972e28e31388704d23c833df6f99f0e99d90c7` 已以 John Wang 身份普通推送；[ContentFlow CI #33697780446](https://github.com/heee000/ContentFlow/actions/runs/33697780446) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `321 passed, 196 subtests passed`、分支覆盖率 82.15%，Python 漏洞审计为 0 已知漏洞；前端、Prometheus、npm 审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 均通过。Artifact `9872418882` 摘要为 `sha256:fd7ce858d9e631dc8525ef192e7cc828dcf34dc8ace26c97b66903e7440d91fa`。
+- 本轮关闭的是“空闲单 Worker 遇到一次 PostgreSQL service container 优雅 stop/start 后能否进程内恢复”的证据缺口。它没有杀死 Worker、没有在 Handler/完成提交中途断库，也没有覆盖进程重启、过期租约接管或外部副作用不重复。
+- 单次 CI 的 15 秒上限不是 P50/P95；优雅 stop/start 也不等同于 crash、DNS、网络分区、连接池耗尽、主从切换或多 Worker 同时恢复。生产默认 8 次预算仍需在目标环境按故障持续时间签收。
+- 公网部署继续冻结；本轮未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，未调用平台、创建素材/草稿/发布或云资源。下一轮优先建立在途无副作用 Job 的断库/进程终止恢复，以及多 Worker 与独立监控证据。

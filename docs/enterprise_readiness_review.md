@@ -1921,3 +1921,37 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 3. 为每类 Job 建立 side-effect/idempotency/compensation/fencing 表，优先把纯数据库任务与可能重复计费的 AI/媒体任务分开，之后才讨论缩短租约。
 4. 将 Worker 结构化故障日志与编排器 restart count 输出到独立监控故障域，接通真实告警接收、恢复通知和值班演练。
 5. 继续推进跨实体数据生命周期、数据库纵深隔离授权方案、企业 IAM、PITR/异地、前端 E2E/拆分和真实外部平台异常矩阵。
+
+## 47. 2026-09-03 第三十七轮复审：真实 PostgreSQL 停机恢复
+
+### 47.1 复审结论
+
+本轮把数据库可用性恢复从构造异常推进到一次真实 PostgreSQL service container 优雅 stop/start：同一个 Worker 在断连期间保持运行、按 availability 预算重试，并在数据库重新就绪后继续完成新任务和写入停止心跳。这关闭了一个关键实现真实性缺口，但证据仍是单 Worker、空闲轮询、单次 CI 与加速测试预算；项目成熟度保持 L2+，不能据此宣称高可用或生产 RTO 已签收。
+
+### 47.2 本轮关闭或部分关闭的风险
+
+| 维度 | 当前提升 | 证据 | 未关闭边界 |
+| --- | --- | --- | --- |
+| 真实断连 | PostgreSQL 容器实际停止，连接池/驱动进入 availability 路径 | 重试信号出现且 Worker 线程持续存活 | 优雅 stop 不是 crash、分区、DNS 或 failover |
+| 恢复连续性 | 原 Worker 在 DB ready 后处理第二个 Job | before/after 顺序、各一次 attempts、无业务错误 | 未在 Handler 或完成提交中途断库 |
+| 运维上界 | 容器启动至新 Job 成功限定 15 秒 | GitHub CI 单次通过 | 测试使用加速预算，不是生产 P50/P95/RTO |
+| 安全隔离 | 只控制 CI 提供且格式校验的容器 ID；本地缺 ID 自动跳过 | 无 shell、动作白名单、超时和 finally 恢复 | 尚无独立故障注入环境与周期演练 |
+| 日志/心跳 | availability 日志继续脱敏，正常停机写回 WorkerNode | DSN/地址负向断言与 stopped 状态 | 完全断库时信号仍需独立监控故障域 |
+
+本机 `uv lock --check`、全仓 Ruff、完整后端为 `306 passed, 15 skipped, 196 subtests passed`、分支覆盖率 80.96%，前端 lint、双构建和 2 项 SSR 通过。实现提交 `6b972e28e31388704d23c833df6f99f0e99d90c7` 的 [CI #33697780446](https://github.com/heee000/ContentFlow/actions/runs/33697780446) 四个 Job 全部成功；真实 PostgreSQL/pgvector 与 MinIO 为 `321 passed, 196 subtests passed`、覆盖率 82.15%，Python 0 已知漏洞，前端/Prometheus/npm/供应链证明均通过。Artifact `9872418882` 摘要为 `sha256:fd7ce858d9e631dc8525ef192e7cc828dcf34dc8ace26c97b66903e7440d91fa`。
+
+### 47.3 当前仍存在的 5 个不足
+
+1. **故障矩阵与统计证据不足**：只有单 Worker、单次、优雅 stop/start；没有 crash、DNS、网络分区、连接池耗尽、主从切换、多 Worker 惊群和持续 P50/P95/RTO。
+2. **在途任务恢复没有真实签收**：测试在 Worker 空闲轮询时断库，没有覆盖 Handler 事务中断、完成提交丢失、Worker SIGKILL、租约过期接管，以及 AI/对象存储/发布副作用去重。
+3. **监控仍与业务库部分同故障域**：数据库完全不可用时 WorkerNode 心跳无法写入；真实 Alertmanager receiver、集中日志、编排器 restart count、OTel 和通知恢复演练尚未闭环。
+4. **数据与身份治理仍非企业边界**：API/Worker/migrator/owner 角色未拆分、核心租户表无 FORCE RLS，数据留存/导出/删除、PITR/异地/Object Lock 和 OIDC/MFA/SCIM/KMS 尚未共同签收。
+5. **产品与交付验证仍不完整**：前端关键旅程缺 Playwright E2E 和大型模块持续拆分；真实渠道异常矩阵、媒体质量/成本基准、灰度回滚、受保护分支制度及外部租户长期运行证据仍欠缺。
+
+### 47.4 可以继续改进的 5 个方向
+
+1. 在专用隔离环境用 Toxiproxy/网络策略补 crash、短长断、DNS、池耗尽与 failover，并以重复运行记录 P50/P95、失败次数、连接池恢复和多 Worker 惊群。
+2. 先选择无外部副作用的真实 Job，在 Handler 与完成提交边界分别注入断库/SIGKILL，验证事务回滚、租约接管、fencing 和最终唯一成功；再为 AI、对象存储和发布逐类建立幂等/补偿协议。
+3. 把结构化 Worker 日志、进程健康与编排器 restart count 发往独立监控故障域，接通真实告警接收、抑制、恢复通知和值班演练。
+4. 在获得高影响授权后分阶段落地数据库角色与 RLS，并先补当前 head 的 PITR/异地/对象一致性恢复；同步建立租户数据生命周期和企业身份密钥制度。
+5. 建立 Playwright 关键旅程、前端请求/模块预算、真实渠道沙箱异常回归、媒体质量成本评测和可回滚 Release 晋级门禁，形成持续公开测试证据。

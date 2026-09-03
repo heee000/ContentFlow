@@ -861,3 +861,15 @@
 - 本地证据：`uv lock --check`、全仓 Ruff 和完整后端覆盖率门禁通过；结果为 `306 passed, 14 skipped, 196 subtests passed`、分支覆盖率 80.96%。14 项跳过均为本机 Docker/PostgreSQL/MinIO 未运行，本地结果不冒充真实事务冲突签收。
 - 远程证据：实现提交 `a65a411fe2d8db46db2c2746be19dad4b1cc1765` 已以 John Wang 身份普通推送；[ContentFlow CI #33696052795](https://github.com/heee000/ContentFlow/actions/runs/33696052795) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `320 passed, 196 subtests passed`、分支覆盖率 82.10%，并实际走过 `40001/40P01` 并发断言；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 均通过。Artifact `9871817974` 摘要为 `sha256:6549a79f8875e86ce3d05835c18334734dc5796d0b47bd48fc9d4ad46d902f5c`。
 - 剩余边界：这证明真实驱动异常可被正确解析，不证明实际 Job Handler 在目标负载下发生冲突后的端到端回滚、重排与吞吐，也不替代数据库 kill/restart、DNS、网络分区、池耗尽、主从切换和多 Worker 恢复 RTO 演练。
+
+### CF-20260903-24：Worker 连接恢复仍只由构造异常证明
+
+- 状态：一次性 PostgreSQL service container 的真实 stop/start、同进程 Worker 恢复、日志脱敏、完整本地回归和远程供应链门禁均已签收。
+- 问题与影响：服务级数据库退避此前只通过构造的 SQLAlchemy 异常验证。即使分类和等待算法正确，连接池中的失效连接、psycopg 实际错误链、数据库重启就绪窗口或 WorkerNode 心跳都可能让真实恢复路径失败。
+- 根因：现有 PostgreSQL 集成测试拥有随机临时数据库，却没有获得只属于当前 CI Job 的服务容器句柄；直接按名称或端口停止容器会扩大误操作范围，本地运行也可能影响用户数据库。
+- 解决方案：仅在 PostgreSQL/MinIO 集成步骤注入 GitHub Actions 创建的 service container ID。控制器仅允许 `start/stop`，验证 12–64 位十六进制 ID，使用无 shell 参数数组和 30 秒超时；缺少 ID 时测试安全跳过。同一个 Worker 先完成 before-restart Job，容器停止后必须报告脱敏 availability 重试且保持存活；容器启动并通过 `SELECT 1` 后再完成 after-restart Job并自行停止。
+- 正确性与安全断言：两次探针都只有一次 attempts、无 `last_error`，顺序恰为 before/after；恢复日志不得包含 `@` 或 `127.0.0.1`，退出后的 `worker_nodes` 必须为 `stopped`。`finally` 会在容器仍处于停止状态时先恢复数据库，再请求 Worker 停止，不触碰持久环境。
+- 测试参数边界：CI 用例采用 0.1–0.5 秒、100 次的专用预算，并以 15 秒限制容器启动到新 Job 完成，目的是给故障注入设置上界。它不验证生产默认 1–30 秒、8 次预算，也不是统计 RTO/SLO。
+- 本地证据：`uv lock --check`、全仓 Ruff、完整后端为 `306 passed, 15 skipped, 196 subtests passed`、分支覆盖率 80.96%；新增用例因本机没有 CI service container ID 而跳过。前端 lint、Vinext/Sites、2 项 SSR 和 Next.js/TypeScript 生产构建通过。
+- 远程证据：实现提交 `6b972e28e31388704d23c833df6f99f0e99d90c7` 已以 John Wang 身份普通推送；[ContentFlow CI #33697780446](https://github.com/heee000/ContentFlow/actions/runs/33697780446) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `321 passed, 196 subtests passed`、覆盖率 82.15%，Python 已知漏洞为 0；前端、Prometheus、npm、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 均通过。Artifact `9872418882` 摘要为 `sha256:fd7ce858d9e631dc8525ef192e7cc828dcf34dc8ace26c97b66903e7440d91fa`。
+- 剩余边界：当前仅证明一个空闲 Worker 经历一次数据库优雅 stop/start 后恢复。尚未覆盖 Handler/提交中途断库、Worker SIGKILL、租约接管、多 Worker 惊群、crash、DNS、网络分区、池耗尽、主从切换和长期恢复分位数。
