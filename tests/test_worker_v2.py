@@ -1002,6 +1002,77 @@ class WorkerIntegrationTest(unittest.TestCase):
             )
             self.assertNotIn("private-model-error-body", stored_job.last_error)
 
+    def test_expired_workflow_lease_requires_review_without_rerunning_handler(self):
+        campaign = self.client.post(
+            "/api/v1/campaigns",
+            headers=self.headers,
+            json={
+                "name": "租约恢复人工核对测试",
+                "product_name": "内容产品",
+                "objective": "验证中断后不重复调用模型",
+                "audience": "测试用户",
+                "platforms": ["xiaohongshu"],
+            },
+        )
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        run = self.client.post(
+            f"/api/v1/campaigns/{campaign.json()['id']}/runs",
+            headers=self.headers,
+            json={},
+        )
+        self.assertEqual(run.status_code, 202, run.text)
+
+        with db.SessionLocal() as session:
+            queue_job = session.scalar(
+                select(Job).where(
+                    Job.job_type == "workflow.execute",
+                    Job.payload_json["run_id"].as_string() == run.json()["id"],
+                )
+            )
+            self.assertIsNotNone(queue_job)
+            queue_job.status = "running"
+            queue_job.attempts = 1
+            queue_job.locked_by = "terminated-model-worker"
+            queue_job.locked_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+            session.commit()
+            queue_job_id = queue_job.id
+
+        handler_calls = 0
+
+        def should_not_run(_session, _payload, _settings):
+            nonlocal handler_calls
+            handler_calls += 1
+            raise AssertionError("expired provider job must not be replayed")
+
+        recovery_worker = Worker(
+            settings=self.settings,
+            session_factory=db.SessionLocal,
+            worker_id="manual-review-recovery-worker",
+            handlers={"workflow.execute": should_not_run},
+        )
+        self.assertTrue(recovery_worker.run_once())
+        self.assertEqual(handler_calls, 0)
+
+        with db.SessionLocal() as session:
+            stored_job = session.get(Job, queue_job_id)
+            workflow_run = session.get(WorkflowRun, run.json()["id"])
+            self.assertEqual(stored_job.status, "failed")
+            self.assertEqual(stored_job.attempts, 1)
+            self.assertIsNone(stored_job.locked_by)
+            self.assertIsNone(stored_job.locked_at)
+            self.assertIn("Automatic retry was blocked", stored_job.last_error)
+            self.assertEqual(workflow_run.status, "failed")
+            self.assertEqual(workflow_run.current_stage, "failed")
+            self.assertIn("Automatic retry was blocked", workflow_run.error)
+
+        retried = self.client.post(
+            f"/api/v1/jobs/{queue_job_id}/retry",
+            headers=self.headers,
+        )
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertEqual(retried.json()["status"], "retry")
+        self.assertEqual(retried.json()["attempts"], 0)
+
     def test_knowledge_index_workflow_assets_and_export(self):
         uploaded = self.client.post(
             "/api/v1/knowledge/documents",

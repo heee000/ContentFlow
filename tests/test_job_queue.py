@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import ANY, patch
 
@@ -20,11 +20,16 @@ from contentflow.job_queue import (
     claim_next_job,
     complete_job,
     enqueue_job,
+    fail_expired_manual_review_leases,
     renew_job_lease,
 )
 from contentflow.settings import Settings
 from contentflow.worker import (
     DatabaseErrorKind,
+    HANDLERS,
+    JOB_RECOVERY_POLICIES,
+    MANUAL_REVIEW_JOB_TYPES,
+    JobRecoveryPolicy,
     LeaseHeartbeat,
     Worker,
     WorkerDatabaseUnavailable,
@@ -33,6 +38,7 @@ from contentflow.worker import (
     configure_worker_logging,
     database_error_sqlstate,
     logger as worker_logger,
+    manual_review_job_types,
     sanitized_database_error,
 )
 
@@ -75,6 +81,7 @@ class JobQueueLeaseTest(unittest.TestCase):
                 session,
                 worker_id="worker-a",
                 lease_seconds=30,
+                manual_review_job_types=(),
             )
             self.assertIsNotNone(job)
             attempt = job.attempts
@@ -132,6 +139,130 @@ class JobQueueLeaseTest(unittest.TestCase):
                 )
             )
             session.rollback()
+
+    def test_every_production_handler_declares_a_lease_recovery_policy(self):
+        self.assertEqual(
+            set(JOB_RECOVERY_POLICIES),
+            set(HANDLERS),
+        )
+        self.assertEqual(
+            MANUAL_REVIEW_JOB_TYPES,
+            {
+                "prompt_eval.execute",
+                "workflow.execute",
+            },
+        )
+        self.assertTrue(
+            all(
+                isinstance(policy, JobRecoveryPolicy)
+                for policy in JOB_RECOVERY_POLICIES.values()
+            )
+        )
+        local_settings = Settings(
+            database_url="sqlite://",
+            secret_key="local-provider-policy-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            embedding_provider="bge-m3-local",
+        )
+        remote_settings = local_settings.model_copy(
+            update={"embedding_provider": "openai-compatible"}
+        )
+        self.assertNotIn("knowledge.index", manual_review_job_types(local_settings))
+        self.assertIn("knowledge.index", manual_review_job_types(remote_settings))
+
+    def test_expired_manual_review_job_is_not_reclaimed_automatically(self):
+        expired_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        with self.session_factory() as session:
+            unsafe = enqueue_job(
+                session,
+                job_type="workflow.execute",
+                payload={"run_id": "unsafe-run"},
+                workspace_id=None,
+            )
+            safe = enqueue_job(
+                session,
+                job_type="connector.test",
+                payload={"channel_id": "safe-channel"},
+                workspace_id=None,
+            )
+            for job in (unsafe, safe):
+                job.status = "running"
+                job.attempts = 1
+                job.locked_by = "dead-worker"
+                job.locked_at = expired_at
+            session.commit()
+            unsafe_id = unsafe.id
+            safe_id = safe.id
+
+        with self.session_factory() as session:
+            claimed = claim_next_job(
+                session,
+                worker_id="recovery-worker",
+                lease_seconds=30,
+                manual_review_job_types=MANUAL_REVIEW_JOB_TYPES,
+            )
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.id, safe_id)
+            session.commit()
+
+        with self.session_factory() as session:
+            failed = fail_expired_manual_review_leases(
+                session,
+                lease_seconds=30,
+                job_types=MANUAL_REVIEW_JOB_TYPES,
+            )
+            self.assertEqual([job.id for job in failed], [unsafe_id])
+            session.commit()
+
+        with self.session_factory() as session:
+            unsafe = session.get(Job, unsafe_id)
+            safe = session.get(Job, safe_id)
+            self.assertEqual(unsafe.status, "failed")
+            self.assertEqual(unsafe.attempts, 1)
+            self.assertIsNone(unsafe.locked_by)
+            self.assertIsNone(unsafe.locked_at)
+            self.assertIn("Automatic retry was blocked", unsafe.last_error)
+            self.assertEqual(safe.status, "running")
+            self.assertEqual(safe.locked_by, "recovery-worker")
+            self.assertEqual(safe.attempts, 2)
+
+    def test_manual_review_provider_failure_is_not_retried_automatically(self):
+        handler_calls = 0
+
+        def failing_handler(_session, _payload, _settings):
+            nonlocal handler_calls
+            handler_calls += 1
+            raise RuntimeError("provider attempt outcome requires review")
+
+        with self.session_factory() as session:
+            job = enqueue_job(
+                session,
+                job_type="workflow.execute",
+                payload={"run_id": "manual-review-run"},
+                workspace_id=None,
+            )
+            session.commit()
+            job_id = job.id
+
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="manual-review-provider-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+            ),
+            worker_id="manual-review-worker",
+            session_factory=self.session_factory,
+            handlers={"workflow.execute": failing_handler},
+        )
+
+        self.assertTrue(worker.run_once())
+        self.assertEqual(handler_calls, 1)
+        with self.session_factory() as session:
+            stored_job = session.get(Job, job_id)
+            self.assertEqual(stored_job.status, "failed")
+            self.assertEqual(stored_job.attempts, 1)
+            self.assertIsNone(stored_job.locked_by)
+            self.assertIsNone(stored_job.locked_at)
 
     def test_heartbeat_renews_active_job_in_independent_session(self):
         job_id, attempt = self._claim_job()

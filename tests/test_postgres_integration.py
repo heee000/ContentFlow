@@ -1461,3 +1461,72 @@ def test_running_job_is_reclaimed_after_worker_process_kill(
 
     assert not crashed_worker.is_alive()
     assert not recovery_thread.is_alive()
+
+
+def test_expired_provider_job_requires_manual_review_on_postgres(
+    postgres_harness: PostgresHarness,
+):
+    fixture = _create_publish_fixture(
+        postgres_harness,
+        status="failed",
+        external_id=None,
+    )
+    expired_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    with postgres_harness.sessions() as session:
+        publish_job = session.get(PublishJob, fixture["publish_job_id"])
+        content = session.get(ContentItem, publish_job.content_item_id)
+        workflow_run = session.get(WorkflowRun, content.run_id)
+        workflow_run.status = "running"
+        workflow_run.current_stage = "drafting"
+        job = enqueue_job(
+            session,
+            job_type="workflow.execute",
+            payload={"run_id": workflow_run.id},
+            workspace_id=workflow_run.workspace_id,
+            idempotency_key=f"postgres-manual-review:{uuid.uuid4().hex}",
+        )
+        job.status = "running"
+        job.attempts = 1
+        job.locked_by = "terminated-provider-worker"
+        job.locked_at = expired_at
+        session.commit()
+        job_id = job.id
+        workflow_run_id = workflow_run.id
+
+    handler_calls: list[dict[str, str]] = []
+
+    def should_not_run(
+        _session: Session,
+        payload: dict[str, str],
+        _settings: Settings,
+    ) -> dict[str, str]:
+        handler_calls.append(payload)
+        raise AssertionError("expired provider job must not be replayed")
+
+    settings = postgres_harness.settings.model_copy(
+        update={
+            "storage_reconcile_schedule_enabled": False,
+            "publish_reconciliation_sweep_poll_seconds": 3600,
+            "worker_lease_seconds": 30,
+        }
+    )
+    worker = Worker(
+        settings=settings,
+        worker_id=f"postgres-manual-review-{uuid.uuid4().hex[:12]}",
+        session_factory=postgres_harness.sessions,
+        handlers={"workflow.execute": should_not_run},
+    )
+
+    assert worker.run_once() is True
+    assert handler_calls == []
+    with postgres_harness.sessions() as session:
+        stored_job = session.get(Job, job_id)
+        workflow_run = session.get(WorkflowRun, workflow_run_id)
+        assert stored_job.status == "failed"
+        assert stored_job.attempts == 1
+        assert stored_job.locked_by is None
+        assert stored_job.locked_at is None
+        assert "Automatic retry was blocked" in stored_job.last_error
+        assert workflow_run.status == "failed"
+        assert workflow_run.current_stage == "failed"
+        assert "Automatic retry was blocked" in workflow_run.error

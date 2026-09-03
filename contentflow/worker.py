@@ -51,6 +51,7 @@ from .job_queue import (
     claim_next_job,
     complete_job,
     enqueue_job,
+    fail_expired_manual_review_leases,
     fail_exhausted_leases,
     fail_job,
     renew_job_lease,
@@ -1514,6 +1515,43 @@ HANDLERS: dict[str, Handler] = {
 }
 
 
+class JobRecoveryPolicy(StrEnum):
+    REPLAY_SAFE = "replay_safe"
+    PROVIDER_IDEMPOTENT = "provider_idempotent"
+    DOMAIN_GUARDED = "domain_guarded"
+    CONFIGURATION_GUARDED = "configuration_guarded"
+    MANUAL_REVIEW = "manual_review"
+
+
+JOB_RECOVERY_POLICIES: dict[str, JobRecoveryPolicy] = {
+    "knowledge.index": JobRecoveryPolicy.CONFIGURATION_GUARDED,
+    "prompt_eval.execute": JobRecoveryPolicy.MANUAL_REVIEW,
+    "workflow.execute": JobRecoveryPolicy.MANUAL_REVIEW,
+    "connector.test": JobRecoveryPolicy.REPLAY_SAFE,
+    "asset.generate": JobRecoveryPolicy.PROVIDER_IDEMPOTENT,
+    "asset.search": JobRecoveryPolicy.REPLAY_SAFE,
+    "asset.poll": JobRecoveryPolicy.REPLAY_SAFE,
+    "publish.dispatch": JobRecoveryPolicy.DOMAIN_GUARDED,
+    "publish.reconcile": JobRecoveryPolicy.DOMAIN_GUARDED,
+    "storage.delete": JobRecoveryPolicy.DOMAIN_GUARDED,
+    "storage.reconcile": JobRecoveryPolicy.REPLAY_SAFE,
+    "metrics.pull": JobRecoveryPolicy.REPLAY_SAFE,
+}
+
+MANUAL_REVIEW_JOB_TYPES = frozenset(
+    job_type
+    for job_type, policy in JOB_RECOVERY_POLICIES.items()
+    if policy == JobRecoveryPolicy.MANUAL_REVIEW
+)
+
+
+def manual_review_job_types(settings: Settings) -> frozenset[str]:
+    job_types = set(MANUAL_REVIEW_JOB_TYPES)
+    if settings.embedding_provider == "openai-compatible":
+        job_types.add("knowledge.index")
+    return frozenset(job_types)
+
+
 def mark_domain_failure(
     session: Session,
     job: Job,
@@ -1651,6 +1689,7 @@ class Worker:
         )
         self.session_factory = session_factory or db.SessionLocal
         self.handlers = handlers or HANDLERS
+        self.manual_review_job_types = manual_review_job_types(self.settings)
         self._stop_event = stop_event or threading.Event()
         self._shutdown_signal: int | None = None
         self._next_storage_reconciliation_sweep_at = 0.0
@@ -1668,7 +1707,7 @@ class Worker:
         if self.stop_requested:
             return False
 
-        expired_job_refs: list[tuple[str, str]] = []
+        expired_job_refs: list[tuple[str, str, JobRecoveryPolicy]] = []
         with self.session_factory() as session:
             scheduled_storage_reconciliations = 0
             monotonic_now = time.monotonic()
@@ -1703,21 +1742,55 @@ class Worker:
                     "publish reconciliation jobs queued count=%s",
                     scheduled_reconciliations,
                 )
+            manual_review_jobs = fail_expired_manual_review_leases(
+                session,
+                lease_seconds=self.settings.worker_lease_seconds,
+                job_types=self.manual_review_job_types,
+            )
             expired_jobs = fail_exhausted_leases(
                 session,
                 lease_seconds=self.settings.worker_lease_seconds,
             )
-            if expired_jobs:
+            if manual_review_jobs or expired_jobs:
                 expired_job_refs = [
-                    (expired_job.id, expired_job.job_type)
+                    (
+                        expired_job.id,
+                        expired_job.job_type,
+                        JobRecoveryPolicy.MANUAL_REVIEW,
+                    )
+                    for expired_job in manual_review_jobs
+                ] + [
+                    (
+                        expired_job.id,
+                        expired_job.job_type,
+                        JOB_RECOVERY_POLICIES.get(
+                            expired_job.job_type,
+                            JobRecoveryPolicy.REPLAY_SAFE,
+                        ),
+                    )
                     for expired_job in expired_jobs
                 ]
+                for expired_job_id, _job_type, recovery_policy in expired_job_refs:
+                    expired_job = session.get(Job, expired_job_id)
+                    if expired_job is not None:
+                        mark_domain_failure(
+                            session,
+                            expired_job,
+                            expired_job.last_error or "",
+                            publish_outcome_uncertain=True,
+                            publish_outcome_reason=(
+                                "worker_lease_manual_review"
+                                if recovery_policy == JobRecoveryPolicy.MANUAL_REVIEW
+                                else "worker_lease_exhausted"
+                            ),
+                        )
                 session.commit()
             else:
                 job = claim_next_job(
                     session,
                     worker_id=self.worker_id,
                     lease_seconds=self.settings.worker_lease_seconds,
+                    manual_review_job_types=self.manual_review_job_types,
                 )
                 if job is None:
                     session.rollback()
@@ -1730,23 +1803,21 @@ class Worker:
                 attempt = job.attempts
 
         if expired_job_refs:
-            with self.session_factory() as session:
-                for expired_job_id, _job_type in expired_job_refs:
-                    expired_job = session.get(Job, expired_job_id)
-                    if expired_job is not None:
-                        mark_domain_failure(
-                            session,
-                            expired_job,
-                            expired_job.last_error or "",
-                            publish_outcome_uncertain=True,
-                        )
-                session.commit()
-            for expired_job_id, job_type in expired_job_refs:
-                logger.error(
-                    "job lease exhausted id=%s type=%s",
-                    expired_job_id,
-                    job_type,
-                )
+            for expired_job_id, job_type, recovery_policy in expired_job_refs:
+                if recovery_policy == JobRecoveryPolicy.MANUAL_REVIEW:
+                    logger.error(
+                        "job lease replay blocked id=%s type=%s policy=%s",
+                        expired_job_id,
+                        job_type,
+                        recovery_policy.value,
+                    )
+                else:
+                    logger.error(
+                        "job lease exhausted id=%s type=%s policy=%s",
+                        expired_job_id,
+                        job_type,
+                        recovery_policy.value,
+                    )
             return True
 
         with self.session_factory() as session:
@@ -1871,6 +1942,7 @@ class Worker:
                             )
                             or database_error_kind == DatabaseErrorKind.PERMANENT
                             or publish_outcome_uncertain
+                            or job.job_type in self.manual_review_job_types
                             or (
                                 isinstance(error, MediaProviderError)
                                 and not error.retryable

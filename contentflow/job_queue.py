@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from collections.abc import Collection
 from typing import Any
 
 from sqlalchemy import or_, select, update
@@ -66,9 +67,13 @@ def claim_next_job(
     *,
     worker_id: str,
     lease_seconds: int,
+    manual_review_job_types: Collection[str],
 ) -> Job | None:
     now = utcnow()
     lease_expired = now - timedelta(seconds=lease_seconds)
+    expired_running = (Job.status == "running") & (Job.locked_at < lease_expired)
+    if manual_review_job_types:
+        expired_running &= Job.job_type.not_in(tuple(manual_review_job_types))
     query = (
         select(Job)
         .where(
@@ -76,7 +81,7 @@ def claim_next_job(
             Job.attempts < Job.max_attempts,
             or_(
                 Job.status.in_(["queued", "retry"]),
-                (Job.status == "running") & (Job.locked_at < lease_expired),
+                expired_running,
             ),
         )
         .order_by(Job.run_at.asc(), Job.created_at.asc())
@@ -93,6 +98,47 @@ def claim_next_job(
     job.attempts += 1
     session.flush()
     return job
+
+
+def fail_expired_manual_review_leases(
+    session: Session,
+    *,
+    lease_seconds: int,
+    job_types: Collection[str],
+    limit: int = 100,
+) -> list[Job]:
+    """Fail expired jobs whose external side effects are unsafe to replay blindly."""
+    normalized_job_types = tuple(sorted(set(job_types)))
+    if not normalized_job_types:
+        return []
+
+    lease_expired = utcnow() - timedelta(seconds=lease_seconds)
+    query = (
+        select(Job)
+        .where(
+            Job.status == "running",
+            Job.job_type.in_(normalized_job_types),
+            Job.locked_at.is_not(None),
+            Job.locked_at < lease_expired,
+        )
+        .order_by(Job.locked_at.asc())
+        .limit(limit)
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update(skip_locked=True)
+    jobs = list(session.scalars(query))
+    for job in jobs:
+        job.status = "failed"
+        job.last_error = (
+            "Worker lease expired during a provider operation whose external "
+            "side effects cannot be safely replayed automatically. Automatic "
+            "retry was blocked; review provider activity before retrying manually."
+        )
+        job.locked_by = None
+        job.locked_at = None
+    if jobs:
+        session.flush()
+    return jobs
 
 
 def renew_job_lease(
