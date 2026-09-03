@@ -2043,3 +2043,21 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 该实现提供的是 fail-closed 防重复，不是 AI Provider exactly-once。通用 failed 任务页仍只靠错误文字提示核对；尚无独立 `manual_review` 状态、Provider 请求账本、费用/响应查询、负责人、证据附件、告警和 SLA。操作者不能在未核对供应商活动前机械点击重试。
 - 脚本包对象写入、对象账本补偿、真实媒体 Provider、完成提交丢失和网络分区旧 Worker 恢复仍需逐类故障注入。`replay_safe` 只表示没有外部写副作用，不表示远程查询一定免费或没有速率限制。
 - 公网部署继续冻结；本轮没有读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，没有调用 Provider/平台、创建素材/草稿/发布或云资源。FORCE RLS 与数据库角色拆分继续等待单独高影响授权。
+
+## 21.52 Provider 专用人工核对与第四十轮复审增量交接
+
+### 本轮实现
+
+1. 第三十九轮把无稳定 Provider 幂等语义的 Job 改为 fail-closed，但仍借用通用 failed 状态。本轮新增 `job_manual_reviews` 历史表和 `manual_review` 状态；Handler 异常或过期租约都会在原事务中创建含原因码、风险说明和必查步骤的未关闭核对，不再混入普通失败重试队列。
+2. 表级约束要求未关闭记录不能预填结论/备注/确认位，关闭记录必须 `provider_checked=true`、选择 retry/abandon 且备注至少 8 个字符；部分唯一索引保证一个 Job 同时最多一条未关闭记录。迁移 head 为 `e3f4a5b6c7d8`，公开表门槛为 31，备份和隔离恢复校验同步。
+3. 新增 reviewer/admin 专用 `POST /api/v1/jobs/{job_id}/manual-review`。PostgreSQL 下锁定 Job 与核对记录；retry 会清零 attempts、立即排队并清除旧错误，abandon 保留失败终态和错误。普通 editor 不能处置，通用 retry 同时拦截当前及旧版高风险 failed Job，重复处置返回 409。
+4. 人工核对请求和决策进入防篡改审计链；核对备注只保存在专用记录中，不复制到审计 metadata。任务列表返回当前轮核对上下文，前端解释副作用风险、检查步骤和权限，要求确认框与书面依据，并对重试/放弃提供独立忙碌状态和放弃确认。
+5. Dashboard、Worker health、Prometheus 与 Grafana 增加待核对数量和最老时长。最老未关闭记录超过 1 小时并持续 15 分钟时触发 `ContentFlowJobManualReviewOverdue`；指标保持全局低基数，不暴露 workspace、Job ID 或核对备注。
+
+### 当前验证与边界
+
+- 本机完整后端为 `312 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.17%；17 项均是本机没有 PostgreSQL/MinIO/CI 容器条件的安全跳过。全仓 Ruff、Python 编译、Alembic 单 head、锁文件、`pip check`、公网部署 fail-closed、前端 lint/test/构建和 npm moderate 审计均通过。
+- 实现提交 `3ce6e6259ddf56738b37146435ad44d2c4a3dfb2` 已以 John Wang 身份普通推送；[ContentFlow CI #33704597235](https://github.com/heee000/ContentFlow/actions/runs/33704597235) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `329 passed, 196 subtests passed`、覆盖率 82.36%；Prometheus 规则行为、前端、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 均通过。Artifact `9874760182` 摘要为 `sha256:94f2c8060028bfa9305a1eafc3b63ac5dfa62b4639e412e1b249fd77ba0765e0`。
+- 本轮不等于 Provider exactly-once：仍无调用账本、供应商请求 ID/费用/结果自动查询、证据附件、负责人认领、双人确认和真实告警接收器。下一优先项应是 Provider invocation ledger，而不是放宽人工核对。
+- 脚本包对象写入、对象删除、真实媒体 Provider、完成提交丢失和网络分区旧 Worker 恢复仍需逐故障点签收；不能把当前状态机推广为所有外部副作用已经安全。
+- 公网部署继续冻结。本轮没有读取 `.env`、平台账密、模型缓存、备份、运行数据或 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`，没有调用真实 Provider/平台或创建任何素材、草稿、发布、云资源。继续保留该知识文件为未跟踪用户文件，不读取、不修改、不暂存、不提交。

@@ -895,3 +895,15 @@
 - 并发与事务：PostgreSQL 扫描使用 `FOR UPDATE SKIP LOCKED` 且每轮最多 100 条；领取条件的独立排除保证第 101 条也不会被盲重放。Job、Workflow/Prompt Eval/Knowledge 状态及审计在同一事务提交，消除队列失败与页面 running 之间的二阶段窗口。
 - 验证：本机全量为 `310 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.02%；Ruff、锁文件、依赖/漏洞、编译、迁移、公网部署校验和全部前端门禁通过。实现提交 `a1b38fed51c3d1193026619c0d67daae3d28ad54` 的 [CI #33701395214](https://github.com/heee000/ContentFlow/actions/runs/33701395214) 四个 Job 成功；真实 PostgreSQL/pgvector 与 MinIO 为 `327 passed, 196 subtests passed`、覆盖率 82.24%，Python 无已知漏洞，供应链 Artifact `9873652701` 摘要为 `sha256:8700cea0b2d9ea8e969bb47625b8f04479965cc20ce590c20197b9d952058545`。
 - 剩余边界：这是 fail-closed，不是 Provider exactly-once。当前仍以通用 failed 状态承载人工核对，缺少请求/费用账本、供应商侧查询、核对证据、负责人和 SLA；脚本包/对象写入、媒体真实调用、完成提交丢失和网络分区旧 Worker 仍待故障注入。本轮未调用真实 Provider 或平台。
+
+### CF-20260903-27：Provider 人工核对仍借用通用失败状态且可被误重试
+
+- 状态：专用状态、持久核对记录、权限与数据库约束、审计链、前端处置、指标告警、迁移/恢复契约、本地门禁及真实 PostgreSQL/MinIO CI 均已签收。
+- 问题与影响：上一阶段虽然阻止了 Worker 自动重放，但风险任务仍显示为通用 failed；editor 可以看到同一个通用重试入口，核对依据、操作者、结论和时间没有结构化留痕，积压也没有独立指标。人工流程依赖错误文字和外部工单，容易把“ContentFlow 没保存结果”误判为“供应商没有执行”。
+- 解决方案：新增 `job_manual_reviews` 和 `manual_review` 状态。Provider 结果不确定或租约过期时，Worker 在同一事务中创建含原因码、风险说明和检查步骤的未关闭核对；部分唯一索引保证一个 Job 同时最多一条未关闭记录，数据库检查约束保证关闭时必须 `provider_checked=true`、结论为 retry/abandon 且备注不少于 8 个字符。策略注册表抽到独立模块，Worker 与 API 共享同一高风险任务集合。
+- 权限与防绕过：只有 reviewer/admin 能调用 `POST /jobs/{id}/manual-review`；PostgreSQL 下同时锁定 Job 和未关闭核对记录。允许重试会清零 attempts 并立即排队，放弃会保留失败和原始错误。通用 retry 同时拒绝当前 `manual_review` 和旧版 failed 形式的高风险任务，不能借兼容入口绕过核对。请求与处置都进入防篡改审计链，核对备注留在专用表而不复制进审计元数据。
+- 产品与运维：任务页明确说明为何需要核对、要查什么、何时可以重试，要求确认框和书面依据，并为执行按钮提供忙碌状态；editor 只看到权限提示。Dashboard、Worker health、Prometheus 和 Grafana 增加待核对数量与最老时长，最老未处理记录超过 1 小时并持续 15 分钟触发 `ContentFlowJobManualReviewOverdue`。迁移 head 更新为 `e3f4a5b6c7d8`，公开表校验门槛更新为 31，备份/恢复脚本同步。
+- 本地证据：完整后端为 `312 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.17%；17 项均为本机未配置的 PostgreSQL/MinIO/CI 容器场景。全仓 Ruff、Python 编译、Alembic 单 head、`uv lock --check`、`pip check`、公网部署 fail-closed 校验、前端 lint/test/双生产构建和 npm moderate 审计 0 漏洞通过。
+- 远程证据：实现提交 `3ce6e6259ddf56738b37146435ad44d2c4a3dfb2` 已以 John Wang 身份普通推送；[ContentFlow CI #33704597235](https://github.com/heee000/ContentFlow/actions/runs/33704597235) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `329 passed, 196 subtests passed`、覆盖率 82.36%；部分唯一索引、行锁处置、Prometheus 行为测试、前端构建、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9874760182` 摘要为 `sha256:94f2c8060028bfa9305a1eafc3b63ac5dfa62b4639e412e1b249fd77ba0765e0`。
+- 剩余边界：本轮关闭的是机械误重试、无权限处置、无结构化记录和无积压告警，不是 Provider exactly-once。仍没有调用账本、供应商请求 ID/费用/结果自动查询、证据附件、负责人认领、双人确认或告警接收器闭环；真实 Provider conformance 和跨故障点副作用测试仍未执行。
+- 安全范围：公网部署继续冻结；本轮未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，未调用 Provider/平台、创建素材/草稿/发布或云资源。`knowledge/北京周末 CityWalk 路线助手产品资料.txt` 保持未跟踪且未读取、修改、暂存或提交。
