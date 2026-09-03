@@ -156,6 +156,10 @@ CI 还会把 GitHub Actions 创建的一次性 PostgreSQL service container ID �
 
 该门禁使用专用的 0.1–0.5 秒、100 次加速预算；15 秒只是单次 CI 防悬挂上限，不是生产默认预算的 RTO/SLO。它没有覆盖在途 Handler/完成提交、Worker SIGKILL、数据库 crash、DNS、连接池耗尽、网络分区、主从切换或多 Worker 惊群。上线前仍必须在目标环境按真实默认参数重复演练并测量 P50/P95，不能仅凭一次 stop/start 调低租约或宣称高可用。
 
+另一个 PostgreSQL 集成门禁会让独立 Worker 领取无副作用探针并进入阻塞 Handler，然后在 Linux 上以 SIGKILL 强制终止。第二 Worker 在 6 秒测试租约到期前必须拒绝抢占，过期后才以新 attempt 接管并完成；崩溃节点应保持 `online` 但心跳变 stale，恢复节点应正常写入 `stopped`。这证明不要手工清空 `locked_by/locked_at`：应等待租约与 fencing 协议决定接管，并用 heartbeat 而不是 status 字段单独判断 Worker 是否存活。
+
+6 秒是 CI 专用租约，不是生产恢复承诺。该探针没有调用 AI、对象存储或平台，也没有覆盖 Handler 返回后至 `complete_job` 提交之间的故障。真实环境遇到 Worker SIGKILL 时，先确认旧进程确已退出并观察租约/心跳；发布任务若可能已经产生外部写入，继续按 `reconciliation_required` 对账，绝不能因新 Worker 可接管就直接重发。
+
 ## 数据库迁移
 
 ```powershell

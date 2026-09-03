@@ -2007,3 +2007,21 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 本轮关闭的是“空闲单 Worker 遇到一次 PostgreSQL service container 优雅 stop/start 后能否进程内恢复”的证据缺口。它没有杀死 Worker、没有在 Handler/完成提交中途断库，也没有覆盖进程重启、过期租约接管或外部副作用不重复。
 - 单次 CI 的 15 秒上限不是 P50/P95；优雅 stop/start 也不等同于 crash、DNS、网络分区、连接池耗尽、主从切换或多 Worker 同时恢复。生产默认 8 次预算仍需在目标环境按故障持续时间签收。
 - 公网部署继续冻结；本轮未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，未调用平台、创建素材/草稿/发布或云资源。下一轮优先建立在途无副作用 Job 的断库/进程终止恢复，以及多 Worker 与独立监控证据。
+
+## 21.50 在途 Worker 强制终止与第三十八轮复审增量交接
+
+### 本轮实现
+
+1. 第三十七轮只在 Worker 空闲领取时停止数据库，没有证明 Job 已领取、Handler 正在执行时进程崩溃后的接管。本轮在 PostgreSQL 随机临时数据库中创建无外部副作用的专用 Job，并用 spawn 独立进程运行真实 `Worker.run_forever()`。
+2. 第一 Worker 完成领取提交、启动 LeaseHeartbeat 并进入阻塞 Handler 后向父测试发信号；父进程确认 Job 为 `running`、attempt=1、owner 正确，再调用进程 `kill()`。Linux CI 明确要求退出码为 `-SIGKILL`，不是优雅 stop 或伪造数据库记录。
+3. 测试租约为 6 秒。第二 Worker 先执行一次 `run_once()`，必须返回 false，证明租约未过期不能抢占；随后以服务循环等待真实 `locked_at` 过期，重新领取同一 Job，attempt 增至 2 并写入唯一成功结果。
+4. 崩溃 Worker 不可能写入 stopped，因此其 `worker_nodes` 状态应仍为 online，但 heartbeat 必须达到 stale 阈值；恢复 Worker 处理完成后应正常写为 stopped。该差异为现有健康检查和运维判断提供了真实 PostgreSQL 证据。
+5. 用例运行前只在一次性数据库中终结之前残留的可运行 Job 和 submitted 发布探针，避免测试之间互相领取；没有调用内置 AI、对象存储或发布 Handler，没有外部副作用，也没有改生产代码、配置或迁移。
+
+### 当前验证与边界
+
+- 本机 `uv lock --check`、全仓 Ruff 与完整后端门禁通过：`306 passed, 16 skipped, 196 subtests passed`、分支覆盖率 80.96%；新增用例因本机 PostgreSQL 集成服务未运行而跳过。
+- 实现提交 `b2b01ca5153a611167024dff9095af21ba61fcc3` 已以 John Wang 身份普通推送；[ContentFlow CI #33699168801](https://github.com/heee000/ContentFlow/actions/runs/33699168801) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `322 passed, 196 subtests passed`、覆盖率 82.15%，Python 无已知漏洞；前端、Prometheus、npm 审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 均通过。Artifact `9872885169` 摘要为 `sha256:679207f6e4dc315db35124acb528322f24cf906802c555dafa7ec94329ed79c0`。
+- 本轮证明的是“无副作用自定义 Handler 在进程被 SIGKILL 后，另一个 Worker 遵守租约并最终接管”。它没有覆盖内置业务 Handler、Handler 已产生 AI 费用/对象写入/平台发布、完成事务提交时断连，或旧执行者仍存活但网络隔离的双写竞争。
+- 6 秒租约和单次 CI 只为有界测试；生产默认 300 秒租约、多副本 P50/P95、Kubernetes/Docker 的 TERM→grace→KILL、滚动升级和编排器指标仍需目标环境演练。不能据此缩短生产租约或宣称 exactly-once。
+- 公网部署继续冻结；未读取 `.env`、账密、模型缓存、备份、运行数据或受保护知识文件。下一轮优先审查实际 Handler 的副作用/幂等/补偿/fencing 契约和完成提交边界，再决定能否安全缩短不同 Job 类型的恢复时间。

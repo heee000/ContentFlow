@@ -1955,3 +1955,37 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 3. 把结构化 Worker 日志、进程健康与编排器 restart count 发往独立监控故障域，接通真实告警接收、抑制、恢复通知和值班演练。
 4. 在获得高影响授权后分阶段落地数据库角色与 RLS，并先补当前 head 的 PITR/异地/对象一致性恢复；同步建立租户数据生命周期和企业身份密钥制度。
 5. 建立 Playwright 关键旅程、前端请求/模块预算、真实渠道沙箱异常回归、媒体质量成本评测和可回滚 Release 晋级门禁，形成持续公开测试证据。
+
+## 48. 2026-09-03 第三十八轮复审：在途任务 SIGKILL 与租约接管
+
+### 48.1 复审结论
+
+本轮首次让已经进入 Handler 的独立 Worker 进程被真实 SIGKILL，并由另一个 Worker 在 PostgreSQL 租约过期后接管。未过期不可抢占、attempt 从 1 增至 2、旧节点 stale、新节点 stopped 和最终唯一成功均得到同一集成用例证明。该证据把核心数据库队列的崩溃恢复进一步推进到 L2-L3 局部能力，但它仍是无副作用探针、短测试租约和单副本接管；综合成熟度保持 L2+。
+
+### 48.2 本轮关闭或部分关闭的风险
+
+| 维度 | 当前提升 | 证据 | 未关闭边界 |
+| --- | --- | --- | --- |
+| 突然终止 | Handler 在独立进程中阻塞后遭 SIGKILL | Linux 退出码 `-SIGKILL`，Job 保持 running | 不是容器/Pod 宽限期和滚动升级 |
+| 租约安全 | 未过期时第二 Worker 不得抢占 | 首次 `run_once()` 返回 false、attempt 仍为 1 | 网络分区下旧执行者恢复后的竞争未实测 |
+| 最终接管 | 真实 locked_at 过期后第二 Worker领取并成功 | attempt=2、唯一结果、锁字段清空 | 内置 Handler 和完成提交边界未测 |
+| 节点健康 | 崩溃节点只能由 stale 心跳识别；正常节点可登记 stopped | 两类 WorkerNode 状态断言 | 独立监控和编排器 restart 指标未接通 |
+| 副作用范围 | 探针不调用 AI、对象或平台 | 随机临时库、专用 job type | AI 计费、对象写入、发布 exactly-once 仍需逐类协议 |
+
+本机 `uv lock --check`、全仓 Ruff、完整后端为 `306 passed, 16 skipped, 196 subtests passed`、覆盖率 80.96%。实现提交 `b2b01ca5153a611167024dff9095af21ba61fcc3` 的 [CI #33699168801](https://github.com/heee000/ContentFlow/actions/runs/33699168801) 四个 Job 全部成功；真实 PostgreSQL/pgvector 与 MinIO 为 `322 passed, 196 subtests passed`、覆盖率 82.15%，Python 无已知漏洞，前端/Prometheus/npm/供应链证明均通过。Artifact `9872885169` 摘要为 `sha256:679207f6e4dc315db35124acb528322f24cf906802c555dafa7ec94329ed79c0`。
+
+### 48.3 当前仍存在的 5 个不足
+
+1. **业务 Handler 的崩溃语义仍未签收**：当前探针没有业务写入；workflow、AI、媒体、对象存储、发布和对账在调用前、调用后、提交前崩溃时的幂等/补偿仍未形成统一可执行契约。
+2. **完成提交与分区双活边界未测**：没有在 Handler 返回后、`complete_job` 提交前断库，也没有模拟旧 Worker 网络隔离超过租约后恢复并尝试提交；当前 fencing 有单元证据但缺真实并发故障证据。
+3. **目标编排与容量证据不足**：6 秒测试租约不是生产 300 秒；缺 Docker/Kubernetes TERM→grace→KILL、滚动升级、多个恢复 Worker、惊群、积压吞吐和重复运行 P50/P95。
+4. **企业监控、数据和身份边界仍欠缺**：崩溃节点只能由数据库 stale 判断，独立日志/OTel/告警未闭环；角色/RLS、PITR/异地/生命周期和 OIDC/MFA/SCIM/KMS 仍未完成。
+5. **产品级验收仍不完整**：前端关键旅程缺 Playwright，真实渠道异常和媒体质量成本矩阵不足，灰度回滚、受保护分支、外部租户长期运行与支持流程尚未共同签收。
+
+### 48.4 可以继续改进的 5 个方向
+
+1. 建立 Job 副作用清单，把纯数据库、AI 计费、媒体下载/生成、对象存储、平台发布和对账分别标注 idempotency key、commit point、补偿、fencing 与人工接管策略，并转成契约测试。
+2. 在真实 PostgreSQL 中把故障点推进到 Handler 返回后/完成提交前，并模拟旧执行者越过租约后恢复；证明 attempt fencing 能拒绝其结果且新执行者不会被旧事务覆盖。
+3. 用容器级 Worker 做 TERM→超时→KILL、双 Worker/多 Worker 和滚动升级演练，以生产租约或等比例参数记录接管 P50/P95、积压吞吐和惊群查询压力。
+4. 将 Worker 进程、日志和编排器状态输出到独立监控故障域并接通真实告警；随后在授权下推进数据库角色/RLS、PITR/异地和企业身份密钥制度。
+5. 并行补 Playwright 关键旅程、真实平台沙箱失败矩阵、媒体质量/成本评测和可回滚 Release 晋级，让可靠性证据覆盖用户可见闭环而非只覆盖队列内核。

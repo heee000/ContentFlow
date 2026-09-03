@@ -873,3 +873,15 @@
 - 本地证据：`uv lock --check`、全仓 Ruff、完整后端为 `306 passed, 15 skipped, 196 subtests passed`、分支覆盖率 80.96%；新增用例因本机没有 CI service container ID 而跳过。前端 lint、Vinext/Sites、2 项 SSR 和 Next.js/TypeScript 生产构建通过。
 - 远程证据：实现提交 `6b972e28e31388704d23c833df6f99f0e99d90c7` 已以 John Wang 身份普通推送；[ContentFlow CI #33697780446](https://github.com/heee000/ContentFlow/actions/runs/33697780446) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `321 passed, 196 subtests passed`、覆盖率 82.15%，Python 已知漏洞为 0；前端、Prometheus、npm、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 均通过。Artifact `9872418882` 摘要为 `sha256:fd7ce858d9e631dc8525ef192e7cc828dcf34dc8ace26c97b66903e7440d91fa`。
 - 剩余边界：当前仅证明一个空闲 Worker 经历一次数据库优雅 stop/start 后恢复。尚未覆盖 Handler/提交中途断库、Worker SIGKILL、租约接管、多 Worker 惊群、crash、DNS、网络分区、池耗尽、主从切换和长期恢复分位数。
+
+### CF-20260903-25：在途 Job 的进程崩溃接管缺少真实 PostgreSQL 证据
+
+- 状态：独立 Worker 进程 SIGKILL、租约前负向检查、租约后接管、attempt fencing、节点 stale/stopped 语义、本地回归及远端供应链门禁均已签收。
+- 问题与影响：单元测试能够手工改写 `locked_by/attempt`，数据库 stop/start 测试也能证明空闲 Worker 恢复，但都没有让真实 Handler 在进程突然消失后留下已提交租约。若 LeaseHeartbeat、进程连接关闭、过期比较或第二 Worker 的领取事务存在偏差，任务可能永久卡住或被提前双重执行。
+- 根因：此前没有一个可在独立进程中安全阻塞、发出“已进入 Handler”信号且绝不触发外部副作用的集成探针，也没有把 kill、未过期拒绝和过期接管串成同一真实 PostgreSQL 用例。
+- 解决方案：使用 spawn 独立进程创建专用 Worker；它领取 `postgres.worker.crash.probe`、提交 attempt=1 并在无副作用 Handler 中阻塞。父测试确认真实数据库状态后强制 kill，Linux 必须返回 `-SIGKILL`。第二 Worker 在 6 秒租约过期前的 `run_once()` 必须为空，随后服务循环自动接管为 attempt=2 并写入唯一成功结果。
+- 节点语义：被 kill 的 WorkerNode 必须保持 online/stopped_at=null 且最终 heartbeat 超过 stale 阈值，正常恢复 Worker 必须写入 stopped。运维端因此不能把 online 当作进程存活，仍须结合 heartbeat 和独立编排器指标。
+- 隔离与清理：只使用模块 fixture 创建的随机临时数据库；用例先终结该库中旧的 runnable Job 和 submitted 发布探针，避免互相领取。`finally` 强制回收仍存活的子进程并停止恢复线程，不触碰持久数据库或平台。
+- 本地证据：`uv lock --check`、全仓 Ruff、完整后端为 `306 passed, 16 skipped, 196 subtests passed`、覆盖率 80.96%；本机没有 PostgreSQL 服务，因此新集成用例安全跳过。
+- 远程证据：实现提交 `b2b01ca5153a611167024dff9095af21ba61fcc3` 已以 John Wang 身份普通推送；[ContentFlow CI #33699168801](https://github.com/heee000/ContentFlow/actions/runs/33699168801) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `322 passed, 196 subtests passed`、覆盖率 82.15%，Python 无已知漏洞；前端、Prometheus、npm、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 全部通过。Artifact `9872885169` 摘要为 `sha256:679207f6e4dc315db35124acb528322f24cf906802c555dafa7ec94329ed79c0`。
+- 剩余边界：探针 Handler 无业务副作用且在结果提交前被杀；尚未覆盖内置 Handler、完成提交丢失、旧执行者网络隔离后重新出现、多 Worker 惊群、生产 300 秒租约和外部调用去重/补偿。
