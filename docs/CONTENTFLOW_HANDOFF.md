@@ -2080,3 +2080,22 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 账本当前只覆盖 OpenAI-compatible 文本和远程 Embedding。它没有证明真实 Provider 支持幂等头，也没有自动查询费用/结果、自动调和迟到响应、证据附件、负责人或双人批准；人工核对仍是最终安全边界。
 - 请求/响应只保存 SHA-256 证据哈希，避免正文落库，但低熵输入仍可能被离线猜测。未来若把哈希提供给更广泛角色，应改为密钥 HMAC 或进一步收紧访问，且需要设计密钥轮换与历史验证策略。
 - 公网部署继续冻结；未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，未调用真实 Provider/平台或创建素材、草稿、发布或云资源。继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。
+
+## 21.54 媒体/搜索调用账本与第四十二轮复审增量交接
+
+### 本轮实现
+
+1. `provider_kind` 从 text/embedding 扩展为 text/embedding/media/search。新增 `LedgeredMediaProvider` 与 `LedgeredSearchProvider`，HTTP 图片/视频生成、异步媒体轮询和 Openverse 图片搜索现在都在调用前用独立事务写入 Provider attempt，并绑定当前 Worker 已领取的 Job。
+2. 媒体生成继续向目标服务发送既有 `media_generation_idempotency_key(asset)`，即按 workspace、Asset、kind 和 content_version 生成的 `cfm-*` 键；账本的逻辑请求键只用于内部聚合，不替换 Media Contract 的幂等键。轮询和 Openverse GET 明确记录 `idempotency_key_sent=false`。
+3. 媒体成功只保存状态、外部任务 ID、mime/filename 及 inline 内容或下载 URL 的 SHA-256 摘要；搜索只保存查询和候选集合摘要。Prompt、分镜、搜索词、候选详情、媒体字节、URL、Authorization、API Key 和错误正文不落账本。Media Contract 错误信封经过既有封闭 Schema 校验后，可把受控 request_id/来源带入失败 attempt。
+4. 同一逻辑请求创建新 attempt 时，会在 invocation 行锁保护下把旧 `started` 转为 `outcome_unknown`，完成时间和 `superseded_by_retry` 原因进入审计；完成路径改为 invocation→attempt 的一致锁顺序。旧执行者迟到成功只能把自身 attempt 标记为 `late_succeeded`，不会自动写入领域结果。
+5. 迁移 `a5b6c7d8e9f0` 只替换 provider_kind 检查约束，不新增表，公开表门槛仍为 33。PostgreSQL 使用原位约束替换，SQLite 使用 Alembic batch 重建；未版本化数据库仍先识别 `f4a5b6c7d8e9` 的两张账本表，再正常升级到新 head。三套备份/隔离恢复校验同步。
+
+### 当前验证与边界
+
+- 定向媒体合同、适配器、Worker 绑定、账本和迁移为 `68 passed, 50 subtests passed`；本机完整后端为 `324 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.46%。17 项均为本机未提供 PostgreSQL/MinIO/CI 容器条件的安全跳过。全仓 Ruff、锁文件、`pip check`、Alembic 单 head、公网 fail-closed、备份脚本语法、Python/npm 漏洞审计、前端 lint/test/build 均通过。
+- 实现提交 `9a6c154ba154356bda6ff6089137d1e0b473e506` 已以 John Wang 身份普通推送；手动触发的 [ContentFlow CI #33710709007](https://github.com/heee000/ContentFlow/actions/runs/33710709007) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `341 passed, 196 subtests passed`、覆盖率 82.60%；Prometheus、前端、依赖审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 全部通过。Artifact `9876813444` 摘要为 `sha256:d113346727fab94672907a3f7bf171fcf4719437f908685b606b792202e79adc`。
+- 当前没有真实 HTTP 媒体 Provider 的 live conformance、账单、质量或时延签收，因此不能仅凭仓库测试认定 `asset.generate` 在任意第三方服务上安全自动恢复。启用真实 HTTP Provider 前必须运行既有显式计费确认的 conformance runner。
+- 媒体结果 URL 下载与 Openverse 候选选中后的下载还没有独立 Provider attempt；最终文件由对象存储账本与 checksum 保护，但网络请求、来源响应与配额诊断仍可继续完善。Asset 页面也尚未提供通用调用证据入口。
+- 普通 SHA-256 低熵猜测、证据 retention/export/legal hold、负责人/双人核对、真实 receiver、Provider 自动结果/费用查询、完成提交丢失和网络分区 fencing 仍未关闭。
+- 公网部署继续冻结；未读取 `.env`、账密、模型缓存、备份、运行数据或受保护知识文件，未调用真实 Provider、Openverse、微信或其他平台。继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。

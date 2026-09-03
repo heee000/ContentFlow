@@ -919,3 +919,15 @@
 - 验证边界：本机完整后端为 `318 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.31%；17 项为本机未提供 PostgreSQL/MinIO/CI 容器条件的安全跳过。全仓 Ruff、Alembic 单 head、公网部署 fail-closed、锁文件、`pip check`、Python 与 npm 漏洞审计、前端 lint/test/build 和备份脚本语法均通过。本轮没有调用真实 Provider、平台或云资源；Provider 对幂等头的实际支持、费用/结果查询和自动对账仍未证明。
 - 远程证据：实现提交 `56e563de1725a40c9eddbf05128dff6e812b5cfc` 已以 John Wang 身份普通推送；手动触发的 [ContentFlow CI #33708300286](https://github.com/heee000/ContentFlow/actions/runs/33708300286) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `335 passed, 196 subtests passed`、覆盖率 82.47%；Prometheus 规则行为、前端 lint/test/build、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9876032648` 摘要为 `sha256:ef9130d8941c8e135c6e4e4968b814b37d2c4a7779bce7bcf0c3f6072a616174`。
 - 剩余边界：账本只覆盖当前 OpenAI-compatible 文本与远程 Embedding 路径；请求/响应使用 SHA-256 证据哈希而非密钥 HMAC，不适合把低熵敏感输入的哈希直接对外公开。真实 Provider 是否接受幂等键、能否按请求 ID 查询结果/费用、如何自动调和迟到结果仍待适配器级 conformance 测试。人工核对仍缺负责人、证据附件、双人确认和真实告警接收器。
+
+### CF-20260903-29：媒体生成与图片搜索仍游离在 Provider 调用取证链外
+
+- 状态：媒体/搜索账本、悬空尝试收束、迁移与恢复契约、完整本地门禁及真实 PostgreSQL/MinIO CI 均已签收。
+- 问题与影响：文本和远程 Embedding 已有调用前证据，但 HTTP 图片/视频生成、异步轮询和 Openverse 搜索仍只有 Asset 状态与最终元数据。生成超时或 Worker 接管时，操作者无法从统一账本判断哪次调用已经开始、供应商返回了哪个请求号；自动重试还可能把旧 attempt 永久留在 `started`。搜索虽然只读，也会消耗外部配额且缺少调用级诊断。
+- 解决方案：新增 `LedgeredMediaProvider` 与 `LedgeredSearchProvider`，在真实 HTTP 媒体生成/轮询和 Openverse 查询前独立提交账本。媒体响应只以状态、外部任务 ID、媒体标签、内容/下载 URL 摘要留证；搜索只保存请求/候选集合摘要，不保存 Prompt、分镜、搜索词、候选详情、媒体字节、URL 或错误正文。Media Contract 错误信封中的受控 `request_id` 会进入账本，错误 message 继续丢弃。
+- 幂等与竞态：媒体生成继续使用按 Asset 内容版本确定的 `cfm-*` 幂等键，账本不替换或伪造供应商合同；轮询和 Openverse GET 明确记录未发送幂等键。开始同一逻辑请求的新 attempt 前，旧 `started` 会原子转为 `outcome_unknown` 并标记 `superseded_by_retry`；账本完成路径和重试路径统一按 invocation→attempt 顺序加锁，迟到成功只形成 `late_succeeded` 证据。
+- 迁移与恢复：新增 `a5b6c7d8e9f0`，只把 `provider_kind` 检查约束从 text/embedding 扩展到 text/embedding/media/search；公开表仍为 33。PostgreSQL 原位替换约束，SQLite 使用 batch 重建；未版本化账本仍先按 `f4a5b6c7d8e9` 认领再向前升级。运行时 head、本地备份、公网隔离恢复校验同步。
+- 本地证据：定向媒体合同、适配器、Worker 绑定、账本与迁移为 `68 passed, 50 subtests passed`；完整后端为 `324 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.46%。17 项均为本机未提供 PostgreSQL/MinIO/CI 容器条件的安全跳过。全仓 Ruff、锁文件、`pip check`、Alembic 单 head、公网 fail-closed、备份脚本语法、Python/npm 漏洞审计、前端 lint、双构建与 2 项 SSR 均通过。
+- 远程证据：实现提交 `9a6c154ba154356bda6ff6089137d1e0b473e506` 已以 John Wang 身份普通推送；手动触发的 [ContentFlow CI #33710709007](https://github.com/heee000/ContentFlow/actions/runs/33710709007) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `341 passed, 196 subtests passed`、覆盖率 82.60%；Prometheus、前端、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9876813444` 摘要为 `sha256:d113346727fab94672907a3f7bf171fcf4719437f908685b606b792202e79adc`。
+- 剩余边界：没有用真实目标媒体服务执行 live conformance、账单与质量签收；生成结果 URL 下载和 Openverse 候选选中后的文件下载没有独立 Provider attempt，但最终对象由存储账本与 SHA-256 校验覆盖。Asset 页面尚无通用调用证据入口；普通 SHA-256 的低熵猜测、证据保留/删除/导出策略、真实告警接收器和供应商自动查询仍未关闭。
+- 安全范围：公网部署继续冻结；本轮未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，没有调用真实 Provider、Openverse、微信或其他平台，也没有创建素材、草稿、发布或云资源。

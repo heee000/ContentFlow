@@ -2104,3 +2104,44 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 - 本轮没有读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，没有调用真实 Provider/平台，也没有创建素材、草稿、发布或云资源。
 - 实现提交已普通推送到 `codex/enterprise-media-runtime`，作者与提交者均为 `John Wang <182348029+heee000@users.noreply.github.com>`；未使用 force、force-with-lease、reset 或覆盖用户文件。
 - 新账本是仓库侧审计证据，不是供应商保证。真实账号 conformance、费用和结果查询必须由后续目标环境验收单独签收。
+
+## 52. 2026-09-03 第四十二轮复审：媒体与搜索调用链统一取证
+
+### 52.1 结论
+
+本轮将统一 Provider 账本从文本/Embedding 扩展到 HTTP 媒体生成、异步轮询和 Openverse 图片搜索，并关闭“自动重试后旧 attempt 永久停在 started”的状态机缺口。媒体原有幂等合同、搜索只读重放与账本取证保持分层，没有因为统一记录而混淆副作用语义。综合成熟度仍为 **L2+**：仓库侧调用取证覆盖更完整，但目标 Provider 的真实合同签收、证据生命周期、下载链和企业运行基座仍不足以宣称成熟商业生产就绪。
+
+### 52.2 本轮关闭或部分关闭的风险
+
+| 维度 | 当前提升 | 证据 | 未关闭边界 |
+| --- | --- | --- | --- |
+| 媒体生成 | 调用前记录 media.generate，保留请求号和脱敏响应证据 | Worker Job 绑定、成功/失败、inline/URL 回归 | 未跑真实目标服务 conformance、账单和质量验收 |
+| 异步轮询 | media.poll 与配置指纹、外部任务 ID 可关联 | Provider profile 漂移、轮询与账本测试 | 结果 URL 实际下载没有独立 invocation |
+| 图片搜索 | search.image 记录查询/候选摘要且不落详情 | Openverse Provider 与 Worker 集成测试 | 查询配额、真实网络时延和候选下载未签收 |
+| 重试状态机 | 新 attempt 前把旧 started 收束为 outcome_unknown，锁顺序统一 | 同逻辑请求两次 start 与后续成功回归 | 网络分区下旧调用迟到与新 Worker 并发仍缺真实 PostgreSQL 演练 |
+| Schema/恢复 | provider_kind 扩至 media/search，head 与备份恢复同步 | SQLite 升降级、单 head、远程 PostgreSQL CI | 生产大表约束变更仍需按目标容量安排锁窗口 |
+
+本机完整后端为 `324 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.46%。实现提交 `9a6c154ba154356bda6ff6089137d1e0b473e506` 的 [CI #33710709007](https://github.com/heee000/ContentFlow/actions/runs/33710709007) 四个 Job 全部成功；真实 PostgreSQL/pgvector 与 MinIO 为 `341 passed, 196 subtests passed`、覆盖率 82.60%，Python 无已知漏洞，前端、Prometheus、npm、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 全绿。Artifact `9876813444` 摘要为 `sha256:d113346727fab94672907a3f7bf171fcf4719437f908685b606b792202e79adc`。
+
+### 52.3 当前仍存在的 5 个不足
+
+1. **真实 Provider 能力仍未签收**：媒体虽有严格 v1 合同和 live conformance runner，但当前没有目标 Base/Key/模型的同键重放、冲突、计费、质量与时延证据；文本/Embedding 也没有请求查询和费用对账，不能宣称 exactly-once。
+2. **外部调用覆盖仍非完整闭环**：媒体结果 URL 下载、Openverse 候选下载、connector.test、真实平台发布/对账仍不在统一 invocation 视图；其中发布已有领域证据账本，但跨账本关联体验不足。
+3. **证据安全与生命周期尚不成熟**：请求/响应使用普通 SHA-256，低熵内容可能被授权读取者离线猜测；没有 HMAC 密钥轮换、按租户保留/删除、法律保全、导出和访问复核策略。
+4. **分布式完成边界仍缺证明**：Provider 返回后业务提交丢失、旧 Worker 网络分区越过租约后恢复、迟到结果与新执行者竞争写回等最危险场景仍未做真实端到端故障注入和 attempt fencing。
+5. **企业运行基座仍未整体验收**：独立 OTel/集中日志、真实 Alertmanager receiver、PITR/异地恢复、OIDC/MFA/SCIM/KMS、数据库最小权限/RLS、Playwright、灰度回滚、容量与长期多租户运行仍缺共同证据。
+
+### 52.4 可以继续改进的 5 个方向
+
+1. 将 media conformance 报告升级为可验证的 Provider capability attestation，并在启用 HTTP 媒体自动恢复前校验目标指纹、报告时效、同键不重复计费和合同版本；文本/Embedding 建立对应查询与费用能力声明。
+2. 为媒体 URL/候选下载、连接测试和平台调用建立可关联的调用/领域证据，不机械统一状态机；下载保持只读重放，发布继续以领域对账和平台回执为准。
+3. 引入版本化 HMAC 证据、密钥轮换、访问最小化和租户级 retention/legal-hold/export 流程，并设计旧证据在密钥轮换后的可验证性。
+4. 在真实 PostgreSQL/多 Worker 环境注入 Provider 返回后提交丢失和网络分区恢复，证明 invocation/attempt 与领域写回的 fencing、迟到结果和人工接管行为。
+5. 继续推进企业基座：OTel/集中日志、真实告警接收、PITR 恢复演练、数据生命周期、Playwright 与灰度回滚优先；数据库角色/RLS 仍需单独高影响授权。
+
+### 52.5 安全与交付边界
+
+- 公网部署继续冻结；没有恢复 Vercel、GitHub Pages 或云服务器实施。
+- 本轮没有读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，没有调用真实 Provider、Openverse 或社媒平台，没有创建素材、草稿、发布或云资源。
+- 实现提交已普通推送到 `codex/enterprise-media-runtime`，作者与提交者均为 `John Wang <182348029+heee000@users.noreply.github.com>`；未使用 force、force-with-lease、reset 或覆盖用户文件。
+- HTTP 媒体自动恢复仍以目标服务实际通过 conformance 为前提；仓库测试只证明适配器和状态机，不证明第三方服务兑现合同。
