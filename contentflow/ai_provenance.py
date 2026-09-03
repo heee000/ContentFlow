@@ -2,12 +2,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy.orm import Session
+
 from .prompts import BUILTIN_PROMPT_SET, PromptSet
+from .provider_invocations import (
+    ProviderInvocationLedger,
+    ProviderInvocationLedgerError,
+    canonical_evidence,
+    current_provider_job_id,
+    set_provider_request_key,
+    stable_provider_request_key,
+)
 from .providers import Provider
+
+
+logger = logging.getLogger("contentflow.ai_provenance")
 
 
 def _json_evidence(value: Any) -> tuple[str, int]:
@@ -49,6 +63,10 @@ class AIProvenanceRecorder:
         embedding_provider: str,
         embedding_model: str,
         prompt_set: PromptSet | None = None,
+        ledger_session: Session | None = None,
+        workspace_id: str | None = None,
+        entity_type: str | None = None,
+        entity_id: str | None = None,
     ) -> None:
         self.provider = provider
         self.provider_name = str(getattr(provider, "provider_name", "unknown"))[:80]
@@ -57,6 +75,19 @@ class AIProvenanceRecorder:
         self.embedding_model = embedding_model[:160]
         self.prompt_set = prompt_set or BUILTIN_PROMPT_SET
         self.invocations: list[dict[str, Any]] = []
+        ledger_context = (workspace_id, entity_type, entity_id)
+        if ledger_session is not None and all(ledger_context):
+            self.ledger: ProviderInvocationLedger | None = ProviderInvocationLedger(
+                ledger_session.get_bind()
+            )
+            self.workspace_id = workspace_id or ""
+            self.entity_type = entity_type or ""
+            self.entity_id = entity_id or ""
+        else:
+            self.ledger = None
+            self.workspace_id = ""
+            self.entity_type = ""
+            self.entity_id = ""
 
     def complete_json(
         self,
@@ -77,6 +108,54 @@ class AIProvenanceRecorder:
             "input_sha256": input_sha256,
             "input_bytes": input_bytes,
         }
+        ledger_handle = None
+        if self.ledger is not None:
+            ledger_request_sha256, ledger_request_bytes = canonical_evidence(
+                {
+                    "model": self.model_name,
+                    "stage": stage,
+                    "system_prompt": self.prompt_set.prompts[stage],
+                    "payload": payload,
+                }
+            )
+            job_id = current_provider_job_id(self.workspace_id)
+            request_key = stable_provider_request_key(
+                workspace_id=self.workspace_id,
+                job_id=job_id,
+                entity_type=self.entity_type,
+                entity_id=self.entity_id,
+                provider_kind="text",
+                provider_name=self.provider_name,
+                model_name=self.model_name,
+                operation=f"text.{stage}",
+                ordinal=base["ordinal"],
+                request_sha256=ledger_request_sha256,
+            )
+            idempotency_key_sent = set_provider_request_key(
+                self.provider,
+                request_key,
+            )
+            ledger_handle = self.ledger.start(
+                workspace_id=self.workspace_id,
+                job_id=job_id,
+                entity_type=self.entity_type,
+                entity_id=self.entity_id,
+                provider_kind="text",
+                provider_name=self.provider_name,
+                model_name=self.model_name,
+                operation=f"text.{stage}",
+                ordinal=base["ordinal"],
+                request_sha256=ledger_request_sha256,
+                request_bytes=ledger_request_bytes,
+                idempotency_key_sent=idempotency_key_sent,
+            )
+            base.update(
+                {
+                    "request_key": ledger_handle.request_key,
+                    "ledger_attempt": ledger_handle.attempt_number,
+                    "idempotency_key_sent": idempotency_key_sent,
+                }
+            )
         try:
             result = self.provider.complete_json(
                 stage,
@@ -85,6 +164,19 @@ class AIProvenanceRecorder:
             )
         except Exception as error:
             call_metadata = getattr(self.provider, "last_call_metadata", {})
+            if self.ledger is not None and ledger_handle is not None:
+                try:
+                    self.ledger.finish(
+                        ledger_handle,
+                        status="outcome_unknown",
+                        call_metadata=call_metadata,
+                        error_type=type(error).__name__,
+                    )
+                except Exception:
+                    logger.exception(
+                        "provider invocation failure could not be finalized id=%s",
+                        ledger_handle.invocation_id,
+                    )
             invocation = {
                 **base,
                 "status": "failed",
@@ -107,6 +199,29 @@ class AIProvenanceRecorder:
             raise
         output_sha256, output_bytes = _json_evidence(result)
         call_metadata = getattr(self.provider, "last_call_metadata", {})
+        if self.ledger is not None and ledger_handle is not None:
+            try:
+                self.ledger.finish(
+                    ledger_handle,
+                    status="succeeded",
+                    call_metadata=call_metadata,
+                    response_sha256=output_sha256,
+                    response_bytes=output_bytes,
+                )
+            except Exception as error:
+                ledger_error = ProviderInvocationLedgerError(
+                    "Provider response was received but its ledger could not be finalized"
+                )
+                failed_invocation = {
+                    **base,
+                    "status": "failed",
+                    "latency_ms": round((time.perf_counter() - started) * 1000, 3),
+                    "error_type": type(ledger_error).__name__,
+                    "usage": _usage(call_metadata),
+                }
+                self.invocations.append(failed_invocation)
+                ledger_error.ai_provenance = self.snapshot()
+                raise ledger_error from error
         invocation = {
             **base,
             "status": "succeeded",

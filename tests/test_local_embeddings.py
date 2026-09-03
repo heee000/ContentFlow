@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
+
 from contentflow.embeddings import (
     LocalBGEM3EmbeddingProvider,
     OpenAICompatibleEmbeddingProvider,
@@ -193,6 +195,56 @@ class LocalEmbeddingTest(unittest.TestCase):
         self.assertIsInstance(provider, OpenAICompatibleEmbeddingProvider)
         self.assertEqual(provider.endpoint, "https://embeddings.example/v1/embeddings")
         self.assertEqual(provider.api_key, "embedding-key")
+
+    def test_remote_provider_sends_invocation_key_and_captures_bounded_evidence(self):
+        class FakeClient:
+            def post(self, url, **kwargs):
+                self.url = url
+                self.kwargs = kwargs
+                request = httpx.Request("POST", url)
+                return httpx.Response(
+                    200,
+                    request=request,
+                    headers={"x-request-id": "embedding-header-id"},
+                    json={
+                        "id": "embedding-body-id",
+                        "model": "embedding-model-r2",
+                        "data": [
+                            {"index": 0, "embedding": [1.0, 0.0]},
+                            {"index": 1, "embedding": [0.0, 1.0]},
+                        ],
+                        "usage": {"prompt_tokens": 9, "total_tokens": 9},
+                    },
+                )
+
+        client = FakeClient()
+        provider = OpenAICompatibleEmbeddingProvider(
+            api_base="https://embeddings.example/v1",
+            api_key="not-recorded",
+            model="embedding-model",
+            dimensions=2,
+            client=client,
+        )
+        provider.set_invocation_context("b" * 64)
+
+        vectors = provider.encode_many(["第一段", "第二段"])
+
+        self.assertEqual(vectors, [[1.0, 0.0], [0.0, 1.0]])
+        self.assertEqual(client.kwargs["headers"]["Idempotency-Key"], "b" * 64)
+        self.assertEqual(client.kwargs["json"]["input"], ["第一段", "第二段"])
+        self.assertEqual(
+            provider.last_call_metadata,
+            {
+                "usage_source": "provider_reported",
+                "idempotency_key_sent": True,
+                "provider_request_id": "embedding-body-id",
+                "provider_request_id_source": "body.id",
+                "response_model": "embedding-model-r2",
+                "input_tokens": 9,
+                "output_tokens": None,
+                "total_tokens": 9,
+            },
+        )
 
     def test_cache_prepare_writes_pinned_manifest_and_offline_verify_reads_it(self):
         class FakeProvider:

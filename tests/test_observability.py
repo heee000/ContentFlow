@@ -15,6 +15,8 @@ from contentflow.api import create_app
 from contentflow.entities import (
     Job,
     JobManualReview,
+    ProviderInvocation,
+    ProviderInvocationAttempt,
     StorageObjectAllocation,
     WorkerNode,
     WorkspaceStorageUsage,
@@ -153,6 +155,34 @@ class ObservabilityTest(unittest.TestCase):
                     requested_at=now - timedelta(hours=2),
                 )
             )
+            invocation = ProviderInvocation(
+                workspace_id=usage.workspace_id,
+                job_id=manual_job.id,
+                entity_type="workflow_run",
+                entity_id="metrics-run",
+                provider_kind="text",
+                provider_name="openai-compatible",
+                model_name="metrics-model",
+                operation="text.plan",
+                request_key="b" * 64,
+                request_sha256="c" * 64,
+                request_bytes=512,
+                last_status="outcome_unknown",
+            )
+            session.add(invocation)
+            session.flush()
+            session.add(
+                ProviderInvocationAttempt(
+                    invocation_id=invocation.id,
+                    attempt_number=1,
+                    status="outcome_unknown",
+                    idempotency_key_sent=True,
+                    usage_source="not_reported",
+                    started_at=now - timedelta(hours=2),
+                    completed_at=now - timedelta(hours=2),
+                    error_type="worker_lease_expired",
+                )
+            )
             session.add(
                 WorkerNode(
                     id="metrics-worker",
@@ -203,6 +233,22 @@ class ObservabilityTest(unittest.TestCase):
             )
         )
         self.assertGreater(manual_review_age, 119 * 60)
+        self.assertIn(
+            'contentflow_provider_invocation_attempts{status="outcome_unknown"} 1.0',
+            body,
+        )
+        self.assertIn(
+            "contentflow_provider_invocation_unresolved_outcome_unknown 1.0",
+            body,
+        )
+        provider_unknown_age = next(
+            float(line.rsplit(" ", 1)[1])
+            for line in body.splitlines()
+            if line.startswith(
+                "contentflow_provider_invocation_outcome_unknown_oldest_age_seconds "
+            )
+        )
+        self.assertGreater(provider_unknown_age, 119 * 60)
         self.assertIn('contentflow_worker_nodes{state="active"} 1.0', body)
         self.assertIn('contentflow_worker_nodes{state="stale"} 1.0', body)
         self.assertIn("contentflow_publish_reconciliation_required 0.0", body)

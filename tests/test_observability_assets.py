@@ -39,7 +39,7 @@ def test_alert_rules_have_bounded_operations_contracts():
         "contentflow-alerts",
     }
     alerts = [rule for group in groups for rule in group["rules"] if "alert" in rule]
-    assert len(alerts) == 12
+    assert len(alerts) == 13
     assert {rule["labels"]["severity"] for rule in alerts} == {
         "warning",
         "critical",
@@ -62,6 +62,10 @@ def test_alert_rules_have_bounded_operations_contracts():
     assert "contentflow_storage_reconciliation_overdue_workspaces" in all_expressions
     assert "contentflow_storage_delete_pending_oldest_age_seconds" in all_expressions
     assert "contentflow_job_manual_review_oldest_age_seconds" in all_expressions
+    assert (
+        "contentflow_provider_invocation_unresolved_outcome_unknown"
+        in all_expressions
+    )
 
 
 def test_grafana_assets_are_immutable_and_use_safe_global_aggregation():

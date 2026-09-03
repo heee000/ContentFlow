@@ -13,8 +13,8 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "e3f4a5b6c7d8"
-MINIMUM_PUBLIC_TABLE_COUNT = 31
+HEAD_REVISION = "f4a5b6c7d8e9"
+MINIMUM_PUBLIC_TABLE_COUNT = 33
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
 LAYOUT_REVISION = "8b6c1f3a9d21"
@@ -41,6 +41,9 @@ STORAGE_OBJECT_ALLOCATION_TABLE = "storage_object_allocations"
 STORAGE_LEDGER_REVISION = "b0c1d2e3f4a5"
 JOB_MANUAL_REVIEW_TABLE = "job_manual_reviews"
 JOB_MANUAL_REVIEW_REVISION = "e3f4a5b6c7d8"
+PROVIDER_INVOCATION_TABLE = "provider_invocations"
+PROVIDER_INVOCATION_ATTEMPT_TABLE = "provider_invocation_attempts"
+PROVIDER_INVOCATION_REVISION = "f4a5b6c7d8e9"
 AUDIT_CHAIN_COLUMNS = {
     "chain_scope",
     "chain_sequence",
@@ -107,6 +110,8 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         WORKSPACE_STORAGE_USAGE_TABLE,
         STORAGE_OBJECT_ALLOCATION_TABLE,
         JOB_MANUAL_REVIEW_TABLE,
+        PROVIDER_INVOCATION_TABLE,
+        PROVIDER_INVOCATION_ATTEMPT_TABLE,
     }
     expected_tables = set(db.Base.metadata.tables)
     missing_tables = (expected_tables - incrementally_added) - tables
@@ -149,6 +154,8 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
     workspace_storage_usage_exists = WORKSPACE_STORAGE_USAGE_TABLE in tables
     storage_object_allocation_exists = STORAGE_OBJECT_ALLOCATION_TABLE in tables
     job_manual_review_exists = JOB_MANUAL_REVIEW_TABLE in tables
+    provider_invocation_exists = PROVIDER_INVOCATION_TABLE in tables
+    provider_invocation_attempt_exists = PROVIDER_INVOCATION_ATTEMPT_TABLE in tables
     audit_log_columns = {
         column["name"] for column in inspector.get_columns("audit_logs")
     }
@@ -248,7 +255,20 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             "continuing."
         )
 
-    if job_manual_review_exists:
+    if provider_invocation_exists != provider_invocation_attempt_exists:
+        raise RuntimeError(
+            "The provider invocation ledger tables are incomplete. Back up the "
+            "database and repair the schema before continuing."
+        )
+    if provider_invocation_exists and not job_manual_review_exists:
+        raise RuntimeError(
+            "The provider invocation ledger exists without the job manual review "
+            "migration. Back up the database and repair the schema before continuing."
+        )
+
+    if provider_invocation_exists:
+        revision = PROVIDER_INVOCATION_REVISION
+    elif job_manual_review_exists:
         revision = JOB_MANUAL_REVIEW_REVISION
     elif workspace_storage_usage_exists:
         revision = STORAGE_LEDGER_REVISION

@@ -9,8 +9,14 @@ from sqlalchemy import select
 
 from contentflow import db
 from contentflow.api import create_app
-from contentflow.entities import AuditLog, Job, JobManualReview
+from contentflow.entities import (
+    AuditLog,
+    Job,
+    JobManualReview,
+    ProviderInvocationAttempt,
+)
 from contentflow.job_queue import enqueue_job, request_job_manual_review
+from contentflow.provider_invocations import ProviderInvocationLedger
 from contentflow.settings import Settings
 
 
@@ -92,6 +98,21 @@ class JobManualReviewTest(unittest.TestCase):
                 idempotency_key=f"manual-review-{suffix}",
             )
             job.attempts = 2
+            session.commit()
+            ProviderInvocationLedger(db.engine).start(
+                workspace_id=self.workspace_id,
+                job_id=job.id,
+                entity_type="workflow_run",
+                entity_id=f"review-run-{suffix}",
+                provider_kind="text",
+                provider_name="openai-compatible",
+                model_name="test-model",
+                operation="text.plan",
+                ordinal=1,
+                request_sha256="a" * 64,
+                request_bytes=128,
+                idempotency_key_sent=True,
+            )
             request_job_manual_review(
                 session,
                 job,
@@ -115,6 +136,12 @@ class JobManualReviewTest(unittest.TestCase):
         )
         self.assertIsNone(item["manual_review"]["decision"])
         self.assertFalse(item["manual_review"]["provider_checked"])
+        self.assertEqual(
+            item["manual_review"]["context_json"][
+                "provider_attempts_marked_outcome_unknown"
+            ],
+            1,
+        )
         summary = self.client.get(
             "/api/v1/dashboard/summary",
             headers=self.editor_headers,
@@ -127,6 +154,20 @@ class JobManualReviewTest(unittest.TestCase):
             headers=self.editor_headers,
         )
         self.assertEqual(generic_retry.status_code, 409, generic_retry.text)
+        hidden_ledger = self.client.get(
+            f"/api/v1/jobs/{job_id}/provider-invocations",
+            headers=self.editor_headers,
+        )
+        self.assertEqual(hidden_ledger.status_code, 403, hidden_ledger.text)
+        ledger = self.client.get(
+            f"/api/v1/jobs/{job_id}/provider-invocations",
+            headers=self.owner_headers,
+        )
+        self.assertEqual(ledger.status_code, 200, ledger.text)
+        self.assertEqual(len(ledger.json()), 1)
+        self.assertEqual(ledger.json()[0]["status"], "outcome_unknown")
+        self.assertTrue(ledger.json()[0]["idempotency_key_sent"])
+        self.assertEqual(ledger.json()[0]["request_sha256"], "a" * 64)
         forbidden = self.client.post(
             f"/api/v1/jobs/{job_id}/manual-review",
             headers=self.editor_headers,
@@ -190,6 +231,9 @@ class JobManualReviewTest(unittest.TestCase):
             )
             self.assertEqual(len(reviews), 1)
             self.assertEqual(reviews[0].decision, "retry")
+            attempt = session.scalar(select(ProviderInvocationAttempt))
+            self.assertIsNotNone(attempt)
+            self.assertEqual(attempt.status, "outcome_unknown")
             actions = list(
                 session.scalars(
                     select(AuditLog.action).where(AuditLog.entity_id == job_id)

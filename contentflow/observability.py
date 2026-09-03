@@ -18,6 +18,8 @@ from .entities import (
     Job,
     JobManualReview,
     PromptEvalRun,
+    ProviderInvocation,
+    ProviderInvocationAttempt,
     PublishJob,
     StorageObjectAllocation,
     WorkerNode,
@@ -37,6 +39,13 @@ JOB_STATUSES = (
 )
 WORKFLOW_STATUSES = ("queued", "running", "awaiting_review", "failed", "error")
 PROMPT_EVAL_STATUSES = ("queued", "running", "passed", "failed", "error")
+PROVIDER_INVOCATION_STATUSES = (
+    "started",
+    "succeeded",
+    "outcome_unknown",
+    "late_succeeded",
+    "late_failed",
+)
 STORAGE_ALLOCATION_STATUSES = (
     "reserved",
     "active",
@@ -98,6 +107,45 @@ class DatabaseOperationalCollector:
                 session,
                 PromptEvalRun,
                 PROMPT_EVAL_STATUSES,
+            )
+            provider_invocation_counts = self._status_counts(
+                session,
+                ProviderInvocationAttempt,
+                PROVIDER_INVOCATION_STATUSES,
+            )
+            unresolved_provider_unknown_filter = (
+                ProviderInvocationAttempt.status == "outcome_unknown",
+                Job.status == "manual_review",
+            )
+            unresolved_provider_unknown = int(
+                session.scalar(
+                    select(func.count(ProviderInvocationAttempt.id))
+                    .join(
+                        ProviderInvocation,
+                        ProviderInvocation.id
+                        == ProviderInvocationAttempt.invocation_id,
+                    )
+                    .join(Job, Job.id == ProviderInvocation.job_id)
+                    .where(*unresolved_provider_unknown_filter)
+                )
+                or 0
+            )
+            oldest_provider_unknown_at = session.scalar(
+                select(func.min(ProviderInvocationAttempt.started_at))
+                .join(
+                    ProviderInvocation,
+                    ProviderInvocation.id == ProviderInvocationAttempt.invocation_id,
+                )
+                .join(Job, Job.id == ProviderInvocation.job_id)
+                .where(*unresolved_provider_unknown_filter)
+            )
+            oldest_provider_unknown_age = (
+                max(
+                    0.0,
+                    (now - _aware(oldest_provider_unknown_at)).total_seconds(),
+                )
+                if oldest_provider_unknown_at is not None
+                else 0.0
             )
             ready_filter = (
                 Job.status.in_(("queued", "retry")),
@@ -283,6 +331,25 @@ class DatabaseOperationalCollector:
         for item_status, count in prompt_eval_counts.items():
             eval_runs.add_metric([item_status], count)
         yield eval_runs
+
+        provider_invocations = GaugeMetricFamily(
+            "contentflow_provider_invocation_attempts",
+            "Provider invocation attempts by controlled ledger status.",
+            labels=["status"],
+        )
+        for item_status, count in provider_invocation_counts.items():
+            provider_invocations.add_metric([item_status], count)
+        yield provider_invocations
+        yield GaugeMetricFamily(
+            "contentflow_provider_invocation_unresolved_outcome_unknown",
+            "Outcome-unknown provider calls whose jobs still require review.",
+            value=unresolved_provider_unknown,
+        )
+        yield GaugeMetricFamily(
+            "contentflow_provider_invocation_outcome_unknown_oldest_age_seconds",
+            "Age of the oldest unresolved outcome-unknown provider call, or zero.",
+            value=oldest_provider_unknown_age,
+        )
 
         yield GaugeMetricFamily(
             "contentflow_publish_reconciliation_required",

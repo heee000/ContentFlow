@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Protocol
@@ -28,6 +29,51 @@ PLATFORM_LABELS = {
     "douyin": "抖音",
     "wechat": "公众号",
 }
+
+PROVIDER_REQUEST_ID_HEADERS = (
+    "x-request-id",
+    "x-requestid",
+    "request-id",
+    "openai-request-id",
+    "x-amzn-requestid",
+)
+PROVIDER_REQUEST_KEY = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _bounded_provider_identifier(value: Any, limit: int = 255) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > limit
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+    ):
+        return None
+    return normalized
+
+
+def _provider_request_metadata(
+    *,
+    body: Any = None,
+    headers: Any = None,
+) -> dict[str, str]:
+    if isinstance(body, dict):
+        body_id = _bounded_provider_identifier(body.get("id"))
+        if body_id:
+            return {
+                "provider_request_id": body_id,
+                "provider_request_id_source": "body.id",
+            }
+    if headers is not None and callable(getattr(headers, "get", None)):
+        for header in PROVIDER_REQUEST_ID_HEADERS:
+            header_id = _bounded_provider_identifier(headers.get(header))
+            if header_id:
+                return {
+                    "provider_request_id": header_id,
+                    "provider_request_id_source": f"header.{header}"[:40],
+                }
+    return {}
 
 
 class MockProvider:
@@ -287,6 +333,13 @@ class OpenAICompatibleProvider:
         self.provider_name = provider_name
         self.timeout_seconds = timeout_seconds
         self.last_call_metadata: dict[str, Any] = {"usage_source": "not_reported"}
+        self._invocation_key: str | None = None
+
+    def set_invocation_context(self, request_key: str) -> bool:
+        if not PROVIDER_REQUEST_KEY.fullmatch(request_key):
+            raise ValueError("Provider invocation request key is invalid")
+        self._invocation_key = request_key
+        return True
 
     @classmethod
     def from_environment(cls) -> "OpenAICompatibleProvider":
@@ -311,7 +364,12 @@ class OpenAICompatibleProvider:
         *,
         system_prompt: str | None = None,
     ) -> dict[str, Any]:
-        self.last_call_metadata = {"usage_source": "not_reported"}
+        invocation_key = self._invocation_key
+        self._invocation_key = None
+        self.last_call_metadata = {
+            "usage_source": "not_reported",
+            "idempotency_key_sent": invocation_key is not None,
+        }
         if stage not in PROMPTS:
             raise ValueError(f"没有对应提示词模板: {stage}")
         request_body = {
@@ -330,13 +388,16 @@ class OpenAICompatibleProvider:
                 "review": 0.15,
             }.get(stage, 0.3),
         }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if invocation_key is not None:
+            headers["Idempotency-Key"] = invocation_key
         request = urllib.request.Request(
             self.endpoint,
             data=json.dumps(request_body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
         try:
@@ -344,6 +405,12 @@ class OpenAICompatibleProvider:
                 request, timeout=self.timeout_seconds
             ) as response:
                 raw = json.loads(response.read().decode("utf-8"))
+                self.last_call_metadata.update(
+                    _provider_request_metadata(
+                        body=raw,
+                        headers=getattr(response, "headers", None),
+                    )
+                )
             usage = raw.get("usage") if isinstance(raw, dict) else None
             if isinstance(usage, dict):
                 input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
@@ -355,12 +422,14 @@ class OpenAICompatibleProvider:
                     isinstance(value, int) and not isinstance(value, bool)
                     for value in (input_tokens, output_tokens, total_tokens)
                 ):
-                    self.last_call_metadata = {
-                        "usage_source": "provider_reported",
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "total_tokens": total_tokens,
-                    }
+                    self.last_call_metadata.update(
+                        {
+                            "usage_source": "provider_reported",
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "total_tokens": total_tokens,
+                        }
+                    )
             if isinstance(raw, dict) and isinstance(raw.get("model"), str):
                 self.last_call_metadata["response_model"] = raw["model"]
             content = raw["choices"][0]["message"]["content"]
@@ -368,8 +437,15 @@ class OpenAICompatibleProvider:
             if not isinstance(parsed, dict):
                 raise ValueError("模型返回的 JSON 顶层不是对象")
             return parsed
-        except (urllib.error.URLError, KeyError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"模型调用或 JSON 解析失败: {error}") from error
+        except urllib.error.HTTPError as error:
+            self.last_call_metadata.update(
+                _provider_request_metadata(headers=getattr(error, "headers", None))
+            )
+            raise RuntimeError(f"模型调用失败 (HTTP {error.code})") from error
+        except urllib.error.URLError as error:
+            raise RuntimeError("模型调用失败 (network_error)") from error
+        except (KeyError, json.JSONDecodeError) as error:
+            raise RuntimeError("模型响应结构或 JSON 解析失败") from error
 
 
 def build_provider(name: str) -> Provider:

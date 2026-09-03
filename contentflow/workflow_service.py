@@ -20,6 +20,7 @@ from .knowledge_service import search_workspace_knowledge
 from .models import CampaignBrief
 from .prompt_eval import require_current_passed_eval
 from .prompt_governance import resolve_active_prompt_set
+from .provider_invocations import LedgeredEmbeddingProvider, ProviderInvocationLedger
 from .settings import Settings
 from .style_skills import resolve_style_skill
 from .text_generation import build_text_provider
@@ -134,6 +135,16 @@ def execute_workflow_run(
         ]
     )
     embedder = build_embedding_provider(settings)
+    if settings.embedding_provider == "openai-compatible":
+        embedder = LedgeredEmbeddingProvider(
+            embedder,
+            ledger=ProviderInvocationLedger(session.get_bind()),
+            workspace_id=run.workspace_id,
+            entity_type="workflow_run",
+            entity_id=run.id,
+            operation="embedding.knowledge_search",
+            provider_name=settings.embedding_provider,
+        )
     retrieved = search_workspace_knowledge(
         session,
         workspace_id=run.workspace_id,
@@ -148,6 +159,12 @@ def execute_workflow_run(
         embedding_provider=settings.embedding_provider,
         embedding_model=embedder.model_name,
         prompt_set=prompt_set,
+        ledger_session=(
+            session if getattr(provider, "provider_name", "") == "openai-compatible" else None
+        ),
+        workspace_id=run.workspace_id,
+        entity_type="workflow_run",
+        entity_id=run.id,
     )
     run.provider = provenance.provider_name
     session.commit()
@@ -170,7 +187,7 @@ def execute_workflow_run(
         platform for platform in brief.platforms if platform in requested_platforms
     ]
     platform_count = len(platforms_to_generate)
-    result_items = []
+    generated_platforms = []
     for platform_index, platform in enumerate(platforms_to_generate, start=1):
         agent_result = run_content_agent(
             provenance=provenance,
@@ -185,6 +202,10 @@ def execute_workflow_run(
                 f"{stage}__{index}_of_{platform_count}"
             ),
         )
+        generated_platforms.append((platform, agent_result))
+
+    result_items = []
+    for platform, agent_result in generated_platforms:
         draft = agent_result.draft
         rule_review = agent_result.rule_review
         model_review = agent_result.model_review

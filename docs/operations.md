@@ -293,21 +293,38 @@ Worker 不会把所有失败或过期租约机械地视为可安全重放。当�
 | Provider 幂等 | `asset.generate` | 只在 Media Contract 已验证稳定 `Idempotency-Key` 时自动恢复 |
 | 领域状态保护 | `publish.dispatch`、`publish.reconcile`、`storage.delete` | 由发布状态机、对账或对象账本阻止盲目重复写入 |
 | 配置决定 | `knowledge.index` | `hash`/`bge-m3-local` 可恢复；`openai-compatible` 必须人工核对 |
-| 必须人工核对 | `workflow.execute`、`prompt_eval.execute` | 当前没有可证明的 Provider 请求幂等；异常或租约过期均不自动重跑 |
+| 必须人工核对 | `workflow.execute`、`prompt_eval.execute` | OpenAI-compatible 适配器会发送稳定请求键并预写调用账本，但目标供应商是否兑现幂等尚未通过 conformance 证明；异常或租约过期均不自动重跑 |
 
 需要人工核对的 Job 会进入独立 `manual_review` 状态并创建 `job_manual_reviews` 历史记录，不会进入自动退避或被过期租约重新领取。普通 `POST /jobs/{id}/retry` 同时拒绝当前及旧版 failed 形式的高风险 Provider Job，不能绕过核对流程。
 
 处置步骤：
 
 1. 由 reviewer 或 admin 打开“任务队列 → 核对处理”，按任务时间窗口进入当前模型/Embedding 供应商控制台。
-2. 同时核对请求、费用和结果；不要仅凭 ContentFlow 没有保存结果就认定供应商没有执行。队列 idempotency key 只去重 Job 记录，不等于外部请求 exactly-once。
+2. 先查看页面中的“ContentFlow 已保存的调用证据”，再同时核对供应商控制台中的请求、费用和结果；不要仅凭 ContentFlow 没有保存结果就认定供应商没有执行。队列 idempotency key 只去重 Job 记录，调用账本中的 `Idempotency-Key` 也只证明请求头已发送，二者都不等于外部请求 exactly-once。
 3. 勾选已经完成供应商侧核对，并写入至少 8 个字符的核对记录，说明检查范围、结果和决策依据。
 4. 只有确认供应商未处理时选择“允许重试”；已有结果或仍无法确认时选择“放弃任务”，再按领域记录人工对账。API 等价入口为 `POST /api/v1/jobs/{job_id}/manual-review`，请求体必须包含 `decision=retry|abandon`、`provider_checked=true` 和 `note`。
 5. 每次请求人工核对与最终处置均进入防篡改审计链；核对表保留每轮原因码、结构化检查步骤、确认位、处置人、时间、结论和备注。数据库部分唯一索引保证同一 Job 最多只有一个未关闭核对。
 
-Prometheus 暴露 `contentflow_queue_jobs{status="manual_review"}` 和 `contentflow_job_manual_review_oldest_age_seconds`。默认规则在最老未处理核对超过 1 小时并持续 15 分钟时触发 `ContentFlowJobManualReviewOverdue`；这是一条全局低基数告警，不包含工作区或任务 ID，值班人员应回到受权限保护的任务队列定位。
+Prometheus 暴露 `contentflow_queue_jobs{status="manual_review"}`、`contentflow_job_manual_review_oldest_age_seconds` 和 Provider 调用账本指标。默认规则在最老未处理核对超过 1 小时并持续 15 分钟时触发 `ContentFlowJobManualReviewOverdue`；这是一组全局低基数告警，不包含工作区或任务 ID，值班人员应回到受权限保护的任务队列定位。
 
-当前仍没有 Provider 请求/费用账本、供应商请求 ID 自动查询、核对证据附件、负责人认领或双人确认。`manual_review` 关闭的是机械误重试和无留痕处置，不是 Provider exactly-once；企业生产仍需把这些缺口纳入外部工单和审批控制。
+当前已有请求/响应摘要和供应商请求 ID 的基础账本，但仍没有价格表与金额核算、供应商请求 ID 自动查询、核对证据附件、负责人认领或双人确认。`manual_review` 关闭的是机械误重试和无留痕处置，不是 Provider exactly-once；企业生产仍需把这些缺口纳入外部工单和审批控制。
+
+### Provider 调用账本与人工核对
+
+OpenAI-compatible 文本与远程 Embedding 调用会写入两层账本：`provider_invocations` 表示由工作区、Job、领域实体、操作序号、Provider/模型和请求摘要确定的逻辑请求，`provider_invocation_attempts` 表示每次真实尝试。Worker 使用进程内上下文把调用绑定到当前已领取 Job；工作流、Prompt Eval 和知识索引在任何网络调用前先通过独立事务提交 `started` 尝试与审计记录。若账本不能提交，调用失败关闭且不会发出 Provider 请求。
+
+账本只保存稳定请求键、请求/响应 SHA-256 与字节数、受控状态、适配器报告的供应商请求 ID/来源、响应模型、Token 用量、异常类型和时间。它不保存提示词、正文、Embedding 输入、模型原始响应、API Key、Authorization、端点或异常正文。`GET /api/v1/jobs/{job_id}/provider-invocations` 只允许 reviewer/admin 访问并使用有界游标分页；任务页最多自动取 1000 条并明确提示截断。
+
+状态解释：
+
+- `started`：调用意图已经持久化；不证明请求已经到达供应商。Worker 异常或租约过期进入人工核对时，仍为 `started` 的尝试会转为 `outcome_unknown`。
+- `succeeded`：当前进程收到并解析了可用响应，响应内容本身只以摘要留存。
+- `outcome_unknown`：本地无法证明供应商是否处理，必须到供应商控制台核对。它作为历史证据保留，即使人工决定重试或放弃也不会被伪装成成功/失败。
+- `late_succeeded`：人工核对已把尝试标记为不确定后，原调用又返回了可用响应；领域 Job 仍保持人工核对，不能因迟到回执自动提交旧执行者结果。
+
+OpenAI-compatible 适配器会把 64 位稳定请求键作为 `Idempotency-Key` 发出，但不同供应商可能忽略、拒绝或只在有限窗口内支持该头。只有目标供应商的正式契约、受控 conformance、重复请求结果查询和计费核对共同通过后，才可以考虑把某类 Job 从 `manual_review` 升级为自动恢复。
+
+Prometheus 的 `contentflow_provider_invocation_attempts{status=...}` 是累计历史状态快照；`contentflow_provider_invocation_unresolved_outcome_unknown` 与最老时长只统计 Job 仍处于 `manual_review` 的未解决尝试。`ContentFlowProviderInvocationOutcomeUnknown` 告警要求持续 5 分钟。告警恢复只表示核对队列已经处置，不表示供应商侧费用或结果已经自动对平。
 
 ## 发布安全重试
 

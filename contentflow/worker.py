@@ -71,6 +71,11 @@ from .media_providers import (
 )
 from .object_storage import build_object_storage, is_managed_storage_uri
 from .prompt_eval import execute_prompt_eval_run
+from .provider_invocations import (
+    LedgeredEmbeddingProvider,
+    ProviderInvocationLedger,
+    provider_job_context,
+)
 from .script_publishing import build_script_package, store_script_package
 from .settings import Settings, get_settings
 from .storage_ledger import (
@@ -467,10 +472,22 @@ def handle_knowledge_index(
     if document is None:
         raise ValueError("知识文档不存在")
     document.status = "indexing"
+    session.commit()
+    embedder = build_embedding_provider(settings)
+    if settings.embedding_provider == "openai-compatible":
+        embedder = LedgeredEmbeddingProvider(
+            embedder,
+            ledger=ProviderInvocationLedger(session.get_bind()),
+            workspace_id=document.workspace_id,
+            entity_type="knowledge_document",
+            entity_id=document.id,
+            operation="embedding.knowledge_index",
+            provider_name=settings.embedding_provider,
+        )
     count = index_document(
         session,
         document,
-        embedder=build_embedding_provider(settings),
+        embedder=embedder,
         storage=build_object_storage(settings),
     )
     record_audit(
@@ -1804,11 +1821,12 @@ class Worker:
                     attempt=attempt,
                     lease_seconds=self.settings.worker_lease_seconds,
                 ) as heartbeat:
-                    result = handler(
-                        session,
-                        dict(job.payload_json),
-                        self.settings,
-                    )
+                    with provider_job_context(job):
+                        result = handler(
+                            session,
+                            dict(job.payload_json),
+                            self.settings,
+                        )
                 if heartbeat.lost:
                     raise JobLeaseLost(
                         f"Job lease heartbeat was lost: id={job_id} "

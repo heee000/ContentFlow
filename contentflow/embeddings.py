@@ -8,6 +8,7 @@ from typing import Protocol
 
 import httpx
 
+from .providers import PROVIDER_REQUEST_KEY, _provider_request_metadata
 from .rag import HashEmbedding
 from .settings import Settings
 
@@ -161,6 +162,14 @@ class OpenAICompatibleEmbeddingProvider:
         self.model_name = model
         self.dimensions = dimensions
         self.client = client or httpx.Client(timeout=60)
+        self.last_call_metadata: dict[str, object] = {"usage_source": "not_reported"}
+        self._invocation_key: str | None = None
+
+    def set_invocation_context(self, request_key: str) -> bool:
+        if not PROVIDER_REQUEST_KEY.fullmatch(request_key):
+            raise ValueError("Provider invocation request key is invalid")
+        self._invocation_key = request_key
+        return True
 
     def encode(self, text: str) -> list[float]:
         return self.encode_many([text])[0]
@@ -168,26 +177,66 @@ class OpenAICompatibleEmbeddingProvider:
     def encode_many(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        response = self.client.post(
-            self.endpoint,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.model_name,
-                "input": texts,
-                "dimensions": self.dimensions,
-                "encoding_format": "float",
-            },
-        )
-        response.raise_for_status()
-        body = response.json()
+        invocation_key = self._invocation_key
+        self._invocation_key = None
+        self.last_call_metadata = {
+            "usage_source": "not_reported",
+            "idempotency_key_sent": invocation_key is not None,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if invocation_key is not None:
+            headers["Idempotency-Key"] = invocation_key
+        try:
+            response = self.client.post(
+                self.endpoint,
+                headers=headers,
+                json={
+                    "model": self.model_name,
+                    "input": texts,
+                    "dimensions": self.dimensions,
+                    "encoding_format": "float",
+                },
+            )
+            self.last_call_metadata.update(
+                _provider_request_metadata(headers=response.headers)
+            )
+            response.raise_for_status()
+            body = response.json()
+        except httpx.HTTPStatusError as error:
+            raise RuntimeError(
+                f"Embedding 调用失败 (HTTP {error.response.status_code})"
+            ) from error
+        except httpx.RequestError as error:
+            raise RuntimeError("Embedding 调用失败 (network_error)") from error
+        except ValueError as error:
+            raise RuntimeError("Embedding 响应不是有效 JSON") from error
+        self.last_call_metadata.update(_provider_request_metadata(body=body))
+        if isinstance(body, dict) and isinstance(body.get("model"), str):
+            self.last_call_metadata["response_model"] = body["model"][:160]
+        usage = body.get("usage") if isinstance(body, dict) else None
+        if isinstance(usage, dict):
+            input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+            total_tokens = usage.get("total_tokens")
+            if any(
+                isinstance(value, int) and not isinstance(value, bool)
+                for value in (input_tokens, total_tokens)
+            ):
+                self.last_call_metadata.update(
+                    {
+                        "usage_source": "provider_reported",
+                        "input_tokens": input_tokens,
+                        "output_tokens": None,
+                        "total_tokens": total_tokens,
+                    }
+                )
         try:
             items = sorted(body["data"], key=lambda item: item["index"])
             vectors = [item["embedding"] for item in items]
         except (KeyError, IndexError, TypeError, ValueError) as error:
-            raise RuntimeError(f"Embedding 响应结构错误: {body}") from error
+            raise RuntimeError("Embedding 响应结构错误") from error
         if len(vectors) != len(texts):
             raise RuntimeError(
                 f"Embedding 数量不匹配: 预期 {len(texts)}，实际 {len(vectors)}"
@@ -198,7 +247,10 @@ class OpenAICompatibleEmbeddingProvider:
                 raise RuntimeError(
                     f"Embedding 维度不匹配: 预期 {self.dimensions}，实际 {len(vector)}"
                 )
-            normalized.append([float(value) for value in vector])
+            normalized_vector = [float(value) for value in vector]
+            if not all(math.isfinite(value) for value in normalized_vector):
+                raise RuntimeError("Embedding 响应包含非有限数值")
+            normalized.append(normalized_vector)
         return normalized
 
 

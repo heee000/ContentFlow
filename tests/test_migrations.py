@@ -101,6 +101,56 @@ class MigrationTest(unittest.TestCase):
                 self.assertIn("audit_logs", tables)
                 self.assertIn("audit_chain_heads", tables)
                 self.assertIn("job_manual_reviews", tables)
+                self.assertIn("provider_invocations", tables)
+                self.assertIn("provider_invocation_attempts", tables)
+                provider_invocation_checks = {
+                    item["name"]
+                    for item in inspect(engine).get_check_constraints(
+                        "provider_invocations"
+                    )
+                }
+                self.assertIn(
+                    "ck_provider_invocations_provider_kind",
+                    provider_invocation_checks,
+                )
+                self.assertIn(
+                    "ck_provider_invocations_request_sha256_length",
+                    provider_invocation_checks,
+                )
+                provider_attempt_checks = {
+                    item["name"]
+                    for item in inspect(engine).get_check_constraints(
+                        "provider_invocation_attempts"
+                    )
+                }
+                self.assertIn(
+                    "ck_provider_invocation_attempts_completion_consistent",
+                    provider_attempt_checks,
+                )
+                provider_invocation_indexes = {
+                    item["name"]: item
+                    for item in inspect(engine).get_indexes(
+                        "provider_invocations"
+                    )
+                }
+                self.assertEqual(
+                    provider_invocation_indexes[
+                        "ix_provider_invocations_job_created_page"
+                    ]["column_names"],
+                    ["job_id", "created_at", "id"],
+                )
+                provider_attempt_indexes = {
+                    item["name"]: item
+                    for item in inspect(engine).get_indexes(
+                        "provider_invocation_attempts"
+                    )
+                }
+                self.assertEqual(
+                    provider_attempt_indexes[
+                        "ix_provider_invocation_attempts_status_started"
+                    ]["column_names"],
+                    ["status", "started_at"],
+                )
                 manual_review_checks = {
                     item["name"]
                     for item in inspect(engine).get_check_constraints(
@@ -1082,6 +1132,53 @@ class MigrationTest(unittest.TestCase):
                 engine.dispose()
                 self.assertNotIn("workspace_storage_usage", tables)
                 self.assertNotIn("storage_object_allocations", tables)
+            finally:
+                if previous is None:
+                    os.environ.pop("CONTENTFLOW_DATABASE_URL", None)
+                else:
+                    os.environ["CONTENTFLOW_DATABASE_URL"] = previous
+
+    def test_unversioned_provider_ledger_is_complete_or_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "provider-ledger-adoption.db"
+            url = f"sqlite:///{database.as_posix()}"
+            previous = os.environ.get("CONTENTFLOW_DATABASE_URL")
+            os.environ["CONTENTFLOW_DATABASE_URL"] = url
+            try:
+                config = Config("alembic.ini")
+                command.upgrade(config, "e3f4a5b6c7d8")
+                engine = create_engine(url)
+                with engine.begin() as connection:
+                    connection.execute(text("DELETE FROM alembic_version"))
+                engine.dispose()
+
+                upgrade_database(
+                    Settings(
+                        database_url=url,
+                        secret_key="migration-test-secret",
+                        local_storage_dir=Path(temp_dir) / "storage",
+                    )
+                )
+                engine = create_engine(url)
+                tables = set(inspect(engine).get_table_names())
+                self.assertIn("provider_invocations", tables)
+                self.assertIn("provider_invocation_attempts", tables)
+                with engine.begin() as connection:
+                    connection.execute(text("DELETE FROM alembic_version"))
+                    connection.execute(text("DROP TABLE provider_invocation_attempts"))
+                engine.dispose()
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "provider invocation ledger tables are incomplete",
+                ):
+                    upgrade_database(
+                        Settings(
+                            database_url=url,
+                            secret_key="migration-test-secret",
+                            local_storage_dir=Path(temp_dir) / "storage",
+                        )
+                    )
             finally:
                 if previous is None:
                     os.environ.pop("CONTENTFLOW_DATABASE_URL", None)

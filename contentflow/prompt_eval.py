@@ -324,13 +324,19 @@ def execute_prompt_eval_run(
 
     run.status = "running"
     run.started_at = datetime.now(timezone.utc)
-    session.flush()
+    session.commit()
     provider = build_text_provider(settings, run.requested_provider)
     recorder = AIProvenanceRecorder(
         provider,
         embedding_provider="not_used",
         embedding_model="not_used",
         prompt_set=prompt_set,
+        ledger_session=(
+            session if getattr(provider, "provider_name", "") == "openai-compatible" else None
+        ),
+        workspace_id=run.workspace_id,
+        entity_type="prompt_eval_run",
+        entity_id=run.id,
     )
     results = []
     for case in cases:

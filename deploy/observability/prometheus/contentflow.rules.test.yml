@@ -35,6 +35,8 @@ tests:
         values: 1x20
       - series: contentflow_job_manual_review_oldest_age_seconds
         values: 7200x20
+      - series: contentflow_provider_invocation_unresolved_outcome_unknown
+        values: 1x20
       - series: contentflow_storage_allocations{status="missing"}
         values: 1x20
       - series: contentflow_storage_allocations{status="integrity_error"}
@@ -130,6 +132,16 @@ tests:
               summary: ContentFlow job manual review exceeds one hour
               description: At least one provider-side-effect review has remained unresolved for more than one hour.
               runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#job-自动恢复与人工核对
+      - eval_time: 12m
+        alertname: ContentFlowProviderInvocationOutcomeUnknown
+        exp_alerts:
+          - exp_labels:
+              service: contentflow
+              severity: warning
+            exp_annotations:
+              summary: ContentFlow has provider calls with unknown outcomes
+              description: At least one text or embedding provider call requires console reconciliation.
+              runbook_url: https://github.com/heee000/ContentFlow/blob/main/docs/operations.md#provider-调用账本与人工核对
       - eval_time: 12m
         alertname: ContentFlowStorageIntegrityAnomaly
         exp_alerts:

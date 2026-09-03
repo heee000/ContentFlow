@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from .audit import record_audit
 from .entities import Job, JobManualReview
+from .provider_invocations import mark_job_provider_attempts_outcome_unknown
 
 
 class JobLeaseLost(RuntimeError):
@@ -118,6 +119,11 @@ def request_job_manual_review(
     job.last_error = message
     job.locked_by = None
     job.locked_at = None
+    unknown_provider_attempts = mark_job_provider_attempts_outcome_unknown(
+        session,
+        job_id=job.id,
+        reason_code=normalized_reason,
+    )
 
     review = session.scalar(
         select(JobManualReview).where(
@@ -134,6 +140,7 @@ def request_job_manual_review(
                 "source": source,
                 "job_type": job.job_type,
                 "attempt": job.attempts,
+                "provider_attempts_marked_outcome_unknown": unknown_provider_attempts,
                 "possible_side_effect": (
                     "供应商可能已经接收请求或产生计费，但 ContentFlow 没有保存最终结果。"
                 ),
@@ -159,8 +166,16 @@ def request_job_manual_review(
                 "reason_code": review.reason_code,
                 "source": source,
                 "attempt": job.attempts,
+                "provider_attempts_marked_outcome_unknown": unknown_provider_attempts,
             },
         )
+    elif unknown_provider_attempts:
+        context = dict(review.context_json or {})
+        context["provider_attempts_marked_outcome_unknown"] = (
+            int(context.get("provider_attempts_marked_outcome_unknown") or 0)
+            + unknown_provider_attempts
+        )
+        review.context_json = context
     session.flush()
     return review
 

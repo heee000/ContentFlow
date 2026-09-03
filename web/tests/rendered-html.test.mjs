@@ -82,6 +82,9 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /待人工核对/);
   assert.match(app, /我已在供应商控制台核对请求、计费和结果/);
   assert.match(app, /jobs\/\$\{reviewJob\.id\}\/manual-review/);
+  assert.match(app, /jobs\/\$\{job\.id\}\/provider-invocations/);
+  assert.match(app, /ContentFlow 已保存的调用证据/);
+  assert.match(app, /不代表供应商确认支持幂等/);
   assert.match(app, /团队与审计/);
   assert.match(app, /切换工作区/);
   assert.match(app, /编辑 Brief/);

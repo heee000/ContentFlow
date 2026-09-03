@@ -591,6 +591,41 @@ tbody tr:last-child td { border-bottom: 0; }
 .manual-review-warning { padding: 16px; border-left: 4px solid var(--danger); background: var(--danger-soft); }
 .manual-review-warning p { margin: 8px 0; color: #750e13; }
 .manual-review-warning code { font-size: 11px; overflow-wrap: anywhere; }
+.provider-ledger {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+.provider-ledger-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.provider-ledger-heading p,
+.provider-ledger-empty,
+.provider-ledger-note { margin: 4px 0 0; color: var(--ink-muted); font-size: 12px; line-height: 1.6; }
+.provider-ledger-list { display: grid; gap: 10px; }
+.provider-ledger-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 16px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.provider-ledger-row > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.provider-ledger-row > div:first-child span { color: var(--ink-muted); font-size: 12px; overflow-wrap: anywhere; }
+.provider-ledger-row dl {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.provider-ledger-row dl div { display: grid; gap: 2px; min-width: 0; }
+.provider-ledger-row dt { color: var(--ink-muted); font-size: 11px; }
+.provider-ledger-row dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.provider-ledger-note { grid-column: 1 / -1; }
 .manual-review-confirmation {
   display: grid !important;
   grid-template-columns: auto 1fr;
@@ -1206,6 +1241,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .campaign-row { grid-template-columns: 40px 1fr; align-items: start; }
   .campaign-actions { grid-column: 2; justify-self: start; }
   .review-queue { grid-template-columns: 1fr; }
+  .provider-ledger-row dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .split-actions { align-items: stretch; flex-direction: column; }
   .split-actions > div { display: grid; grid-template-columns: 1fr 1fr; }
   .table-wrap { overflow: visible; }
@@ -1227,4 +1263,5 @@ tbody tr:last-child td { border-bottom: 0; }
   .campaign-row { grid-template-columns: 1fr; }
   .campaign-index { border-right: 0; border-bottom: 1px solid var(--border); }
   .campaign-actions { grid-column: 1; width: 100%; }
+  .provider-ledger-row dl { grid-template-columns: 1fr; }
 }

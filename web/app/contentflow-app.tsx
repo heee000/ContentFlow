@@ -269,6 +269,33 @@ type QueueJob = {
   };
 };
 
+type ProviderInvocationAttempt = {
+  id: string;
+  invocation_id: string;
+  request_key: string;
+  provider_kind: "text" | "embedding";
+  provider_name: string;
+  model_name: string;
+  operation: string;
+  request_sha256: string;
+  request_bytes: number;
+  attempt_number: number;
+  status: "started" | "succeeded" | "outcome_unknown" | "late_succeeded" | "late_failed";
+  idempotency_key_sent: boolean;
+  provider_request_id: string | null;
+  provider_request_id_source: string | null;
+  response_sha256: string | null;
+  response_bytes: number | null;
+  response_model: string | null;
+  usage_source: "not_reported" | "provider_reported";
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  error_type: string | null;
+  started_at: string;
+  completed_at: string | null;
+};
+
 type DashboardSummary = {
   campaigns: number;
   runs_active: number;
@@ -719,6 +746,9 @@ const STATUS: Record<string, string> = {
   error: "执行错误",
   failed: "失败",
   manual_review: "待人工核对",
+  outcome_unknown: "结果待核对",
+  late_succeeded: "迟到成功回执",
+  late_failed: "迟到失败回执",
   generating: "生成中",
   indexed: "已索引",
   indexing: "索引中",
@@ -5294,6 +5324,10 @@ function JobsView({
   const [providerChecked, setProviderChecked] = useState(false);
   const [reviewNote, setReviewNote] = useState("");
   const [reviewBusy, setReviewBusy] = useState<"retry" | "abandon" | "">("");
+  const [providerInvocations, setProviderInvocations] = useState<ProviderInvocationAttempt[]>([]);
+  const [providerInvocationsLoading, setProviderInvocationsLoading] = useState(false);
+  const [providerInvocationsError, setProviderInvocationsError] = useState("");
+  const [providerInvocationsTruncated, setProviderInvocationsTruncated] = useState(false);
   const canRetry = roleAtLeast(role, "editor");
   const canReview = roleAtLeast(role, "reviewer");
   const reviewJob = jobs.find((job) => job.id === reviewJobId && job.status === "manual_review");
@@ -5309,11 +5343,27 @@ function JobsView({
     }
   }
 
-  function openReview(job: QueueJob) {
+  async function openReview(job: QueueJob) {
     setReviewJobId(job.id);
     setProviderChecked(false);
     setReviewNote("");
     setError("");
+    setProviderInvocations([]);
+    setProviderInvocationsError("");
+    setProviderInvocationsTruncated(false);
+    setProviderInvocationsLoading(true);
+    try {
+      const result = await apiAllPages<ProviderInvocationAttempt>(
+        `/jobs/${job.id}/provider-invocations`,
+        { pageLimit: 100, maxPages: 10 },
+      );
+      setProviderInvocations(result.items);
+      setProviderInvocationsTruncated(result.truncated);
+    } catch (caught) {
+      setProviderInvocationsError(messageOf(caught));
+    } finally {
+      setProviderInvocationsLoading(false);
+    }
   }
 
   async function resolveReview(decision: "retry" | "abandon") {
@@ -5368,6 +5418,46 @@ function JobsView({
               <p>{reviewJob.manual_review?.context_json.possible_side_effect || "供应商可能已接收或计费，但系统没有保存最终结果。"}</p>
               <code>{reviewJob.manual_review?.reason_code || "provider_outcome_unknown"}</code>
             </div>
+            <div className="provider-ledger" aria-live="polite">
+              <div className="provider-ledger-heading">
+                <div>
+                  <strong>ContentFlow 已保存的调用证据</strong>
+                  <p>这里只保存请求/响应摘要、供应商请求号和用量，不保存提示词、正文或密钥。</p>
+                </div>
+                {providerInvocationsLoading ? <span className="button-spinner" aria-hidden="true" /> : null}
+              </div>
+              {providerInvocationsError ? (
+                <p className="inline-error">调用证据读取失败：{providerInvocationsError}</p>
+              ) : providerInvocations.length ? (
+                <div className="provider-ledger-list">
+                  {providerInvocationsTruncated ? (
+                    <p className="pagination-warning">仅显示最近 1000 条调用证据，请使用 API 分页继续取证。</p>
+                  ) : null}
+                  {providerInvocations.map((attempt) => (
+                    <article className="provider-ledger-row" key={attempt.id}>
+                      <div>
+                        <strong>{attempt.operation}</strong>
+                        <span>{attempt.provider_name} · {attempt.model_name} · 第 {attempt.attempt_number} 次</span>
+                      </div>
+                      <StatusBadge value={attempt.status} />
+                      <dl>
+                        <div><dt>请求时间</dt><dd>{formatDateTime(attempt.started_at)}</dd></div>
+                        <div><dt>供应商请求号</dt><dd><code>{attempt.provider_request_id || "未返回"}</code></dd></div>
+                        <div><dt>请求摘要</dt><dd><code>{attempt.request_sha256.slice(0, 16)}…</code></dd></div>
+                        <div><dt>Token</dt><dd>{attempt.total_tokens ?? "未报告"}</dd></div>
+                      </dl>
+                      <p className="provider-ledger-note">
+                        {attempt.idempotency_key_sent
+                          ? "已发送 Idempotency-Key；这只证明请求头已发送，不代表供应商确认支持幂等。"
+                          : "供应商适配器未发送 Idempotency-Key，必须以供应商控制台记录为准。"}
+                      </p>
+                    </article>
+                  ))}
+                </div>
+              ) : providerInvocationsLoading ? null : (
+                <p className="provider-ledger-empty">没有可用调用证据。旧任务或账本提交前中断的任务仍需按下方步骤到供应商控制台核对。</p>
+              )}
+            </div>
             <ol>
               {(reviewJob.manual_review?.context_json.required_checks || [
                 "打开当前供应商控制台，查看该时间窗口内的调用记录。",
@@ -5413,7 +5503,19 @@ function JobsView({
                   {reviewBusy === "abandon" ? <span className="button-spinner" aria-hidden="true" /> : null}
                   已有或无法确认，放弃任务
                 </button>
-                <button className="button button-ghost" type="button" disabled={Boolean(reviewBusy)} onClick={() => setReviewJobId("")}>暂不处理</button>
+                <button
+                  className="button button-ghost"
+                  type="button"
+                  disabled={Boolean(reviewBusy)}
+                  onClick={() => {
+                    setReviewJobId("");
+                    setProviderInvocations([]);
+                    setProviderInvocationsError("");
+                    setProviderInvocationsTruncated(false);
+                  }}
+                >
+                  暂不处理
+                </button>
               </div>
             </div>
           </div>
@@ -5431,7 +5533,7 @@ function JobsView({
             job.last_error || "—",
             job.status === "manual_review" ? (
               canReview ? (
-                <button className="table-link" key="review" onClick={() => openReview(job)}>核对处理</button>
+                <button className="table-link" key="review" onClick={() => void openReview(job)}>核对处理</button>
               ) : <span key="review-required">需审核者处理</span>
             ) : canRetry && job.status === "failed" ? (
               job.job_type === "publish.dispatch" ? (

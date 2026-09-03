@@ -112,6 +112,7 @@ class AIProvenanceTest(unittest.TestCase):
         response = MagicMock()
         response.read.return_value = json.dumps(
             {
+                "id": "provider-request-123",
                 "model": "provider-model-revision",
                 "choices": [{"message": {"content": json.dumps({"passed": True})}}],
                 "usage": {
@@ -128,6 +129,7 @@ class AIProvenanceTest(unittest.TestCase):
             model="configured-model",
             provider_name="provider-proxy",
         )
+        provider.set_invocation_context("a" * 64)
 
         result = provider.complete_json(
             "review",
@@ -144,10 +146,14 @@ class AIProvenanceTest(unittest.TestCase):
         )
         self.assertEqual(provider.provider_name, "provider-proxy")
         self.assertEqual(provider.model_name, "configured-model")
+        self.assertEqual(request.get_header("Idempotency-key"), "a" * 64)
         self.assertEqual(
             provider.last_call_metadata,
             {
                 "usage_source": "provider_reported",
+                "idempotency_key_sent": True,
+                "provider_request_id": "provider-request-123",
+                "provider_request_id_source": "body.id",
                 "input_tokens": 23,
                 "output_tokens": 5,
                 "total_tokens": 28,

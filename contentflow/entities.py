@@ -1156,6 +1156,149 @@ class JobManualReview(Base):
     note: Mapped[str | None] = mapped_column(Text)
 
 
+class ProviderInvocation(TimestampMixin, Base):
+    __tablename__ = "provider_invocations"
+    __table_args__ = (
+        CheckConstraint(
+            "provider_kind IN ('text', 'embedding')",
+            name="provider_kind",
+        ),
+        CheckConstraint(
+            "last_status IN ('started', 'succeeded', 'outcome_unknown', "
+            "'late_succeeded', 'late_failed')",
+            name="last_status",
+        ),
+        CheckConstraint("length(request_key) = 64", name="request_key_length"),
+        CheckConstraint("length(request_sha256) = 64", name="request_sha256_length"),
+        CheckConstraint("request_bytes >= 0", name="request_bytes_non_negative"),
+        CheckConstraint("length(entity_type) > 0", name="entity_type_non_empty"),
+        CheckConstraint("length(entity_id) > 0", name="entity_id_non_empty"),
+        CheckConstraint("length(operation) > 0", name="operation_non_empty"),
+        UniqueConstraint("request_key", name="uq_provider_invocations_request_key"),
+        Index(
+            "ix_provider_invocations_workspace_created_page",
+            "workspace_id",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "ix_provider_invocations_job_created_page",
+            "job_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), index=True
+    )
+    entity_type: Mapped[str] = mapped_column(String(80), index=True)
+    entity_id: Mapped[str] = mapped_column(String(80), index=True)
+    provider_kind: Mapped[str] = mapped_column(String(24), index=True)
+    provider_name: Mapped[str] = mapped_column(String(80), index=True)
+    model_name: Mapped[str] = mapped_column(String(160))
+    operation: Mapped[str] = mapped_column(String(80), index=True)
+    request_key: Mapped[str] = mapped_column(String(64))
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    request_bytes: Mapped[int] = mapped_column(Integer)
+    last_status: Mapped[str] = mapped_column(
+        String(24), default="started", nullable=False, index=True
+    )
+
+
+class ProviderInvocationAttempt(Base):
+    __tablename__ = "provider_invocation_attempts"
+    __table_args__ = (
+        CheckConstraint("attempt_number > 0", name="attempt_number_positive"),
+        CheckConstraint(
+            "status IN ('started', 'succeeded', 'outcome_unknown', "
+            "'late_succeeded', 'late_failed')",
+            name="status",
+        ),
+        CheckConstraint(
+            "usage_source IN ('not_reported', 'provider_reported')",
+            name="usage_source",
+        ),
+        CheckConstraint(
+            "input_tokens IS NULL OR input_tokens >= 0",
+            name="input_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "output_tokens IS NULL OR output_tokens >= 0",
+            name="output_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "total_tokens IS NULL OR total_tokens >= 0",
+            name="total_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "response_bytes IS NULL OR response_bytes >= 0",
+            name="response_bytes_non_negative",
+        ),
+        CheckConstraint(
+            "response_sha256 IS NULL OR length(response_sha256) = 64",
+            name="response_sha256_length",
+        ),
+        CheckConstraint(
+            "provider_request_id IS NULL OR length(provider_request_id) > 0",
+            name="provider_request_id_non_empty",
+        ),
+        CheckConstraint(
+            "((status = 'started' AND completed_at IS NULL) OR "
+            "(status <> 'started' AND completed_at IS NOT NULL))",
+            name="completion_consistent",
+        ),
+        UniqueConstraint(
+            "invocation_id",
+            "attempt_number",
+            name="uq_provider_invocation_attempt_number",
+        ),
+        Index(
+            "ix_provider_invocation_attempts_invocation_started_page",
+            "invocation_id",
+            "started_at",
+            "id",
+        ),
+        Index(
+            "ix_provider_invocation_attempts_status_started",
+            "status",
+            "started_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_invocations.id", ondelete="CASCADE"), index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(
+        String(24), default="started", nullable=False, index=True
+    )
+    idempotency_key_sent: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    provider_request_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    provider_request_id_source: Mapped[str | None] = mapped_column(String(40))
+    response_sha256: Mapped[str | None] = mapped_column(String(64))
+    response_bytes: Mapped[int | None] = mapped_column(Integer)
+    response_model: Mapped[str | None] = mapped_column(String(160))
+    usage_source: Mapped[str] = mapped_column(
+        String(24), default="not_reported", nullable=False
+    )
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    total_tokens: Mapped[int | None] = mapped_column(Integer)
+    error_type: Mapped[str | None] = mapped_column(String(160))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class WorkerNode(Base):
     __tablename__ = "worker_nodes"
     __table_args__ = (

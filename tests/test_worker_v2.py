@@ -25,12 +25,16 @@ from contentflow.entities import (
     ContentItem,
     Job,
     KnowledgeDocument,
+    ProviderInvocation,
+    ProviderInvocationAttempt,
     PublishJob,
     User,
     WorkspaceStorageUsage,
     WorkflowRun,
 )
 from contentflow.settings import Settings
+from contentflow.provider_invocations import current_provider_job_id
+from contentflow.providers import MockProvider
 from contentflow.worker import (
     Worker,
     handle_publish_dispatch,
@@ -86,6 +90,125 @@ class WorkerIntegrationTest(unittest.TestCase):
         self.client.__exit__(None, None, None)
         db.engine.dispose()
         self.temp_dir.cleanup()
+
+    def test_worker_scopes_provider_invocations_to_the_claimed_job(self):
+        with db.SessionLocal() as session:
+            job = Job(
+                workspace_id=self.workspace_id,
+                job_type="context.check",
+                status="queued",
+                payload_json={},
+                run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                idempotency_key="worker-provider-context",
+            )
+            session.add(job)
+            session.commit()
+            job_id = job.id
+
+        observed = []
+
+        def capture_provider_context(_session, _payload, _settings):
+            observed.append(current_provider_job_id(self.workspace_id))
+            return {"captured": True}
+
+        worker = Worker(
+            settings=self.settings,
+            session_factory=db.SessionLocal,
+            worker_id="provider-context-worker",
+            handlers={"context.check": capture_provider_context},
+        )
+
+        self.assertTrue(worker.run_once())
+        self.assertEqual(observed, [job_id])
+        self.assertIsNone(current_provider_job_id(self.workspace_id))
+
+    def test_workflow_commits_provider_ledger_without_partial_content_writes(self):
+        class LedgeredMockProvider(MockProvider):
+            provider_name = "openai-compatible"
+            model_name = "ledgered-mock-model"
+
+            def __init__(self):
+                super().__init__()
+                self.invocation_key = None
+
+            def set_invocation_context(self, request_key):
+                self.invocation_key = request_key
+                return True
+
+            def complete_json(self, stage, payload, *, system_prompt=None):
+                self.asserted_request_key = self.invocation_key
+                self.invocation_key = None
+                result = super().complete_json(
+                    stage,
+                    payload,
+                    system_prompt=system_prompt,
+                )
+                self.last_call_metadata = {
+                    "usage_source": "not_reported",
+                    "provider_request_id": f"test-{stage}",
+                    "provider_request_id_source": "test",
+                }
+                return result
+
+        campaign = self.client.post(
+            "/api/v1/campaigns",
+            headers=self.headers,
+            json={
+                "name": "调用账本事务测试",
+                "product_name": "ContentFlow",
+                "objective": "验证模型调用前证据独立提交",
+                "audience": "内容运营人员",
+                "platforms": ["wechat"],
+            },
+        )
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        run = self.client.post(
+            f"/api/v1/campaigns/{campaign.json()['id']}/runs",
+            headers=self.headers,
+            json={},
+        )
+        self.assertEqual(run.status_code, 202, run.text)
+
+        with patch(
+            "contentflow.workflow_service.build_text_provider",
+            return_value=LedgeredMockProvider(),
+        ):
+            self.assertTrue(self.worker.run_once())
+
+        with db.SessionLocal() as session:
+            queue_job = session.scalar(
+                select(Job).where(
+                    Job.job_type == "workflow.execute"
+                )
+            )
+            workflow_run = session.get(WorkflowRun, run.json()["id"])
+            invocations = list(
+                session.scalars(
+                    select(ProviderInvocation).order_by(
+                        ProviderInvocation.created_at,
+                        ProviderInvocation.id,
+                    )
+                )
+            )
+            attempts = list(session.scalars(select(ProviderInvocationAttempt)))
+            contents = list(
+                session.scalars(
+                    select(ContentItem).where(ContentItem.run_id == run.json()["id"])
+                )
+            )
+            self.assertIsNotNone(queue_job)
+            self.assertEqual(queue_job.status, "succeeded")
+            self.assertEqual(workflow_run.status, "awaiting_review")
+            self.assertEqual(len(contents), 1)
+            self.assertEqual(len(invocations), 3)
+            self.assertTrue(all(item.job_id == queue_job.id for item in invocations))
+            self.assertEqual(
+                [item.operation for item in invocations],
+                ["text.plan", "text.generate", "text.review"],
+            )
+            self.assertEqual(len(attempts), 3)
+            self.assertTrue(all(item.status == "succeeded" for item in attempts))
+            self.assertTrue(all(item.idempotency_key_sent for item in attempts))
 
     def test_worker_runs_due_storage_reconciliation_in_report_only_mode(self):
         stale_at = datetime.now(timezone.utc) - timedelta(hours=25)

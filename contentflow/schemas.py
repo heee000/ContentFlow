@@ -558,6 +558,41 @@ class JobManualReviewResponse(ORMModel):
     note: str | None
 
 
+class ProviderInvocationAttemptResponse(BaseModel):
+    id: str
+    invocation_id: str
+    request_key: str
+    entity_type: str
+    entity_id: str
+    provider_kind: Literal["text", "embedding"]
+    provider_name: str
+    model_name: str
+    operation: str
+    request_sha256: str
+    request_bytes: int
+    attempt_number: int
+    status: Literal[
+        "started",
+        "succeeded",
+        "outcome_unknown",
+        "late_succeeded",
+        "late_failed",
+    ]
+    idempotency_key_sent: bool
+    provider_request_id: str | None
+    provider_request_id_source: str | None
+    response_sha256: str | None
+    response_bytes: int | None
+    response_model: str | None
+    usage_source: Literal["not_reported", "provider_reported"]
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    error_type: str | None
+    started_at: datetime
+    completed_at: datetime | None
+
+
 class JobResponse(ORMModel):
     id: str
     job_type: str
