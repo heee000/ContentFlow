@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import multiprocessing
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -214,6 +216,41 @@ def _wait_for_job_status(
         f"Job did not reach {expected_status!r} before timeout; "
         f"last_status={last_status!r}"
     )
+
+
+def _run_crash_probe_worker(
+    settings: Settings,
+    worker_id: str,
+    handler_entered,
+) -> None:
+    engine = create_engine(settings.database_url, pool_pre_ping=True)
+    sessions = sessionmaker(
+        bind=engine,
+        expire_on_commit=False,
+        future=True,
+    )
+
+    def handle_probe(
+        _session: Session,
+        payload: dict[str, str],
+        _settings: Settings,
+    ) -> dict[str, str]:
+        if payload.get("phase") != "before_kill":
+            raise ValueError("Unexpected crash probe phase")
+        handler_entered.set()
+        threading.Event().wait(60)
+        raise RuntimeError("Crash probe worker was not terminated before timeout")
+
+    worker = Worker(
+        settings=settings,
+        worker_id=worker_id,
+        session_factory=sessions,
+        handlers={"postgres.worker.crash.probe": handle_probe},
+    )
+    try:
+        worker.run_forever()
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture(scope="module")
@@ -1269,3 +1306,158 @@ def test_worker_recovers_after_disposable_postgres_restart(
         assert worker_node is not None
         assert worker_node.status == "stopped"
         assert worker_node.stopped_at is not None
+
+
+def test_running_job_is_reclaimed_after_worker_process_kill(
+    postgres_harness: PostgresHarness,
+):
+    lease_seconds = 6
+    settings = postgres_harness.settings.model_copy(
+        update={
+            "storage_reconcile_schedule_enabled": False,
+            "publish_reconciliation_sweep_poll_seconds": 3600,
+            "worker_poll_seconds": 0.1,
+            "worker_lease_seconds": lease_seconds,
+            "worker_heartbeat_seconds": 1,
+            "worker_stale_seconds": 3,
+        }
+    )
+    with postgres_harness.sessions() as session:
+        session.execute(
+            update(Job)
+            .where(Job.status.in_(["queued", "retry", "running"]))
+            .values(
+                status="succeeded",
+                result_json={"reason": "isolated_worker_kill_probe"},
+                locked_by=None,
+                locked_at=None,
+            )
+        )
+        session.execute(
+            update(PublishJob)
+            .where(PublishJob.status == "submitted")
+            .values(
+                status="failed",
+                error="isolated_worker_kill_probe",
+            )
+        )
+        job = enqueue_job(
+            session,
+            job_type="postgres.worker.crash.probe",
+            payload={"phase": "before_kill"},
+            workspace_id=None,
+            idempotency_key=f"postgres-worker-kill:{uuid.uuid4().hex}",
+            max_attempts=3,
+        )
+        session.commit()
+        job_id = job.id
+
+    context = multiprocessing.get_context("spawn")
+    handler_entered = context.Event()
+    crashed_worker_id = f"postgres-crashed-{uuid.uuid4().hex[:12]}"
+    crashed_worker = context.Process(
+        target=_run_crash_probe_worker,
+        args=(settings, crashed_worker_id, handler_entered),
+        name="contentflow-postgres-crash-probe",
+    )
+    recovered_payloads: list[dict[str, str]] = []
+    recovery_worker_holder: dict[str, Worker] = {}
+
+    def handle_recovered_probe(
+        _session: Session,
+        payload: dict[str, str],
+        _settings: Settings,
+    ) -> dict[str, str]:
+        recovered_payloads.append(payload)
+        recovery_worker_holder["worker"].request_stop()
+        return {"recovered": "after_process_kill"}
+
+    recovery_worker = Worker(
+        settings=settings,
+        worker_id=f"postgres-recovery-{uuid.uuid4().hex[:12]}",
+        session_factory=postgres_harness.sessions,
+        handlers={"postgres.worker.crash.probe": handle_recovered_probe},
+    )
+    recovery_worker_holder["worker"] = recovery_worker
+    recovery_thread = threading.Thread(
+        target=recovery_worker.run_forever,
+        name="contentflow-postgres-recovery-worker",
+        daemon=True,
+    )
+    try:
+        crashed_worker.start()
+        assert handler_entered.wait(timeout=15)
+        running_job = _wait_for_job_status(
+            postgres_harness.sessions,
+            job_id,
+            "running",
+        )
+        assert running_job.attempts == 1
+        assert running_job.locked_by == crashed_worker_id
+        assert running_job.locked_at is not None
+
+        crashed_worker.kill()
+        crashed_worker.join(timeout=10)
+        assert not crashed_worker.is_alive()
+        assert crashed_worker.exitcode is not None
+        if os.name == "posix":
+            assert crashed_worker.exitcode == -signal.SIGKILL
+        else:
+            assert crashed_worker.exitcode != 0
+
+        with postgres_harness.sessions() as session:
+            still_leased_job = session.get(Job, job_id)
+            crashed_node = session.get(WorkerNode, crashed_worker_id)
+            assert still_leased_job is not None
+            assert still_leased_job.status == "running"
+            assert still_leased_job.attempts == 1
+            assert still_leased_job.locked_by == crashed_worker_id
+            assert still_leased_job.locked_at is not None
+            lease_age = (
+                datetime.now(timezone.utc) - still_leased_job.locked_at
+            ).total_seconds()
+            assert lease_age < lease_seconds
+            assert crashed_node is not None
+            assert crashed_node.status == "online"
+            assert crashed_node.stopped_at is None
+
+        assert recovery_worker.run_once() is False
+        recovery_thread.start()
+        recovered_job = _wait_for_job_status(
+            postgres_harness.sessions,
+            job_id,
+            "succeeded",
+            timeout_seconds=15,
+        )
+        recovery_thread.join(timeout=10)
+        assert not recovery_thread.is_alive()
+        assert recovered_job.attempts == 2
+        assert recovered_job.locked_by is None
+        assert recovered_job.locked_at is None
+        assert recovered_job.last_error is None
+        assert recovered_job.result_json == {"recovered": "after_process_kill"}
+        assert recovered_payloads == [{"phase": "before_kill"}]
+
+        with postgres_harness.sessions() as session:
+            crashed_node = session.get(WorkerNode, crashed_worker_id)
+            recovery_node = session.get(WorkerNode, recovery_worker.worker_id)
+            assert crashed_node is not None
+            assert crashed_node.status == "online"
+            assert crashed_node.stopped_at is None
+            assert crashed_node.heartbeat_at < (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=settings.worker_stale_seconds)
+            )
+            assert recovery_node is not None
+            assert recovery_node.status == "stopped"
+            assert recovery_node.stopped_at is not None
+    finally:
+        if crashed_worker.is_alive():
+            crashed_worker.kill()
+            crashed_worker.join(timeout=10)
+        recovery_worker.request_stop()
+        if recovery_thread.is_alive():
+            recovery_thread.join(timeout=10)
+
+    assert not crashed_worker.is_alive()
+    assert not recovery_thread.is_alive()
