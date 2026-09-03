@@ -2061,3 +2061,22 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 本轮不等于 Provider exactly-once：仍无调用账本、供应商请求 ID/费用/结果自动查询、证据附件、负责人认领、双人确认和真实告警接收器。下一优先项应是 Provider invocation ledger，而不是放宽人工核对。
 - 脚本包对象写入、对象删除、真实媒体 Provider、完成提交丢失和网络分区旧 Worker 恢复仍需逐故障点签收；不能把当前状态机推广为所有外部副作用已经安全。
 - 公网部署继续冻结。本轮没有读取 `.env`、平台账密、模型缓存、备份、运行数据或 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`，没有调用真实 Provider/平台或创建任何素材、草稿、发布、云资源。继续保留该知识文件为未跟踪用户文件，不读取、不修改、不暂存、不提交。
+
+## 21.53 Provider 调用账本与第四十一轮复审增量交接
+
+### 本轮实现
+
+1. 新增 `provider_invocations` 与 `provider_invocation_attempts`。前者以 64 位稳定请求键聚合同一逻辑请求并固定请求指纹，后者保存每次尝试的受控状态、幂等键是否发送、Provider 请求 ID、响应证据哈希、字节数、模型和 token；数据库约束限制状态、非负计数、尝试序号和完成时间一致性。
+2. `ProviderInvocationLedger.start()` 使用独立 Session，在外部调用前提交 `started` 与审计事件；账本初始化失败会 fail-closed，不会在没有取证记录时继续计费调用。完成路径同样独立提交，失败/中断标记 `outcome_unknown`，同一逻辑请求后续成功可标记 `late_succeeded`。账本不保存 Prompt、响应正文、HTTP 错误正文、Authorization 或平台密钥。
+3. Worker 通过 ContextVar 把当前已领取 Job 绑定到文本与 Embedding Provider。OpenAI-compatible 文本生成、Prompt Eval、远程知识索引与知识搜索均接入账本并发送稳定 `Idempotency-Key`；Provider 适配器只抽取受控 body `id`/请求 ID header、模型与用量。发送该头不证明供应商接受或提供幂等保证。
+4. 为避免调用前独立提交与业务长事务互锁，远程知识索引和 Prompt Eval 先提交领域执行态，再进入 Provider；工作流先完成全部 Provider 调用并收集结果，随后统一持久化 ContentItem/Revision/Asset。测试证明调用发生时独立 Session 已能看到 started，且完整工作流在 SQLite 下不锁死。
+5. 人工核对开始时会把该 Job 尚处于 started 的尝试收束为 outcome_unknown。新增 reviewer/admin 专用分页接口 `GET /api/v1/jobs/{job_id}/provider-invocations`；前端核对抽屉展示脱敏证据与幂等免责声明。Prometheus 增加历史状态、当前未解决不确定结果和最老时长，持续 5 分钟触发 `ContentFlowProviderInvocationOutcomeUnknown`。
+6. 迁移 head 更新为 `f4a5b6c7d8e9`，公开表门槛更新为 33；未版本化数据库对两张账本表部分存在时失败关闭。三套备份/隔离恢复校验同步，不改写历史迁移。
+
+### 当前验证与边界
+
+- 本机完整后端为 `318 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.31%；17 项均为本机未提供 PostgreSQL/MinIO/CI 容器条件的安全跳过。全仓 Ruff、Alembic 单 head、锁文件、`pip check`、Python/npm 漏洞审计、公网 fail-closed、前端 lint/test/build 和备份脚本语法通过。
+- 实现提交 `56e563de1725a40c9eddbf05128dff6e812b5cfc` 已以 John Wang 身份普通推送；手动触发的 [ContentFlow CI #33708300286](https://github.com/heee000/ContentFlow/actions/runs/33708300286) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `335 passed, 196 subtests passed`、覆盖率 82.47%；Prometheus、前端、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 全部通过。Artifact `9876032648` 摘要为 `sha256:ef9130d8941c8e135c6e4e4968b814b37d2c4a7779bce7bcf0c3f6072a616174`。
+- 账本当前只覆盖 OpenAI-compatible 文本和远程 Embedding。它没有证明真实 Provider 支持幂等头，也没有自动查询费用/结果、自动调和迟到响应、证据附件、负责人或双人批准；人工核对仍是最终安全边界。
+- 请求/响应只保存 SHA-256 证据哈希，避免正文落库，但低熵输入仍可能被离线猜测。未来若把哈希提供给更广泛角色，应改为密钥 HMAC 或进一步收紧访问，且需要设计密钥轮换与历史验证策略。
+- 公网部署继续冻结；未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，未调用真实 Provider/平台或创建素材、草稿、发布或云资源。继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。

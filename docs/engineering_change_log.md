@@ -907,3 +907,15 @@
 - 远程证据：实现提交 `3ce6e6259ddf56738b37146435ad44d2c4a3dfb2` 已以 John Wang 身份普通推送；[ContentFlow CI #33704597235](https://github.com/heee000/ContentFlow/actions/runs/33704597235) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `329 passed, 196 subtests passed`、覆盖率 82.36%；部分唯一索引、行锁处置、Prometheus 行为测试、前端构建、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9874760182` 摘要为 `sha256:94f2c8060028bfa9305a1eafc3b63ac5dfa62b4639e412e1b249fd77ba0765e0`。
 - 剩余边界：本轮关闭的是机械误重试、无权限处置、无结构化记录和无积压告警，不是 Provider exactly-once。仍没有调用账本、供应商请求 ID/费用/结果自动查询、证据附件、负责人认领、双人确认或告警接收器闭环；真实 Provider conformance 和跨故障点副作用测试仍未执行。
 - 安全范围：公网部署继续冻结；本轮未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，未调用 Provider/平台、创建素材/草稿/发布或云资源。`knowledge/北京周末 CityWalk 路线助手产品资料.txt` 保持未跟踪且未读取、修改、暂存或提交。
+
+### CF-20260903-28：Provider 调用缺少可独立核对的请求证据
+
+- 状态：调用账本、独立预提交、人工核对联动、只读查询入口、低基数监控、本地完整门禁及真实 PostgreSQL/MinIO CI 均已签收。
+- 问题与影响：上一阶段虽能把高风险 AI Job 转入专用人工核对，但操作者只能看到 Job 错误与检查说明，无法确认调用是否真正开始、重试是否属于同一逻辑请求、Provider 返回了哪个请求 ID、是否已经产生响应或 token 消耗。直接重试仍可能重复计费，且数据库业务事务失败时可能把已经开始的外部调用痕迹一起回滚。
+- 解决方案：新增 `provider_invocations` 与 `provider_invocation_attempts` 两层账本，以稳定请求键聚合同一逻辑请求、以 attempt 保存每次尝试。在外部请求前使用独立数据库 Session 提交 `started`，结束后只保存受控状态、请求/响应哈希、字节数、Provider 请求 ID、模型与 token 用量；不保存 Prompt、响应正文、HTTP 错误正文、Authorization 或其他密钥。失败或中断形成 `outcome_unknown`，后续同键成功可形成 `late_succeeded`。
+- 调用链：Worker 使用 ContextVar 把已领取 Job 绑定到真实 Handler；OpenAI-compatible 文本生成、Prompt Eval、远程 Embedding 与知识检索统一接入账本。远程知识索引和 Prompt Eval 在 Provider 调用前先提交领域 `running/indexing` 状态，工作流先完成全部 Provider 调用再落 ContentItem/Revision/Asset，避免业务事务与独立账本事务在 SQLite 下互锁，也保证调用证据不会被后续业务回滚抹掉。
+- 核对与运维：reviewer/admin 可通过 `GET /api/v1/jobs/{job_id}/provider-invocations` 查看脱敏尝试证据；人工核对开启时会把该 Job 仍处于 `started` 的尝试标记为 `outcome_unknown`。前端核对面板分页展示状态、请求 ID、哈希和用量，并明确 `Idempotency-Key` 已发送不等于 Provider 接受或保证幂等。Prometheus 增加历史状态计数、当前仍未解决的不确定结果数量和最老时长，持续 5 分钟触发专用告警。
+- 迁移与恢复：新增迁移 `f4a5b6c7d8e9`，公开表门槛从 31 更新为 33；未版本化数据库只在两张账本表完整且前序人工核对表存在时才允许认领新 head，部分存在会失败关闭。本地与公网备份/隔离恢复脚本同步。
+- 验证边界：本机完整后端为 `318 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.31%；17 项为本机未提供 PostgreSQL/MinIO/CI 容器条件的安全跳过。全仓 Ruff、Alembic 单 head、公网部署 fail-closed、锁文件、`pip check`、Python 与 npm 漏洞审计、前端 lint/test/build 和备份脚本语法均通过。本轮没有调用真实 Provider、平台或云资源；Provider 对幂等头的实际支持、费用/结果查询和自动对账仍未证明。
+- 远程证据：实现提交 `56e563de1725a40c9eddbf05128dff6e812b5cfc` 已以 John Wang 身份普通推送；手动触发的 [ContentFlow CI #33708300286](https://github.com/heee000/ContentFlow/actions/runs/33708300286) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `335 passed, 196 subtests passed`、覆盖率 82.47%；Prometheus 规则行为、前端 lint/test/build、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9876032648` 摘要为 `sha256:ef9130d8941c8e135c6e4e4968b814b37d2c4a7779bce7bcf0c3f6072a616174`。
+- 剩余边界：账本只覆盖当前 OpenAI-compatible 文本与远程 Embedding 路径；请求/响应使用 SHA-256 证据哈希而非密钥 HMAC，不适合把低熵敏感输入的哈希直接对外公开。真实 Provider 是否接受幂等键、能否按请求 ID 查询结果/费用、如何自动调和迟到结果仍待适配器级 conformance 测试。人工核对仍缺负责人、证据附件、双人确认和真实告警接收器。

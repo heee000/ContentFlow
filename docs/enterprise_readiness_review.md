@@ -2063,3 +2063,44 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 - 公网部署继续冻结；本轮没有恢复 Vercel、GitHub Pages 或云服务器实施。
 - 没有读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，没有调用任何真实 Provider/平台，也没有创建素材、草稿、发布或云资源。
 - 本轮实现和证据已普通推送到 `codex/enterprise-media-runtime`，作者与提交者均为 `John Wang <182348029+heee000@users.noreply.github.com>`；未使用 force、force-with-lease、reset 或覆盖用户文件。
+
+## 51. 2026-09-03 第四十一轮复审：Provider 调用账本与独立取证
+
+### 51.1 结论
+
+本轮把 Provider 人工核对所需的核心证据从 Job 错误文字提升为独立、可分页查询、可监控的调用账本。每次受管调用会在外部请求前以独立事务提交 `started`，再写入脱敏结果；即使后续业务事务失败，调用已经开始的事实也不会被一同回滚。综合成熟度仍评为 **L2+**：仓库侧已经形成“防盲重放 → 人工核对 → 调用证据”的可靠闭环，但真实供应商幂等/查询能力、跨 Provider 统一治理、企业身份与灾备等仍未达到成熟商业产品标准。
+
+### 51.2 本轮关闭或部分关闭的风险
+
+| 维度 | 当前提升 | 证据 | 未关闭边界 |
+| --- | --- | --- | --- |
+| 调用取证 | 逻辑 invocation 与 attempt 分层，外部调用前独立提交 | 独立 Session 可见性测试、SQLite/真实 PostgreSQL CI | 没有真实 Provider 控制台/账单对账 |
+| 敏感信息 | 只保存受控元数据、哈希、字节数、请求 ID、模型与 token | 负向测试不含 Prompt、响应正文、错误正文和密钥 | 普通 SHA-256 对低熵输入存在离线猜测边界 |
+| 重试辨识 | 稳定请求键聚合同一逻辑请求，尝试编号递增；发送 Idempotency-Key | 两次尝试复用同一 invocation 的回归 | 发送请求头不等于供应商支持或遵守幂等 |
+| 人工核对 | 打开核对时收束悬空 `started` 为 `outcome_unknown`，reviewer/admin 可查证据 | 权限、workspace 隔离、分页与前端构建测试 | 无自动结果查询、证据附件和双人批准 |
+| 可观测与恢复 | 状态计数、未解决不确定结果、最老时长和专用告警；迁移/备份门槛同步 | promtool 行为、迁移升降级、隔离恢复与远程 CI | 无真实 Alertmanager receiver、值班与工单闭环 |
+
+本机完整后端为 `318 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.31%。实现提交 `56e563de1725a40c9eddbf05128dff6e812b5cfc` 的 [CI #33708300286](https://github.com/heee000/ContentFlow/actions/runs/33708300286) 四个 Job 全部成功；真实 PostgreSQL/pgvector 与 MinIO 为 `335 passed, 196 subtests passed`、覆盖率 82.47%，Python 无已知漏洞，前端、Prometheus、npm、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 全绿。Artifact `9876032648` 摘要为 `sha256:ef9130d8941c8e135c6e4e4968b814b37d2c4a7779bce7bcf0c3f6072a616174`。
+
+### 51.3 当前仍存在的 5 个不足
+
+1. **Provider 端语义仍未签收**：当前发送稳定 `Idempotency-Key` 并记录请求 ID，但没有逐供应商证明其接受、保留多久、冲突时返回什么，也没有费用/结果查询与自动调和，不能宣称 exactly-once。
+2. **覆盖面仍有限**：统一账本只接入 OpenAI-compatible 文本和远程 Embedding；媒体生成、远程搜索、脚本包对象写入、平台发布/对账仍使用各自契约，尚无统一的副作用证据视图。
+3. **人工核对治理还不完整**：没有负责人认领、证据附件、供应商深链、双人确认、超时升级到实际接收器和工单；页面能帮助判断，但不能代替运营制度。
+4. **最困难的分布式故障仍未关闭**：Handler 已获得 Provider 结果但业务提交丢失、网络分区旧 Worker 越过租约后恢复、两个执行者竞争写回等场景仍缺真实端到端故障注入与 fencing 证明。
+5. **成熟企业基座仍有系统性缺口**：独立 OTel/集中日志、真实告警接收、PITR 与异地恢复、数据生命周期、OIDC/MFA/SCIM/KMS、数据库最小权限/RLS、Playwright 关键旅程、灰度回滚、容量与长期多租户证据尚未形成整体验收。
+
+### 51.4 可以继续改进的 5 个方向
+
+1. 为每个真实 Provider 建立 capability/conformance 契约：明确幂等头支持、保留窗口、请求查询、迟到结果、费用字段和错误分类，再实现有界自动对账与人工兜底。
+2. 把相同的“调用前证据、受控结果、状态机、对账入口”逐类扩展到媒体、搜索、对象存储和发布，但保留各自不同的幂等、补偿与隐私语义，避免用一个粗糙抽象掩盖风险。
+3. 把人工核对升级为可运营队列：负责人、证据附件、双人确认、供应商控制台深链、Alertmanager receiver、值班升级和工单关联，并对敏感证据哈希采用受控访问或密钥 HMAC。
+4. 在真实 PostgreSQL/多 Worker 环境注入“调用后、领域提交前”“Handler 返回后、complete 提交前”和网络分区恢复，验证 attempt fencing、迟到写回、费用与孤儿结果处置。
+5. 继续建设企业运行基座，优先完成 OTel/集中日志、真实告警接收、PITR 恢复演练、数据生命周期、Playwright 和灰度回滚；数据库角色/RLS 仍须单独获得高影响授权后实施。
+
+### 51.5 安全与交付边界
+
+- 公网部署继续冻结；本轮没有恢复 Vercel、GitHub Pages 或云服务器实施。
+- 本轮没有读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，没有调用真实 Provider/平台，也没有创建素材、草稿、发布或云资源。
+- 实现提交已普通推送到 `codex/enterprise-media-runtime`，作者与提交者均为 `John Wang <182348029+heee000@users.noreply.github.com>`；未使用 force、force-with-lease、reset 或覆盖用户文件。
+- 新账本是仓库侧审计证据，不是供应商保证。真实账号 conformance、费用和结果查询必须由后续目标环境验收单独签收。
