@@ -1989,3 +1989,37 @@ AI 发布治理局部已达到 L2-L3：变更有责任人、不可变版本、�
 3. 用容器级 Worker 做 TERM→超时→KILL、双 Worker/多 Worker 和滚动升级演练，以生产租约或等比例参数记录接管 P50/P95、积压吞吐和惊群查询压力。
 4. 将 Worker 进程、日志和编排器状态输出到独立监控故障域并接通真实告警；随后在授权下推进数据库角色/RLS、PITR/异地和企业身份密钥制度。
 5. 并行补 Playwright 关键旅程、真实平台沙箱失败矩阵、媒体质量/成本评测和可回滚 Release 晋级，让可靠性证据覆盖用户可见闭环而非只覆盖队列内核。
+
+## 49. 2026-09-03 第三十九轮复审：Provider 副作用分类与防盲重放
+
+### 49.1 复审结论
+
+上一轮证明无副作用 Job 能在 SIGKILL 后自动接管，但同一规则不能直接用于可能重复计费的 AI/Embedding 调用。本轮把全部生产 Handler 纳入可执行恢复策略，并对无稳定 Provider 幂等键的任务 fail-closed：异常或租约过期后必须人工核对再显式重试。该变化关闭了“队列幂等键被误当作外部请求幂等”的高风险路径；综合成熟度仍为 L2+，因为人工核对仍借用通用 failed 状态，Provider 请求级账本与 exactly-once 没有完成。
+
+### 49.2 本轮关闭或部分关闭的风险
+
+| 维度 | 当前提升 | 证据 | 未关闭边界 |
+| --- | --- | --- | --- |
+| 策略完整性 | 12 个生产 Handler 必须各自声明恢复类型 | 注册表键集合严格等于 `HANDLERS` | 分类正确性仍需随 Provider/Handler 变更复审 |
+| 文本模型调用 | Workflow 与 Prompt Eval 的异常和过期租约都不自动重放 | 单元测试断言调用一次；领域测试断言过期后调用零次 | 无供应商幂等键、请求账本和结果查询 |
+| Embedding | BGE/Hash 本地计算可恢复，OpenAI-compatible 转人工核对 | 两类配置解析测试 | 远程 Provider 的实际计费/超时语义未做 live conformance |
+| 并发领取 | 人工核对扫描有界，领取查询同步排除，不能由批次上限绕过 | SQLite 选择测试；真实 PostgreSQL `SKIP LOCKED` 测试 | 多 Worker 大批量恢复吞吐与惊群未测 |
+| 状态一致性 | Job 终结与 Workflow/Prompt Eval/Knowledge 领域失败同事务 | WorkflowRun 与 Job 联合断言 | 尚无专用人工核对状态、负责人、证据和 SLA |
+
+本机全仓 Ruff、完整后端为 `310 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.02%；实现提交 `a1b38fed51c3d1193026619c0d67daae3d28ad54` 的 [CI #33701395214](https://github.com/heee000/ContentFlow/actions/runs/33701395214) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `327 passed, 196 subtests passed`、覆盖率 82.24%；Python 无已知漏洞，前端、Prometheus、npm、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 全绿。Artifact `9873652701` 摘要为 `sha256:8700cea0b2d9ea8e969bb47625b8f04479965cc20ce590c20197b9d952058545`。
+
+### 49.3 当前仍存在的 5 个不足
+
+1. **防重放仍是 fail-closed，不是 exactly-once**：文本和远程 Embedding 请求没有稳定 Provider 幂等键、调用账本、供应商请求 ID、费用记录或结果查询；人工只能先去供应商侧自行核对。
+2. **人工核对产品流程不完整**：风险 Job 仍显示为通用 failed，缺少 `manual_review` 领域状态、原因码、负责人、核对证据、双人确认、超时升级和专用列表；通用重试按钮仍可能被误点。
+3. **其他副作用崩溃矩阵尚未签收**：脚本发布在对象写入后进程被杀可能留下孤儿；对象删除/核对、真实媒体 Provider、远程搜索和发布状态机还没有逐提交点 SIGKILL/超时组合证据。
+4. **完成提交与分区旧执行者仍未实测**：没有在 Handler 返回后、`complete_job` 提交前断库，也没有让网络隔离超过租约的旧 Worker 恢复后与新 Worker 竞争；attempt fencing 仍主要是单元证据。
+5. **成熟企业基座仍欠缺**：独立日志/OTel/真实告警、PITR/异地与数据生命周期、数据库角色/RLS、OIDC/MFA/SCIM/KMS、Playwright/发布灰度/外部租户长期运行尚未共同签收。
+
+### 49.4 可以继续改进的 5 个方向
+
+1. 建立 Provider invocation ledger，持久化稳定请求键、请求摘要、供应商请求 ID、状态、费用和结果引用；优先接入支持幂等键/结果查询的 Provider，再把可证明的任务从人工核对升级为自动对账。
+2. 新增专用 `manual_review` 状态机和 API/UI：展示原因码、可能副作用、核对步骤、证据、负责人、双人确认、重试/放弃决策、Prometheus 积压和 SLA 告警，禁止通用按钮绕过。
+3. 对 `asset.generate`、脚本包写入、对象删除/核对、平台发布/对账逐一在远端调用前后和数据库提交前注入异常/SIGKILL，验证幂等键、补偿、孤儿回收和人工接管。
+4. 在真实 PostgreSQL 中注入 Handler 返回后/完成提交前断连，并模拟旧 Worker 网络分区后恢复；证明 fencing 拒绝迟到结果，且新 Worker 的领域提交不被覆盖。
+5. 继续补独立可观测与告警闭环、PITR/异地和数据生命周期；数据库角色/RLS 仅在获得高影响授权后推进，同时建立 Playwright 关键旅程、灰度回滚和长期公开测试证据。

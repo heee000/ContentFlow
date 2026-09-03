@@ -885,3 +885,13 @@
 - 本地证据：`uv lock --check`、全仓 Ruff、完整后端为 `306 passed, 16 skipped, 196 subtests passed`、覆盖率 80.96%；本机没有 PostgreSQL 服务，因此新集成用例安全跳过。
 - 远程证据：实现提交 `b2b01ca5153a611167024dff9095af21ba61fcc3` 已以 John Wang 身份普通推送；[ContentFlow CI #33699168801](https://github.com/heee000/ContentFlow/actions/runs/33699168801) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `322 passed, 196 subtests passed`、覆盖率 82.15%，Python 无已知漏洞；前端、Prometheus、npm、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 全部通过。Artifact `9872885169` 摘要为 `sha256:679207f6e4dc315db35124acb528322f24cf906802c555dafa7ec94329ed79c0`。
 - 剩余边界：探针 Handler 无业务副作用且在结果提交前被杀；尚未覆盖内置 Handler、完成提交丢失、旧执行者网络隔离后重新出现、多 Worker 惊群、生产 300 秒租约和外部调用去重/补偿。
+
+### CF-20260903-26：计费 Provider Job 在异常或租约过期后可能被盲目重放
+
+- 状态：生产 Handler 恢复策略注册表、配置感知决策、领取层防绕过、原子领域失败、本地全量门禁和真实 PostgreSQL CI 已签收；Provider 请求账本和专用人工核对工作流仍待实现。
+- 问题与影响：Job 的入队幂等键只能防止重复建队列记录，不能让外部文本/Embedding 请求 exactly-once。`workflow.execute`、`prompt_eval.execute` 和远程 `knowledge.index` 若在 Provider 已处理后抛错，或 Worker 在结果提交前崩溃，原通用退避/过期租约接管会再次调用 Provider，可能重复计费并产生不同结果。
+- 根因：`claim_next_job()` 对所有过期 running Job 一视同仁；`fail_job()` 对所有非终态异常统一退避。现有 attempt fencing 只拒绝旧 Worker 写回数据库，不能撤销或去重已经发生的外部调用。媒体和发布已有不同的幂等/状态机边界，但这些差异此前只存在于分散实现和文档，没有形成强制注册表。
+- 解决方案：为全部 12 个生产 Handler 声明五类恢复策略，注册表与 Handler 集合必须完全一致。文本工作流和 Prompt Eval 始终人工核对；OpenAI-compatible Embedding 人工核对，本地 BGE/Hash 可自动恢复。租约扫描原子终结人工核对 Job 及领域状态，领取查询也排除所有此类过期记录；Handler 普通错误同样直接终结，不进入自动退避。操作者核对外部活动后仍可通过现有显式重试入口恢复。
+- 并发与事务：PostgreSQL 扫描使用 `FOR UPDATE SKIP LOCKED` 且每轮最多 100 条；领取条件的独立排除保证第 101 条也不会被盲重放。Job、Workflow/Prompt Eval/Knowledge 状态及审计在同一事务提交，消除队列失败与页面 running 之间的二阶段窗口。
+- 验证：本机全量为 `310 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.02%；Ruff、锁文件、依赖/漏洞、编译、迁移、公网部署校验和全部前端门禁通过。实现提交 `a1b38fed51c3d1193026619c0d67daae3d28ad54` 的 [CI #33701395214](https://github.com/heee000/ContentFlow/actions/runs/33701395214) 四个 Job 成功；真实 PostgreSQL/pgvector 与 MinIO 为 `327 passed, 196 subtests passed`、覆盖率 82.24%，Python 无已知漏洞，供应链 Artifact `9873652701` 摘要为 `sha256:8700cea0b2d9ea8e969bb47625b8f04479965cc20ce590c20197b9d952058545`。
+- 剩余边界：这是 fail-closed，不是 Provider exactly-once。当前仍以通用 failed 状态承载人工核对，缺少请求/费用账本、供应商侧查询、核对证据、负责人和 SLA；脚本包/对象写入、媒体真实调用、完成提交丢失和网络分区旧 Worker 仍待故障注入。本轮未调用真实 Provider 或平台。

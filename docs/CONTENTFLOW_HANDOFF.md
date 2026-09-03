@@ -2025,3 +2025,21 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 本轮证明的是“无副作用自定义 Handler 在进程被 SIGKILL 后，另一个 Worker 遵守租约并最终接管”。它没有覆盖内置业务 Handler、Handler 已产生 AI 费用/对象写入/平台发布、完成事务提交时断连，或旧执行者仍存活但网络隔离的双写竞争。
 - 6 秒租约和单次 CI 只为有界测试；生产默认 300 秒租约、多副本 P50/P95、Kubernetes/Docker 的 TERM→grace→KILL、滚动升级和编排器指标仍需目标环境演练。不能据此缩短生产租约或宣称 exactly-once。
 - 公网部署继续冻结；未读取 `.env`、账密、模型缓存、备份、运行数据或受保护知识文件。下一轮优先审查实际 Handler 的副作用/幂等/补偿/fencing 契约和完成提交边界，再决定能否安全缩短不同 Job 类型的恢复时间。
+
+## 21.51 Provider Job 防盲重放与第三十九轮复审增量交接
+
+### 本轮实现
+
+1. 对全部 12 个生产 Handler 建立强制完整的 `JOB_RECOVERY_POLICIES` 注册表，分为 `replay_safe`、`provider_idempotent`、`domain_guarded`、`configuration_guarded` 和 `manual_review`。测试要求策略键集合与 `HANDLERS` 完全相等，新增 Handler 若未声明恢复语义会直接失败。
+2. `workflow.execute` 与 `prompt_eval.execute` 没有向文本 Provider 传递稳定幂等键，因此 Handler 报错不再进入通用自动退避；Worker 进程消失且租约过期后也不会由下一 Worker 自动执行。Job 进入 failed，保留错误并允许操作者核对 Provider 活动后显式重试。
+3. `knowledge.index` 按实际配置决策：本地 `hash`/`bge-m3-local` 只重复本地计算和可回滚数据库写入，保留自动恢复；`openai-compatible` 可能形成外部计费调用，进入人工核对策略。`asset.generate` 继续依赖既有稳定 `Idempotency-Key` 与 Media Contract；发布/对账/删除使用领域状态机或账本保护，查询型任务按只读重放处理。
+4. 租约过期人工核对扫描使用有界 `FOR UPDATE SKIP LOCKED`；`claim_next_job()` 同时在领取条件中排除这些过期 Job，因此即使超过每轮 100 条扫描上限，后续记录也不会绕过策略被自动领取。所有生产调用者必须显式传入人工核对类型集合，避免未来入口默认放行。
+5. Job 失败、Workflow/Prompt Eval/Knowledge 等领域失败和相关审计现在在同一数据库事务提交；不再先提交队列失败、再用第二个事务更新页面状态。日志区分 `job lease replay blocked` 与最终尝试耗尽，并记录低基数策略名。
+
+### 当前验证与边界
+
+- 本机全仓 Ruff、完整后端覆盖率门禁通过：`310 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.02%。17 项跳过均为本机未配置的 PostgreSQL/MinIO/CI 容器用例。`uv lock --check`、`pip check`、Python 编译、依赖漏洞审计、公网部署 fail-closed 校验、Alembic 单 head、前端 ESLint、Vinext/Sites、2 项 SSR、Next.js/TypeScript 生产构建和 npm moderate 审计均通过。
+- 实现提交 `a1b38fed51c3d1193026619c0d67daae3d28ad54` 已以 John Wang 身份普通推送；手动触发的 [ContentFlow CI #33701395214](https://github.com/heee000/ContentFlow/actions/runs/33701395214) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `327 passed, 196 subtests passed`、覆盖率 82.24%，并确认过期 `workflow.execute` 不会调用第二 Worker 的 Handler、Job 与 WorkflowRun 原子失败；Python 无已知漏洞，前端、Prometheus、npm、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 全部通过。Artifact `9873652701` 摘要为 `sha256:8700cea0b2d9ea8e969bb47625b8f04479965cc20ce590c20197b9d952058545`。
+- 该实现提供的是 fail-closed 防重复，不是 AI Provider exactly-once。通用 failed 任务页仍只靠错误文字提示核对；尚无独立 `manual_review` 状态、Provider 请求账本、费用/响应查询、负责人、证据附件、告警和 SLA。操作者不能在未核对供应商活动前机械点击重试。
+- 脚本包对象写入、对象账本补偿、真实媒体 Provider、完成提交丢失和网络分区旧 Worker 恢复仍需逐类故障注入。`replay_safe` 只表示没有外部写副作用，不表示远程查询一定免费或没有速率限制。
+- 公网部署继续冻结；本轮没有读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，没有调用 Provider/平台、创建素材/草稿/发布或云资源。FORCE RLS 与数据库角色拆分继续等待单独高影响授权。

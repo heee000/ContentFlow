@@ -283,6 +283,20 @@ HTTP Counter/Histogram 来自各 API 进程，应按实例聚合。队列、Work
 - 渠道 invalid：重新授权、修复白名单或更新凭据后执行连接测试
 - 非发布 Job 最终 failed：修复根因后在任务队列点击“重试”；发布 Job 必须回到发布页按副作用边界处理
 
+### Job 自动恢复与人工核对
+
+Worker 不会把所有失败或过期租约机械地视为可安全重放。当前生产 Handler 的恢复边界如下：
+
+| 类型 | Job | 自动恢复前提 |
+| --- | --- | --- |
+| 只读/可重放 | `connector.test`、`asset.search`、`asset.poll`、`storage.reconcile`、`metrics.pull` | 没有外部写副作用；仍可能消耗查询配额或受速率限制 |
+| Provider 幂等 | `asset.generate` | 只在 Media Contract 已验证稳定 `Idempotency-Key` 时自动恢复 |
+| 领域状态保护 | `publish.dispatch`、`publish.reconcile`、`storage.delete` | 由发布状态机、对账或对象账本阻止盲目重复写入 |
+| 配置决定 | `knowledge.index` | `hash`/`bge-m3-local` 可恢复；`openai-compatible` 必须人工核对 |
+| 必须人工核对 | `workflow.execute`、`prompt_eval.execute` | 当前没有可证明的 Provider 请求幂等；异常或租约过期均不自动重跑 |
+
+若 Job 错误包含 `Automatic retry was blocked`，先在模型/Embedding 供应商控制台核对同一时间段的请求、费用和结果，再由有权限人员决定是否在任务队列显式重试。不要仅凭 ContentFlow 没有保存结果就认定供应商没有执行；队列 idempotency key 只去重 Job 记录，不等于外部请求 exactly-once。当前仍使用通用 failed 状态承载此流程，尚无专用负责人、证据附件或 SLA 队列，生产接管必须在外部工单中留痕。
+
 ## 发布安全重试
 
 1. 只有 `PublishJob.response_json.dispatch_failure.retry_safe=true` 的失败才允许调用 `POST /api/v1/publishing/jobs/{publish_job_id}/retry`。当前安全阶段包括公众号鉴权、素材前置检查和本地素材读取；这些失败发生在任何平台写入前。
