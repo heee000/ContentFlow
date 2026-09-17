@@ -17,7 +17,7 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
-    "next": "16.2.12",
+    "next": "16.3.5",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
@@ -30,7 +30,7 @@
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.32",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.2.12",
+    "eslint-config-next": "16.3.5",
     "react-server-dom-webpack": "19.2.8",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
@@ -41,7 +41,7 @@
   "overrides": {
     "postcss": "8.5.23",
     "nanoid": "3.3.18",
-    "sharp": "0.35.3"
+    "sharp": "0.35.4"
   },
   "type": "module"
 }

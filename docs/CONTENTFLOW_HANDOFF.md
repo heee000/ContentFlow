@@ -63,7 +63,7 @@ ContentFlow 面向营销内容生产，把一份活动 Brief 和品牌/产品知
 
 | 层级 | 当前实现 | 说明 |
 |---|---|---|
-| Web | Next.js 16.2.12、React 19.2.8、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
+| Web | Next.js 16.3.5、React 19.2.8、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
 | API | FastAPI 0.115+、Pydantic | REST API 前缀默认 `/api/v1` |
 | ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`a5b6c7d8e9f0` |
 | 隔离测试数据库 | SQLite | 仅在测试显式指定 URL 时使用，不是默认生产运行库 |
@@ -2112,3 +2112,10 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 6. 用户新授权自有 Ubuntu 机器内部测试，公网和付费云部署继续暂停。已验证 TCP/22 与主机身份，已生成专用 SSH 密钥；用户追加公钥后仍被服务器拒绝，正在等待权限/指纹诊断。没有把已验证的网络连接写成已部署。实施顺序和资源边界见 `docs/ubuntu_private_test_setup.md`。
 
 本轮仍未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件；未调用真实 Provider/社媒或创建素材、草稿、公开发布。普通 SHA-256、证据生命周期、真实 Provider 合同、多 Worker 完成提交/fencing、企业运行体系仍是后续审计项。
+
+### 21.55.1 提交与部署前检查增量
+
+- 实现及记录提交 `eb16d37d53050dd39f1a93cf78241bd13a33913a` 已以 John Wang 身份普通推送。最终本地后端为 `328 passed, 17 skipped, 199 subtests passed`，分支覆盖率 81.41%。
+- 首轮 [CI #35202826024](https://github.com/heee000/ContentFlow/actions/runs/35202826024) 的失败来自新收录依赖漏洞和原 MinIO Docker Hub 地址不可拉取；后端未执行，不能记为真实 PostgreSQL 签收。
+- 前端已更新 Next.js/eslint-config-next 16.3.5、sharp 0.35.4、js-yaml 4.3.2、fflate 0.7.5；Node 24.19.0 的 lint/test/双构建与 npm/Python 审计通过。MinIO 改用官方 Quay 同一内容摘要，开发 Compose 同步固定 Server/Client 摘要。详见工程台账 `CF-20260917-03`，修复后 CI 另记。
+- SSH 的空 authorized_keys 已由用户追加修复，服务器身份和默认认证配置匹配；另发现本地新私钥的意外口令，修正需明确确认，当前没有成功免密或完成部署的证据。最新状态见内部测试准备文档。

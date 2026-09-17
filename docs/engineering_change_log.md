@@ -934,7 +934,7 @@
 
 ### CF-20260917-01：收尾中断的素材下载账本和异步选图
 
-- 状态：本地已验证；GitHub 签收待更新。
+- 状态：已提交并普通推送（`eb16d37`）；首轮 CI 被依赖漏洞和镜像拉取阻断，修复见 `CF-20260917-03`。
 - 问题：生成 URL/候选文件下载缺少调用证据；选中图库图片在 API 事务中同步请求网络；素材重试固定键会返回旧失败 Job；media/search 虽已入库却被旧响应 Schema 拒绝；快速切换证据面板可能混淆素材。
 - 解决：下载前独立提交调用账本，保存精确响应摘要和受控请求号；选图改为 `asset.download` 后台任务，下载后重新校验版本/审核/选择凭证，成功后才切换同组素材；已完成候选重放短路。素材行锁保护递增重试键，失败候选重试不重新搜索。API/TypeScript 补齐 media/search，素材和 Job 共用脱敏序列化，前端加入请求序号保护。
 - 安全：初始 URL 白名单/HTTPS 在账本前预检，重定向逐跳验证；HTTP 错误、正文超限也保存受控请求号。账本无媒体字节、URL、密钥和异常正文。素材证据限定本工作区 reviewer/admin，下载仍受对象账本、图片规范化和当前内容版本保护。
@@ -950,3 +950,13 @@
 - 已做：Windows 到 TCP/22 连通，SSH 主机身份与 known_hosts 匹配；在 Windows 用户 `.ssh` 生成专用 Ed25519 密钥并保留私钥本地。用户提供诊断已确认家目录、`.ssh`、`authorized_keys` 权限/所有者正常，但 authorized_keys 为 0 字节；公钥未写入是本次拒绝的直接原因。已给出 Ubuntu 直接追加公钥及核对指纹的命令，等待验证，不要求发送密码。
 - 路径：先解决认证、确认 Docker/sudo/硬件/网络，再创建独立低资源内部栈；先验空测试库和持久化，再接真实 API。已有数据的迁移选择与凭据注入单独处理。完整步骤见 `docs/ubuntu_private_test_setup.md`。
 - 范围：自有机器内部测试获得授权；公网部署仍暂停，不开放数据库管理端口，不创建付费云资源，不复制 Windows 依赖到 Linux。
+
+### CF-20260917-03：部署前依赖安全更新与 MinIO 镜像获取恢复
+
+- 状态：本地已验证，修复后 CI 待签收。
+- 触发：`eb16d37` 已正常普通推送，但 [CI #35202826024](https://github.com/heee000/ContentFlow/actions/runs/35202826024) 在前端审计检出 7 项依赖漏洞；后端在启动 MinIO 时收到 Docker Hub `pull access denied`，尚未执行 PostgreSQL 测试。不是 Git push 或仓库账户认证失败。
+- 前端修复：Next.js/eslint-config-next 从 16.2.12 更新为 16.3.5，sharp override 从 0.35.3 更新为 0.35.4；原兼容范围内更新锁定的 js-yaml 4.3.1→4.3.2、fflate 0.7.4→0.7.5。没有使用 `npm audit fix --force`，没有关闭审计或提高漏洞放行阈值。
+- 公告依据：[Next.js Windows RCE](https://github.com/advisories/GHSA-p293-qw3h-jr36)、[Next.js AVIF](https://github.com/advisories/GHSA-2xp9-vwfh-vxw4)、[sharp/libheif](https://github.com/advisories/GHSA-rgj7-g3m4-5g8c)、[js-yaml](https://github.com/advisories/GHSA-2883-xcg3-v3hh)、[fflate](https://github.com/advisories/GHSA-px8p-9vwx-vf98)。公告说明潜在影响范围，不能据此推断本地已经遭到攻击。
+- 镜像修复：通过 registry manifest 实测官方 `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` 的摘要仍为既有 `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`，CI 改用该同内容地址。开发 Compose 同步固定摘要；MinIO Client 仍为 RELEASE.2025-04-16T18-13-26Z，Quay 摘要固定为 `sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3`。没有替换存储产品或迁移已有数据。
+- 本地验证：Node 24.19.0 下 ESLint、2 项 SSR、Vinext 构建、Next.js 16.3.5/TypeScript 生产构建通过；npm moderate 审计为 0 漏洞，Python 依赖审计为 0 已知漏洞。系统默认 Node 22.11 低于项目要求，本轮只在验证进程内使用已安装的合规 Node，没有修改全局安装。
+- 边界：恢复同摘要下载只解决制品获取，不等于旧 MinIO 的长期维护/安全支持签收；自有 Ubuntu 的 CPU 兼容性、镜像可达性、峰值内存和备份恢复仍待实机验收。
