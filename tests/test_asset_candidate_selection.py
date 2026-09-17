@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 import uuid
@@ -14,8 +15,20 @@ from sqlalchemy import select
 
 from contentflow import db
 from contentflow.api import create_app
-from contentflow.entities import Asset, Campaign, ContentItem, User, WorkflowRun
+from contentflow.entities import (
+    Asset,
+    Campaign,
+    ContentItem,
+    Job,
+    Membership,
+    ProviderInvocation,
+    ProviderInvocationAttempt,
+    User,
+    WorkflowRun,
+)
 from contentflow.settings import Settings
+from contentflow.media_providers import MediaProviderError
+from contentflow.worker import Worker, handle_asset_download
 
 
 class AssetCandidateSelectionTest(unittest.TestCase):
@@ -174,20 +187,52 @@ class AssetCandidateSelectionTest(unittest.TestCase):
         )
         self.assertEqual(rejected.status_code, 422, rejected.text)
 
-        with patch(
-            "contentflow.routers.assets.download_generated_media",
-            return_value=self.image_bytes(),
-        ):
-            selected = self.client.post(
-                f"/api/v1/assets/{self.searched_asset_id}/select",
-                headers=self.headers,
-                json={
-                    "candidate_id": "candidate-1",
-                    "acknowledge_license_check": True,
-                },
-            )
+        selected = self.client.post(
+            f"/api/v1/assets/{self.searched_asset_id}/select",
+            headers=self.headers,
+            json={
+                "candidate_id": "candidate-1",
+                "acknowledge_license_check": True,
+            },
+        )
         self.assertEqual(selected.status_code, 200, selected.text)
         payload = selected.json()
+        self.assertEqual(payload["status"], "queued")
+        self.assertFalse(payload["metadata_json"]["selected"])
+        self.assertEqual(
+            payload["metadata_json"]["pending_candidate_selection"]["candidate_id"],
+            "candidate-1",
+        )
+
+        with db.SessionLocal() as session:
+            download_job = session.scalar(
+                select(Job).where(
+                    Job.job_type == "asset.download",
+                    Job.payload_json["asset_id"].as_string() == self.searched_asset_id,
+                )
+            )
+            self.assertIsNotNone(download_job)
+            self.assertEqual(download_job.status, "queued")
+            download_job_id = download_job.id
+            download_payload = dict(download_job.payload_json)
+
+        worker = Worker(
+            settings=self.settings,
+            session_factory=db.SessionLocal,
+            worker_id="asset-download-worker",
+        )
+        with patch(
+            "contentflow.worker.download_generated_media",
+            return_value=self.image_bytes(),
+        ):
+            self.assertTrue(worker.run_once())
+
+        detail = self.client.get(
+            f"/api/v1/assets/{self.searched_asset_id}",
+            headers=self.headers,
+        )
+        self.assertEqual(detail.status_code, 200, detail.text)
+        payload = detail.json()
         self.assertEqual(payload["status"], "ready")
         self.assertTrue(payload["metadata_json"]["selected"])
         self.assertNotIn(
@@ -202,9 +247,50 @@ class AssetCandidateSelectionTest(unittest.TestCase):
         with db.SessionLocal() as session:
             searched = session.get(Asset, self.searched_asset_id)
             generated = session.get(Asset, self.generated_asset_id)
+            download_job = session.get(Job, download_job_id)
+            invocation = session.scalar(
+                select(ProviderInvocation).where(
+                    ProviderInvocation.entity_id == self.searched_asset_id,
+                    ProviderInvocation.operation == "search.download",
+                )
+            )
+            attempt = session.scalar(
+                select(ProviderInvocationAttempt).where(
+                    ProviderInvocationAttempt.invocation_id == invocation.id
+                )
+            )
             self.assertTrue(searched.metadata_json["selected"])
             self.assertFalse(generated.metadata_json["selected"])
             self.assertTrue(searched.storage_uri.startswith("file:"))
+            self.assertEqual(download_job.status, "succeeded")
+            self.assertEqual(invocation.job_id, download_job_id)
+            self.assertEqual(attempt.status, "succeeded")
+            self.assertEqual(attempt.response_bytes, len(self.image_bytes()))
+            serialized = json.dumps(
+                {
+                    "request_sha256": invocation.request_sha256,
+                    "response_sha256": attempt.response_sha256,
+                }
+            )
+        self.assertNotIn("upload.wikimedia.org", serialized)
+
+        evidence = self.client.get(
+            f"/api/v1/assets/{self.searched_asset_id}/provider-invocations",
+            headers=self.headers,
+        )
+        self.assertEqual(evidence.status_code, 200, evidence.text)
+        self.assertEqual(len(evidence.json()), 1)
+        self.assertEqual(evidence.json()[0]["provider_kind"], "media")
+        self.assertEqual(evidence.json()[0]["operation"], "search.download")
+
+        with db.SessionLocal() as session, patch(
+            "contentflow.worker.download_generated_media",
+            side_effect=AssertionError("completed download must not be repeated"),
+        ):
+            self.assertEqual(
+                handle_asset_download(session, download_payload, self.settings)["status"],
+                "ready",
+            )
 
         downloaded = self.client.get(
             f"/api/v1/assets/{self.searched_asset_id}/download",
@@ -213,6 +299,67 @@ class AssetCandidateSelectionTest(unittest.TestCase):
         self.assertEqual(downloaded.status_code, 200, downloaded.text)
         with Image.open(io.BytesIO(downloaded.content)) as decoded:
             self.assertEqual(decoded.size, (48, 30))
+
+    def test_download_retry_preserves_selection_and_creates_a_new_job_each_time(self):
+        selected = self.client.post(
+            f"/api/v1/assets/{self.searched_asset_id}/select",
+            headers=self.headers,
+            json={"candidate_id": "candidate-1", "acknowledge_license_check": True},
+        )
+        self.assertEqual(selected.status_code, 200, selected.text)
+        worker = Worker(settings=self.settings, session_factory=db.SessionLocal)
+        retry_ids = []
+        for sequence in (1, 2):
+            with patch(
+                "contentflow.worker.download_generated_media",
+                side_effect=MediaProviderError("download rejected", retryable=False),
+            ):
+                self.assertTrue(worker.run_once())
+            retried = self.client.post(
+                f"/api/v1/assets/{self.searched_asset_id}/retry",
+                headers=self.headers,
+            )
+            self.assertEqual(retried.status_code, 202, retried.text)
+            job = retried.json()
+            self.assertEqual(job["job_type"], "asset.download")
+            self.assertEqual(job["status"], "queued")
+            retry_ids.append(job["id"])
+            with db.SessionLocal() as session:
+                asset = session.get(Asset, self.searched_asset_id)
+                self.assertEqual(asset.metadata_json["retry_sequence"], sequence)
+                self.assertEqual(
+                    asset.metadata_json["pending_candidate_selection"]["candidate_id"],
+                    "candidate-1",
+                )
+        self.assertEqual(len(set(retry_ids)), 2)
+
+    def test_asset_evidence_is_workspace_scoped_and_reviewer_only(self):
+        other = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "other-selector@example.com",
+                "password": "a-secure-password",
+                "display_name": "Other Workspace",
+                "workspace_name": "Other Workspace",
+            },
+        )
+        self.assertEqual(other.status_code, 201, other.text)
+        response = self.client.get(
+            f"/api/v1/assets/{self.searched_asset_id}/provider-invocations",
+            headers={"Authorization": f"Bearer {other.json()['access_token']}"},
+        )
+        self.assertEqual(response.status_code, 404, response.text)
+        with db.SessionLocal() as session:
+            membership = session.scalar(
+                select(Membership).where(Membership.workspace_id == self.workspace_id)
+            )
+            membership.role = "editor"
+            session.commit()
+        response = self.client.get(
+            f"/api/v1/assets/{self.searched_asset_id}/provider-invocations",
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 403, response.text)
 
 
 if __name__ == "__main__":

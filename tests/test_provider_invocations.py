@@ -21,6 +21,7 @@ from contentflow.entities import (
 from contentflow.media_providers import MediaGeneration, MediaProviderError
 from contentflow.provider_invocations import (
     LedgeredEmbeddingProvider,
+    LedgeredMediaDownloader,
     LedgeredMediaProvider,
     LedgeredSearchProvider,
     ProviderInvocationLedger,
@@ -119,6 +120,47 @@ class ProviderInvocationLedgerTest(unittest.TestCase):
             entity_type="workflow_run",
             entity_id="run-ledger",
         )
+
+    def test_download_failure_is_recorded_before_call_without_url_or_error_body(self):
+        downloader = LedgeredMediaDownloader(
+            ledger=ProviderInvocationLedger(self.engine),
+            workspace_id=self.workspace_id,
+            entity_id="download-asset",
+            provider_name="openverse",
+            model_name="image-download",
+            operation="search.download",
+        )
+
+        def invoke():
+            with self.Session() as session:
+                attempt = session.scalar(select(ProviderInvocationAttempt))
+                self.assertEqual(attempt.status, "started")
+            raise MediaProviderError(
+                "private upstream download error",
+                retryable=True,
+                provider_request_id="download-failure-request",
+                provider_request_id_source="header.x-request-id",
+            )
+
+        with self.assertRaises(MediaProviderError):
+            downloader.download(
+                request={"download_url": "https://assets.example/private?token=secret"},
+                invoke=invoke,
+            )
+        with self.Session() as session:
+            invocation = session.scalar(select(ProviderInvocation))
+            attempt = session.scalar(select(ProviderInvocationAttempt))
+            self.assertEqual(attempt.status, "outcome_unknown")
+            self.assertFalse(attempt.idempotency_key_sent)
+            self.assertEqual(attempt.provider_request_id, "download-failure-request")
+            self.assertEqual(attempt.error_type, "MediaProviderError")
+            serialized = json.dumps([
+                {column.name: getattr(row, column.name) for column in row.__table__.columns}
+                for row in (invocation, attempt)
+            ], default=str)
+            self.assertNotIn("assets.example", serialized)
+            self.assertNotIn("token=secret", serialized)
+            self.assertNotIn("private upstream", serialized)
 
     def test_attempt_is_committed_before_call_and_retry_reuses_logical_request(self):
         provider = _LedgerAwareProvider(self.Session)

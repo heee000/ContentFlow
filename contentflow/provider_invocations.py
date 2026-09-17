@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
@@ -514,6 +514,42 @@ def mark_job_provider_attempts_outcome_unknown(
     return len(rows)
 
 
+def provider_invocation_attempt_response_data(
+    attempt: ProviderInvocationAttempt,
+    invocation: ProviderInvocation,
+) -> dict[str, Any]:
+    """Return the shared, redacted API representation for one ledger attempt."""
+
+    return {
+        "id": attempt.id,
+        "invocation_id": invocation.id,
+        "request_key": invocation.request_key,
+        "entity_type": invocation.entity_type,
+        "entity_id": invocation.entity_id,
+        "provider_kind": invocation.provider_kind,
+        "provider_name": invocation.provider_name,
+        "model_name": invocation.model_name,
+        "operation": invocation.operation,
+        "request_sha256": invocation.request_sha256,
+        "request_bytes": invocation.request_bytes,
+        "attempt_number": attempt.attempt_number,
+        "status": attempt.status,
+        "idempotency_key_sent": attempt.idempotency_key_sent,
+        "provider_request_id": attempt.provider_request_id,
+        "provider_request_id_source": attempt.provider_request_id_source,
+        "response_sha256": attempt.response_sha256,
+        "response_bytes": attempt.response_bytes,
+        "response_model": attempt.response_model,
+        "usage_source": attempt.usage_source,
+        "input_tokens": attempt.input_tokens,
+        "output_tokens": attempt.output_tokens,
+        "total_tokens": attempt.total_tokens,
+        "error_type": attempt.error_type,
+        "started_at": attempt.started_at,
+        "completed_at": attempt.completed_at,
+    }
+
+
 class LedgeredEmbeddingProvider:
     def __init__(
         self,
@@ -856,3 +892,92 @@ class LedgeredSearchProvider:
                 "Search provider response was received but its ledger could not be finalized"
             ) from error
         return results
+
+
+class LedgeredMediaDownloader:
+    """Record one external binary download without storing its URL or body."""
+
+    def __init__(
+        self,
+        *,
+        ledger: ProviderInvocationLedger,
+        workspace_id: str,
+        entity_id: str,
+        provider_name: str,
+        model_name: str,
+        operation: str,
+    ) -> None:
+        self.ledger = ledger
+        self.workspace_id = workspace_id
+        self.entity_id = entity_id
+        self.provider_name = provider_name[:80]
+        self.model_name = model_name[:160]
+        self.operation = operation[:80]
+        self.ordinal = 0
+
+    def download(
+        self,
+        *,
+        request: dict[str, Any],
+        invoke: Callable[[], bytes],
+        call_metadata: dict[str, Any] | None = None,
+    ) -> bytes:
+        self.ordinal += 1
+        request_sha256, request_bytes = canonical_evidence(request)
+        job_id = current_provider_job_id(self.workspace_id)
+        handle = self.ledger.start(
+            workspace_id=self.workspace_id,
+            job_id=job_id,
+            entity_type="asset",
+            entity_id=self.entity_id,
+            provider_kind="media",
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+            operation=self.operation,
+            ordinal=self.ordinal,
+            request_sha256=request_sha256,
+            request_bytes=request_bytes,
+            idempotency_key_sent=False,
+        )
+        try:
+            content = invoke()
+            if not isinstance(content, bytes):
+                raise TypeError("Media download did not return bytes")
+        except Exception as error:
+            metadata = dict(call_metadata or {})
+            request_id = getattr(error, "provider_request_id", None)
+            request_id_source = getattr(error, "provider_request_id_source", None)
+            if request_id is not None:
+                metadata["provider_request_id"] = request_id
+                metadata["provider_request_id_source"] = (
+                    request_id_source or "header.x-request-id"
+                )
+            metadata["response_model"] = self.model_name
+            try:
+                self.ledger.finish(
+                    handle,
+                    status="outcome_unknown",
+                    call_metadata=metadata,
+                    error_type=type(error).__name__,
+                )
+            except Exception:
+                logger.exception(
+                    "media download invocation failure could not be finalized id=%s",
+                    handle.invocation_id,
+                )
+            raise
+        try:
+            metadata = dict(call_metadata or {})
+            metadata["response_model"] = self.model_name
+            self.ledger.finish(
+                handle,
+                status="succeeded",
+                call_metadata=metadata,
+                response_sha256=hashlib.sha256(content).hexdigest(),
+                response_bytes=len(content),
+            )
+        except Exception as error:
+            raise ProviderInvocationLedgerError(
+                "Media download completed but its ledger could not be finalized"
+            ) from error
+        return content

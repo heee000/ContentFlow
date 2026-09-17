@@ -273,7 +273,9 @@ type ProviderInvocationAttempt = {
   id: string;
   invocation_id: string;
   request_key: string;
-  provider_kind: "text" | "embedding";
+  entity_type: string;
+  entity_id: string;
+  provider_kind: "text" | "embedding" | "media" | "search";
   provider_name: string;
   model_name: string;
   operation: string;
@@ -2857,6 +2859,66 @@ function ReviewView({
   );
 }
 
+function ProviderInvocationEvidence({
+  attempts,
+  loading,
+  error,
+  truncated,
+  emptyMessage,
+}: {
+  attempts: ProviderInvocationAttempt[];
+  loading: boolean;
+  error: string;
+  truncated: boolean;
+  emptyMessage: string;
+}) {
+  return (
+    <div className="provider-ledger" aria-live="polite">
+      <div className="provider-ledger-heading">
+        <div>
+          <strong>ContentFlow 已保存的调用证据</strong>
+          <p>这里只保存请求/响应摘要、供应商请求号和用量，不保存提示词、正文、媒体地址或密钥。</p>
+        </div>
+        {loading ? <span className="button-spinner" aria-hidden="true" /> : null}
+      </div>
+      {error ? (
+        <p className="inline-error">调用证据读取失败：{error}</p>
+      ) : attempts.length ? (
+        <div className="provider-ledger-list">
+          {truncated ? (
+            <p className="pagination-warning">仅显示最近 1000 条调用证据，请使用 API 分页继续取证。</p>
+          ) : null}
+          {attempts.map((attempt) => (
+            <article className="provider-ledger-row" key={attempt.id}>
+              <div>
+                <strong>{attempt.operation}</strong>
+                <span>{attempt.provider_name} · {attempt.model_name} · 第 {attempt.attempt_number} 次</span>
+              </div>
+              <StatusBadge value={attempt.status} />
+              <dl>
+                <div><dt>请求时间</dt><dd>{formatDateTime(attempt.started_at)}</dd></div>
+                <div><dt>供应商请求号</dt><dd><code>{attempt.provider_request_id || "未返回"}</code></dd></div>
+                <div><dt>请求摘要</dt><dd><code>{attempt.request_sha256.slice(0, 16)}…</code></dd></div>
+                <div><dt>响应摘要</dt><dd><code>{attempt.response_sha256 ? `${attempt.response_sha256.slice(0, 16)}…` : "未记录"}</code></dd></div>
+                <div><dt>响应大小</dt><dd>{attempt.response_bytes == null ? "未报告" : formatBytes(attempt.response_bytes)}</dd></div>
+                <div><dt>Token</dt><dd>{attempt.total_tokens ?? "未报告"}</dd></div>
+              </dl>
+              <p className="provider-ledger-note">
+                {attempt.idempotency_key_sent
+                  ? "已发送 Idempotency-Key；这只证明请求头已发送，不代表供应商确认支持幂等。"
+                  : "此调用未发送 Idempotency-Key；重试安全性必须结合具体操作和领域状态判断。"}
+              </p>
+            </article>
+          ))}
+        </div>
+      ) : loading ? null : (
+        <p className="provider-ledger-empty">{emptyMessage}</p>
+      )}
+    </div>
+  );
+}
+
+
 function AssetsView({
   campaigns,
   assets,
@@ -2880,7 +2942,14 @@ function AssetsView({
   const [uploadTargetId, setUploadTargetId] = useState("");
   const [uploadKind, setUploadKind] = useState("image");
   const [sourceBusyId, setSourceBusyId] = useState("");
+  const [evidenceAssetId, setEvidenceAssetId] = useState("");
+  const [providerInvocations, setProviderInvocations] = useState<ProviderInvocationAttempt[]>([]);
+  const [providerInvocationsLoading, setProviderInvocationsLoading] = useState(false);
+  const [providerInvocationsError, setProviderInvocationsError] = useState("");
+  const [providerInvocationsTruncated, setProviderInvocationsTruncated] = useState(false);
+  const providerEvidenceRequest = useRef(0);
   const canEdit = roleAtLeast(role, "editor");
+  const canReview = roleAtLeast(role, "reviewer");
   const contentMap = useMemo(
     () => Object.fromEntries(contents.map((item) => [item.id, item.title])),
     [contents],
@@ -2926,6 +2995,7 @@ function AssetsView({
     + otherAwaitingUpload.length
     + otherAwaitingSelection.length;
   const readyAssets = assets.filter((asset) => asset.status === "ready");
+  const evidenceAsset = assets.find((asset) => asset.id === evidenceAssetId);
   const campaignForAsset = (asset: Asset) => {
     const content = contentById[asset.content_item_id || ""];
     return content ? campaignMap[content.campaign_id] : undefined;
@@ -3062,7 +3132,11 @@ function AssetsView({
           acknowledge_license_check: needsLicenseCheck,
         },
       });
-      flash("图片已选用并绑定当前内容版本");
+      flash(
+        needsLicenseCheck
+          ? "候选图片已进入安全下载与校验队列"
+          : "图片已选用并绑定当前内容版本",
+      );
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -3090,6 +3164,32 @@ function AssetsView({
     }
   }
 
+  async function openProviderEvidence(asset: Asset) {
+    const requestId = ++providerEvidenceRequest.current;
+    setEvidenceAssetId(asset.id);
+    setProviderInvocations([]);
+    setProviderInvocationsError("");
+    setProviderInvocationsTruncated(false);
+    setProviderInvocationsLoading(true);
+    try {
+      const result = await apiAllPages<ProviderInvocationAttempt>(
+        `/assets/${asset.id}/provider-invocations`,
+        { pageLimit: 100, maxPages: 10 },
+      );
+      if (requestId !== providerEvidenceRequest.current) return;
+      setProviderInvocations(result.items);
+      setProviderInvocationsTruncated(result.truncated);
+    } catch (caught) {
+      if (requestId === providerEvidenceRequest.current) {
+        setProviderInvocationsError(messageOf(caught));
+      }
+    } finally {
+      if (requestId === providerEvidenceRequest.current) {
+        setProviderInvocationsLoading(false);
+      }
+    }
+  }
+
   return (
     <>
       <PageHeading
@@ -3104,6 +3204,37 @@ function AssetsView({
       />
       {error ? <p className="inline-error">{error}</p> : null}
       {!canEdit ? <p className="permission-note">当前为只读权限，可查看和下载已就绪素材。</p> : null}
+      {canReview && evidenceAsset ? (
+        <section className="panel" aria-labelledby="asset-provider-evidence-title">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Provider evidence</p>
+              <h2 id="asset-provider-evidence-title">素材调用证据</h2>
+              <p>{contentMap[evidenceAsset.content_item_id || ""] || "未关联内容"} · {evidenceAsset.id.slice(0, 8)}</p>
+            </div>
+            <button
+              className="button button-ghost"
+              type="button"
+              onClick={() => {
+                providerEvidenceRequest.current += 1;
+                setEvidenceAssetId("");
+                setProviderInvocations([]);
+                setProviderInvocationsError("");
+                setProviderInvocationsTruncated(false);
+              }}
+            >
+              关闭
+            </button>
+          </div>
+          <ProviderInvocationEvidence
+            attempts={providerInvocations}
+            loading={providerInvocationsLoading}
+            error={providerInvocationsError}
+            truncated={providerInvocationsTruncated}
+            emptyMessage="该素材暂无调用记录；人工上传和旧任务不会伪造 Provider 证据。"
+          />
+        </section>
+      ) : null}
       <section className="asset-stage-grid" aria-label="素材准备阶段">
         <article className="asset-stage-lane">
           <span className="asset-stage-number">1</span>
@@ -3136,7 +3267,13 @@ function AssetsView({
                 />
                 <div className="asset-processing-state">
                   <span className="activity-spinner" aria-hidden="true" />
-                  <span>{asset.provider === "openverse" ? "正在检索候选图片" : "正在生成素材"}</span>
+                  <span>
+                    {asset.provider === "openverse"
+                      ? asset.metadata_json.pending_candidate_selection
+                        ? "正在下载并校验候选图片"
+                        : "正在检索候选图片"
+                      : "正在生成素材"}
+                  </span>
                 </div>
                 <div className="indeterminate-track" aria-label="处理中"><span /></div>
               </div>
@@ -3352,6 +3489,9 @@ function AssetsView({
                 <button onClick={() => void download(`/assets/${asset.id}/download`, `asset-${asset.id}`)}>
                   <Icon name="download" />下载
                 </button>
+              ) : null}
+              {canReview ? (
+                <button onClick={() => void openProviderEvidence(asset)}>调用证据</button>
               ) : null}
               {canEdit
               && asset.status === "ready"

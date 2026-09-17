@@ -18,11 +18,16 @@ from ..dependencies import (
     Principal,
     require_role,
 )
-from ..entities import Asset, ContentItem, new_id
+from ..entities import (
+    Asset,
+    ContentItem,
+    ProviderInvocation,
+    ProviderInvocationAttempt,
+    new_id,
+)
 from ..filenames import safe_filename
 from ..job_queue import enqueue_job
 from ..knowledge_service import local_path_from_uri
-from ..media_providers import MediaGeneration, MediaProviderError, download_generated_media
 from ..object_storage import build_object_storage, is_managed_storage_uri
 from ..pagination import (
     DEFAULT_PAGE_LIMIT,
@@ -32,12 +37,14 @@ from ..pagination import (
     paginate,
 )
 from ..publish_evidence import PublishEvidenceError, normalize_publish_evidence
+from ..provider_invocations import provider_invocation_attempt_response_data
 from ..schemas import (
     AssetCapabilitiesResponse,
     AssetResponse,
     AssetSelectionRequest,
     AssetSourceChangeRequest,
     JobResponse,
+    ProviderInvocationAttemptResponse,
 )
 from ..storage_ledger import (
     StorageLedgerUnverified,
@@ -50,6 +57,7 @@ from ..storage_ledger import (
 router = APIRouter(prefix="/assets", tags=["assets"])
 Db = Annotated[Session, Depends(get_db)]
 Editor = Annotated[Principal, Depends(require_role("editor"))]
+Reviewer = Annotated[Principal, Depends(require_role("reviewer"))]
 
 
 def storage_write_http_error(error: Exception) -> HTTPException:
@@ -161,6 +169,44 @@ def get_asset_detail(asset_id: str, principal: CurrentPrincipal, session: Db):
     return get_asset(session, principal.workspace_id, asset_id)
 
 
+@router.get(
+    "/{asset_id}/provider-invocations",
+    response_model=list[ProviderInvocationAttemptResponse],
+)
+def list_asset_provider_invocations(
+    asset_id: str,
+    principal: Reviewer,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    asset = get_asset(session, principal.workspace_id, asset_id)
+    rows = paginate(
+        session,
+        select(ProviderInvocationAttempt, ProviderInvocation)
+        .join(
+            ProviderInvocation,
+            ProviderInvocation.id == ProviderInvocationAttempt.invocation_id,
+        )
+        .where(
+            ProviderInvocation.workspace_id == principal.workspace_id,
+            ProviderInvocation.entity_type == "asset",
+            ProviderInvocation.entity_id == asset.id,
+        ),
+        timestamp_column=ProviderInvocationAttempt.started_at,
+        id_column=ProviderInvocationAttempt.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        scalar=False,
+    )
+    return [
+        provider_invocation_attempt_response_data(attempt, invocation)
+        for attempt, invocation in rows
+    ]
+
+
 @router.get("/{asset_id}/download")
 def download_asset(
     asset_id: str,
@@ -261,7 +307,9 @@ def change_asset_source(
         "license_checked_at",
         "license_checked_by_user_id",
         "license_review_required",
+        "pending_candidate_selection",
         "provider_configuration_required",
+        "retry_sequence",
         "search_candidates",
         "search_provider",
         "selected_candidate",
@@ -356,8 +404,6 @@ def select_asset_candidate(
     if asset_content_version(asset) != content.version:
         raise HTTPException(status_code=409, detail="不能选择旧内容版本的素材")
     metadata = dict(asset.metadata_json or {})
-    selected_storage = None
-    selected_storage_uri = None
     cleanup_job_id = None
 
     if asset.provider == "openverse" and asset.status == "awaiting_selection":
@@ -382,71 +428,50 @@ def select_asset_candidate(
         )
         if selected is None:
             raise HTTPException(status_code=404, detail="图片搜索候选不存在")
-        generation = MediaGeneration(
-            status="ready",
-            download_url=str(selected.get("download_url") or ""),
-            mime_type="image/jpeg",
-            filename="searched-image.jpg",
-        )
-        try:
-            raw = download_generated_media(
-                generation,
-                max_bytes=settings.max_upload_bytes,
-                allowed_hosts=tuple(
-                    settings.image_search_download_allowed_hosts
-                ),
-                require_https=True,
-            )
-            normalized = normalize_publish_evidence(
-                raw,
-                filename="searched-image.jpg",
-                kind="screenshot",
-                max_bytes=settings.max_upload_bytes,
-                max_pixels=settings.publish_evidence_max_pixels,
-            )
-        except (MediaProviderError, PublishEvidenceError, ValueError) as error:
-            raise HTTPException(
-                status_code=422,
-                detail="所选图片无法通过安全下载或图片规范校验",
-            ) from error
-        storage = build_ledgered_object_storage(
-            session,
-            settings,
-            owner_type="asset",
-            owner_id=asset.id,
-        )
-        try:
-            stored = storage.put(
-                workspace_id=principal.workspace_id,
-                category="assets",
-                filename=f"openverse-cover.{normalized.extension}",
-                stream=io.BytesIO(normalized.data),
-                content_type=normalized.mime_type,
-            )
-        except (StorageQuotaExceeded, StorageLedgerUnverified) as error:
-            raise storage_write_http_error(error) from error
-        cleanup_job_id = request_asset_object_cleanup(session, settings, asset)
-        selected_storage = storage
-        selected_storage_uri = stored.uri
-        asset.status = "ready"
-        asset.storage_uri = stored.uri
-        asset.mime_type = stored.mime_type
-        asset.size_bytes = stored.size_bytes
+        checked_at = datetime.now(timezone.utc).isoformat()
+        asset.status = "queued"
         asset.error = None
         metadata = {
             **metadata,
-            "selected": True,
-            "selected_candidate": {
-                key: value
-                for key, value in selected.items()
-                if key != "download_url"
+            "pending_candidate_selection": {
+                "candidate_id": payload.candidate_id,
+                "license_checked_by_user_id": principal.user_id,
+                "license_checked_at": checked_at,
             },
             "license_checked_by_user_id": principal.user_id,
-            "license_checked_at": datetime.now(timezone.utc).isoformat(),
-            "checksum": stored.checksum,
-            "source_checksum": normalized.source_sha256,
+            "license_checked_at": checked_at,
         }
         asset.metadata_json = metadata
+        job = enqueue_job(
+            session,
+            job_type="asset.download",
+            payload={
+                "asset_id": asset.id,
+                "candidate_id": payload.candidate_id,
+                "content_version": content.version,
+            },
+            workspace_id=principal.workspace_id,
+            idempotency_key=(
+                f"asset.download:{asset.id}:{payload.candidate_id}:"
+                f"content-v{content.version}"
+            ),
+        )
+        record_audit(
+            session,
+            action="asset.selection_requested",
+            entity_type="asset",
+            entity_id=asset.id,
+            workspace_id=principal.workspace_id,
+            actor_user_id=principal.user_id,
+            metadata={
+                "content_item_id": content.id,
+                "candidate_group": metadata.get("candidate_group"),
+                "provider": asset.provider,
+                "job_id": job.id,
+            },
+        )
+        session.flush()
+        return asset
     elif asset.status == "ready":
         if payload.candidate_id:
             raise HTTPException(
@@ -494,15 +519,7 @@ def select_asset_candidate(
             "cleanup_job_id": cleanup_job_id,
         },
     )
-    try:
-        session.flush()
-    except Exception:
-        if selected_storage is not None and selected_storage_uri is not None:
-            try:
-                selected_storage.delete(selected_storage_uri)
-            except Exception:
-                pass
-        raise
+    session.flush()
     return asset
 
 
@@ -517,11 +534,27 @@ def retry_asset(
     session: Db,
     settings: AppSettings,
 ):
-    asset = get_asset(session, principal.workspace_id, asset_id)
+    asset = get_asset(session, principal.workspace_id, asset_id, for_update=True)
     if asset.status not in {"failed", "planned", "stale"}:
         raise HTTPException(status_code=409, detail="当前素材状态不能重新执行")
+    metadata = dict(asset.metadata_json or {})
+    job_payload: dict[str, object] = {"asset_id": asset.id}
     if asset.provider == "openverse":
-        job_type = "asset.search"
+        pending = metadata.get("pending_candidate_selection")
+        if asset.status == "failed" and isinstance(pending, dict):
+            candidate_id = pending.get("candidate_id")
+            if not isinstance(candidate_id, str) or not candidate_id:
+                raise HTTPException(status_code=409, detail="图库候选下载凭证无效")
+            job_type = "asset.download"
+            job_payload.update(
+                {
+                    "candidate_id": candidate_id,
+                    "content_version": asset_content_version(asset),
+                }
+            )
+        else:
+            job_type = "asset.search"
+            metadata.pop("pending_candidate_selection", None)
     else:
         configured_provider = (
             settings.image_provider
@@ -544,14 +577,20 @@ def retry_asset(
             )
         asset.provider = configured_provider
         job_type = "asset.generate"
+    try:
+        retry_sequence = int(metadata.get("retry_sequence") or 0) + 1
+    except (TypeError, ValueError):
+        retry_sequence = 1
+    metadata["retry_sequence"] = retry_sequence
+    asset.metadata_json = metadata
     asset.status = "queued"
     asset.error = None
     job = enqueue_job(
         session,
         job_type=job_type,
-        payload={"asset_id": asset.id},
+        payload=job_payload,
         workspace_id=principal.workspace_id,
-        idempotency_key=f"{job_type}:{asset.id}:retry",
+        idempotency_key=f"{job_type}:{asset.id}:retry:{retry_sequence}",
     )
     record_audit(
         session,

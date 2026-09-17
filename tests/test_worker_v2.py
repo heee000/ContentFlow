@@ -250,7 +250,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             def generate(self, **_kwargs):
                 return MediaGeneration(
                     status="ready",
-                    content=b"generated image bytes",
+                    download_url="https://assets.example/private-result.png",
                     mime_type="image/png",
                     filename="generated.png",
                     metadata={"request_id": "media-worker-request"},
@@ -264,30 +264,52 @@ class WorkerIntegrationTest(unittest.TestCase):
         with patch(
             "contentflow.worker.build_media_provider",
             return_value=FakeHTTPMediaProvider(),
+        ), patch(
+            "contentflow.worker.download_generated_media",
+            return_value=b"generated image bytes",
         ):
             self.assertTrue(worker.run_once())
 
         with db.SessionLocal() as session:
             asset = session.get(Asset, asset_id)
             queue_job = session.get(Job, job_id)
-            invocation = session.scalar(
+            invocations = list(
+                session.scalars(
                 select(ProviderInvocation).where(
                     ProviderInvocation.entity_id == asset_id
+                    ).order_by(ProviderInvocation.created_at, ProviderInvocation.id)
                 )
             )
-            attempt = session.scalar(
-                select(ProviderInvocationAttempt).where(
-                    ProviderInvocationAttempt.invocation_id == invocation.id
+            attempts = list(
+                session.scalars(
+                    select(ProviderInvocationAttempt)
+                    .where(
+                        ProviderInvocationAttempt.invocation_id.in_(
+                            [invocation.id for invocation in invocations]
+                        )
+                    )
+                    .order_by(
+                        ProviderInvocationAttempt.started_at,
+                        ProviderInvocationAttempt.id,
+                    )
                 )
             )
             self.assertEqual(asset.status, "ready")
             self.assertEqual(queue_job.status, "succeeded")
-            self.assertEqual(invocation.job_id, job_id)
-            self.assertEqual(invocation.provider_kind, "media")
-            self.assertEqual(invocation.operation, "media.generate")
-            self.assertEqual(attempt.status, "succeeded")
-            self.assertTrue(attempt.idempotency_key_sent)
-            self.assertEqual(attempt.provider_request_id, "media-worker-request")
+            self.assertTrue(all(item.job_id == job_id for item in invocations))
+            self.assertEqual(
+                [invocation.provider_kind for invocation in invocations],
+                ["media", "media"],
+            )
+            self.assertEqual(
+                [invocation.operation for invocation in invocations],
+                ["media.generate", "media.download"],
+            )
+            self.assertTrue(all(attempt.status == "succeeded" for attempt in attempts))
+            self.assertTrue(attempts[0].idempotency_key_sent)
+            self.assertFalse(attempts[1].idempotency_key_sent)
+            self.assertEqual(attempts[0].provider_request_id, "media-worker-request")
+            self.assertEqual(attempts[1].response_bytes, len(b"generated image bytes"))
 
     def test_openverse_search_is_bound_to_queue_job_ledger(self):
         with db.SessionLocal() as session:

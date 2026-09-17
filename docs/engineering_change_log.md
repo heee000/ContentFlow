@@ -931,3 +931,22 @@
 - 远程证据：实现提交 `9a6c154ba154356bda6ff6089137d1e0b473e506` 已以 John Wang 身份普通推送；手动触发的 [ContentFlow CI #33710709007](https://github.com/heee000/ContentFlow/actions/runs/33710709007) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `341 passed, 196 subtests passed`、覆盖率 82.60%；Prometheus、前端、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9876813444` 摘要为 `sha256:d113346727fab94672907a3f7bf171fcf4719437f908685b606b792202e79adc`。
 - 剩余边界：没有用真实目标媒体服务执行 live conformance、账单与质量签收；生成结果 URL 下载和 Openverse 候选选中后的文件下载没有独立 Provider attempt，但最终对象由存储账本与 SHA-256 校验覆盖。Asset 页面尚无通用调用证据入口；普通 SHA-256 的低熵猜测、证据保留/删除/导出策略、真实告警接收器和供应商自动查询仍未关闭。
 - 安全范围：公网部署继续冻结；本轮未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，没有调用真实 Provider、Openverse、微信或其他平台，也没有创建素材、草稿、发布或云资源。
+
+### CF-20260917-01：收尾中断的素材下载账本和异步选图
+
+- 状态：本地已验证；GitHub 签收待更新。
+- 问题：生成 URL/候选文件下载缺少调用证据；选中图库图片在 API 事务中同步请求网络；素材重试固定键会返回旧失败 Job；media/search 虽已入库却被旧响应 Schema 拒绝；快速切换证据面板可能混淆素材。
+- 解决：下载前独立提交调用账本，保存精确响应摘要和受控请求号；选图改为 `asset.download` 后台任务，下载后重新校验版本/审核/选择凭证，成功后才切换同组素材；已完成候选重放短路。素材行锁保护递增重试键，失败候选重试不重新搜索。API/TypeScript 补齐 media/search，素材和 Job 共用脱敏序列化，前端加入请求序号保护。
+- 安全：初始 URL 白名单/HTTPS 在账本前预检，重定向逐跳验证；HTTP 错误、正文超限也保存受控请求号。账本无媒体字节、URL、密钥和异常正文。素材证据限定本工作区 reviewer/admin，下载仍受对象账本、图片规范化和当前内容版本保护。
+- 涉及：`provider_invocations.py`、`media_providers.py`、`worker.py`、`job_recovery.py`、素材/Job 路由、响应 Schema、工作台和四组相关测试。
+- 定向验证：`90 passed, 53 subtests passed`。新增失败证据脱敏、响应头/超限、连续重试、完成后重放、跨工作区和 editor 拒绝测试。Ruff、diff 检查、部署配置验证、Alembic 单 head、前端 lint、2 项 SSR、Vinext/Next.js 构建通过。
+- 首轮完整回归发现旧下载策略用例被账本初始化抢先失败，已将纯 URL 预检移回账本前并通过该用例；不通过删除用例或放宽断言处理。最终完整回归为 `328 passed, 17 skipped, 199 subtests passed`，分支覆盖率 81.41%；17 项为未配置的 PostgreSQL/MinIO/CI 容器场景。现有框架弃用警告保留记录，不等同于测试失败。
+- 剩余边界：下载证据不是 Provider 计费/结果证明，不保证跨外部服务 exactly-once；同组并发选图、完成提交丢失和网络分区 fencing 仍需目标 PostgreSQL 故障矩阵。证据 HMAC/生命周期和企业运行能力仍未关闭。
+
+### CF-20260917-02：自有 Ubuntu 私人测试环境准备
+
+- 状态：进行中，SSH 密钥认证待排障；未开始安装或部署。
+- 用户提供：Ubuntu 24.04.2 LTS、2 核/4 GB、约 800 GB 可用存储；尚未远程实测 CPU 型号、磁盘介质或峰值资源。
+- 已做：Windows 到 TCP/22 连通，SSH 主机身份与 known_hosts 匹配；在 Windows 用户 `.ssh` 生成专用 Ed25519 密钥并保留私钥本地。用户提供诊断已确认家目录、`.ssh`、`authorized_keys` 权限/所有者正常，但 authorized_keys 为 0 字节；公钥未写入是本次拒绝的直接原因。已给出 Ubuntu 直接追加公钥及核对指纹的命令，等待验证，不要求发送密码。
+- 路径：先解决认证、确认 Docker/sudo/硬件/网络，再创建独立低资源内部栈；先验空测试库和持久化，再接真实 API。已有数据的迁移选择与凭据注入单独处理。完整步骤见 `docs/ubuntu_private_test_setup.md`。
+- 范围：自有机器内部测试获得授权；公网部署仍暂停，不开放数据库管理端口，不创建付费云资源，不复制 Windows 依赖到 Linux。

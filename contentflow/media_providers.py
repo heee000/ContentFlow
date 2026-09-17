@@ -19,6 +19,29 @@ MEDIA_CONTRACT_VERSION = "1"
 MEDIA_CONTRACT_VERSION_HEADER = "ContentFlow-Media-Version"
 _MAX_ERROR_RESPONSE_BYTES = 64 * 1024
 _RESPONSE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024
+_DOWNLOAD_REQUEST_ID_HEADERS = (
+    "x-request-id",
+    "x-requestid",
+    "request-id",
+    "x-amzn-requestid",
+)
+
+
+def _download_request_metadata(headers: Any) -> dict[str, str]:
+    if headers is None or not callable(getattr(headers, "get", None)):
+        return {}
+    for header in _DOWNLOAD_REQUEST_ID_HEADERS:
+        value = headers.get(header)
+        if (
+            isinstance(value, str)
+            and 1 <= len(value) <= 255
+            and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            return {
+                "provider_request_id": value,
+                "provider_request_id_source": f"header.{header}"[:40],
+            }
+    return {}
 
 
 def media_provider_profile_fingerprint(settings: Settings, kind: str) -> str:
@@ -791,7 +814,7 @@ class HTTPMediaProvider:
         if value is None:
             return None
         try:
-            _validate_download_url(
+            validate_media_download_url(
                 value,
                 tuple(self.settings.media_download_allowed_hosts),
                 require_https=self.settings.production,
@@ -1022,7 +1045,7 @@ def build_media_provider(settings: Settings, kind: str) -> MediaProvider:
     raise ValueError(f"不支持的素材生成 provider: {provider_name}")
 
 
-def _validate_download_url(
+def validate_media_download_url(
     url: str,
     allowed_hosts: tuple[str, ...],
     *,
@@ -1075,7 +1098,10 @@ def download_generated_media(
     allowed_hosts: tuple[str, ...] = (),
     require_https: bool = False,
     max_redirects: int = 5,
+    call_metadata: dict[str, Any] | None = None,
 ) -> bytes:
+    if call_metadata is not None and not isinstance(call_metadata, dict):
+        raise ValueError("素材下载调用元数据容器无效")
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
         raise ValueError("素材下载大小上限无效")
     if (
@@ -1098,7 +1124,7 @@ def download_generated_media(
     redirect_statuses = {301, 302, 303, 307, 308}
     try:
         for redirect_count in range(max_redirects + 1):
-            _validate_download_url(
+            validate_media_download_url(
                 current_url,
                 allowed_hosts,
                 require_https=require_https,
@@ -1117,18 +1143,23 @@ def download_generated_media(
                         if redirect_count >= max_redirects:
                             raise ValueError("素材下载重定向次数超过限制")
                         next_url = urljoin(str(response.url), location)
-                        _validate_download_url(
+                        validate_media_download_url(
                             next_url,
                             allowed_hosts,
                             require_https=require_https,
                         )
                         current_url = next_url
                         continue
+                    if call_metadata is not None:
+                        call_metadata.update(
+                            _download_request_metadata(response.headers)
+                        )
                     if not 200 <= response.status_code < 300:
                         retryable = response.status_code in {408, 425, 429} or (
                             500 <= response.status_code < 600
                         )
                         disposition = "暂时" if retryable else "永久"
+                        request_metadata = _download_request_metadata(response.headers)
                         raise MediaProviderError(
                             f"素材下载服务返回{disposition}错误"
                             f"（状态码 {response.status_code}）",
@@ -1138,6 +1169,12 @@ def download_generated_media(
                                 HTTPMediaProvider._retry_after_seconds(response)
                                 if retryable
                                 else None
+                            ),
+                            provider_request_id=request_metadata.get(
+                                "provider_request_id"
+                            ),
+                            provider_request_id_source=request_metadata.get(
+                                "provider_request_id_source"
                             ),
                         )
                     content_length = response.headers.get(

@@ -20,6 +20,7 @@ JOB_RECOVERY_POLICIES: dict[str, JobRecoveryPolicy] = {
     "connector.test": JobRecoveryPolicy.REPLAY_SAFE,
     "asset.generate": JobRecoveryPolicy.PROVIDER_IDEMPOTENT,
     "asset.search": JobRecoveryPolicy.REPLAY_SAFE,
+    "asset.download": JobRecoveryPolicy.DOMAIN_GUARDED,
     "asset.poll": JobRecoveryPolicy.REPLAY_SAFE,
     "publish.dispatch": JobRecoveryPolicy.DOMAIN_GUARDED,
     "publish.reconcile": JobRecoveryPolicy.DOMAIN_GUARDED,

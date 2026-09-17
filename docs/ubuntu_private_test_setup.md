@@ -1,0 +1,46 @@
+# Ubuntu 内部测试机准备记录
+
+更新：2026-09-17。范围是用户自有电脑上的私人测试；既有公网/云服务器部署仍暂停。
+
+## 已确认与待确认
+
+- 用户报告 Ubuntu 24.04.2 LTS、2 核 CPU、4 GB RAM、约 800 GB 可用存储；这些尚不是远程资源采样。
+- 用户已启用 OpenSSH，并完成过 Windows 到 Ubuntu 的交互式登录。
+- Windows 到该机器 TCP/22 已连通，SSH 主机密钥与 Windows 已保存的 known_hosts 匹配。
+- 已在 Windows 用户的 `.ssh` 下新建专用 `contentflow_ubuntu_test` Ed25519 密钥。私钥未进入仓库、未上传或打印；只要求用户追加对应公钥。
+- 用户反馈已执行公钥追加，但专用密钥仍被服务器拒绝。握手确认客户端发送了预期密钥；用户随后提供权限/指纹诊断，确认家目录 750、`.ssh` 700、`authorized_keys` 600 且所有者正确，但文件为 0 字节。已给出 Ubuntu 直接追加公钥的命令；仍须实际免密连接验证后才能标记成功。
+- 尚未安装服务器软件、复制业务数据、修改服务器防火墙、配置真实 Provider 或执行平台测试。
+
+主机地址、用户名和凭据在操作者自己的连接配置中维护，不写入公开部署模板。
+
+## 先完成 SSH 认证
+
+已登录 Ubuntu 的操作者检查以下输出；只有路径权限和公钥指纹，不要求发送密码或私钥：
+
+```sh
+ls -ld ~ ~/.ssh ~/.ssh/authorized_keys
+ssh-keygen -lf ~/.ssh/authorized_keys
+```
+
+Windows 检查预期公钥指纹：
+
+```powershell
+ssh-keygen -lf "$env:USERPROFILE\.ssh\contentflow_ubuntu_test.pub"
+```
+
+两个指纹必须匹配。`.ssh` 应由登录用户持有并为 `700`，`authorized_keys` 为 `600`；家目录不能让其他用户写入。若已符合仍拒绝，再核对 sshd 的实际 AuthorizedKeysFile、PubkeyAuthentication 和认证日志。保留现有 key 和密码登录，不清空 authorized_keys，不关闭 StrictHostKeyChecking，不授予无限制免密 sudo。
+
+## 认证通过后的实施顺序
+
+1. **只读预检**：核实 x86_64、CPU 型号/指令集、RAM/swap、物理磁盘、Docker/Compose、已有服务、睡眠配置和 sudo 权限。旧 AMD/Intel CPU 的实际依赖兼容性需要实测，不能只按“2 核”估算。
+2. **低资源内部栈**：单 Worker；Web/API/PostgreSQL/pgvector/MinIO；文本和媒体采用用户已选择的 API，本地 BGE-M3 小批量起步。构建尽量在开发机或 CI 完成，不在运行业务时同时构建。监控全套按需启动。
+3. **独立部署配置**：使用独立目录/项目名/数据卷，数据库和对象存储不映射到整个局域网；对外入口采用私有 HTTPS 反向代理或 SSH 隧道。明确网页 API Base、Cookie、CORS、代理层数及注册策略，不能通过关闭生产保护来“修好登录”。根目录 Compose 是开发配置，不能不经调整直接作为共享服务器配置。
+4. **凭据和数据**：先运行空测试数据库；用户现有知识库/素材/数据库是否迁移需明确选择后执行。密钥通过独立文件或 Secret 注入，不提交 Git；Windows `.venv`、`node_modules`、运行缓存不复制到 Linux。切换 Embedding 模型必须重建向量，不能混用旧 BGE 向量。
+5. **主机运行保障**：确认 Docker/服务开机启动，服务器不自动休眠；使用持久数据卷，数据库和对象备份到不同物理设备。swap 仅为 OOM 缓冲；索引期间的可用内存、换页、队列等待和 API 响应才是判断是否要升级 RAM/切 Embedding API 的依据。
+6. **逐级验收**：先完成健康检查、登录、空数据读写、重启持久化；再用受控样例验证索引、真实内容生成、素材和人工审核。微信先测试连接和草稿，实际公开发布保持单独明确操作，不能在部署验证脚本中自动发布。
+
+公网部署资产 `deploy/public-test/` 当前要求固定公网域名、R2、不可变镜像，且部署脚本会启动 BGE 缓存初始化。内部测试需要独立适配，不能仅把主机地址替换成局域网 IP；也不能声称 Embedding API 模式已经跳过该初始化步骤。
+
+## 网络边界
+
+客户端换网络不会改变常驻 Worker 的出口；服务器所在网络改变出口或使用不同代理仍可能触发微信白名单问题。SSH/Tailscale 私网地址不是微信所见的公网出口。是否需要固定出口网关，等实际服务器出口和网络稳定性采样后再决定。

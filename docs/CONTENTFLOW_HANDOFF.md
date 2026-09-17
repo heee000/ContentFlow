@@ -1,6 +1,6 @@
 # ContentFlow 项目交接文档
 
-> 更新日期：2026-09-03
+> 更新日期：2026-09-17
 > 适用仓库：ContentFlow 仓库根目录
 > GitHub：<https://github.com/heee000/ContentFlow>
 > 当前工作分支：`codex/enterprise-media-runtime`
@@ -65,7 +65,7 @@ ContentFlow 面向营销内容生产，把一份活动 Brief 和品牌/产品知
 |---|---|---|
 | Web | Next.js 16.2.12、React 19.2.8、TypeScript | 单页运营工作台，入口为 `web/app/contentflow-app.tsx` |
 | API | FastAPI 0.115+、Pydantic | REST API 前缀默认 `/api/v1` |
-| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`d2e3f4a5b6c7` |
+| ORM/迁移 | SQLAlchemy 2、Alembic | 仓库当前唯一迁移 head：`a5b6c7d8e9f0` |
 | 隔离测试数据库 | SQLite | 仅在测试显式指定 URL 时使用，不是默认生产运行库 |
 | 生产数据库 | PostgreSQL 16 + pgvector | 迁移创建 1024 维向量表与 HNSW 索引 |
 | 异步任务 | 数据库 Job 队列 + 独立 Python Worker | 不依赖 Redis/Celery |
@@ -2099,3 +2099,16 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 媒体结果 URL 下载与 Openverse 候选选中后的下载还没有独立 Provider attempt；最终文件由对象存储账本与 checksum 保护，但网络请求、来源响应与配额诊断仍可继续完善。Asset 页面也尚未提供通用调用证据入口。
 - 普通 SHA-256 低熵猜测、证据 retention/export/legal hold、负责人/双人核对、真实 receiver、Provider 自动结果/费用查询、完成提交丢失和网络分区 fencing 仍未关闭。
 - 公网部署继续冻结；未读取 `.env`、账密、模型缓存、备份、运行数据或受保护知识文件，未调用真实 Provider、Openverse、微信或其他平台。继续禁止读取、修改、暂存或提交 `knowledge/北京周末 CityWalk 路线助手产品资料.txt`。
+
+## 21.55 下载证据、异步候选下载与 Ubuntu 内部测试准备
+
+日期：2026-09-17。本节承接中断前未提交的下载账本改动；早期本机运行快照不作为当前有效配置证明。
+
+1. 新增 `LedgeredMediaDownloader`：媒体 URL 下载和 Openverse 候选下载在网络请求前独立提交 attempt，绑定真实 Worker Job；只记录请求摘要、精确响应字节的 SHA-256/大小及受控请求号，不落原始 URL、文件字节或错误正文。下载没有发送幂等头。初始 URL 白名单/HTTPS 预检在开始账本前执行，重定向仍逐跳校验；收到最终响应头时立即保存请求号，正文超限或读取失败也可留证。
+2. Openverse 的选用接口只记录许可确认和候选选择并创建 `asset.download`，不再持有 API 事务同步下载。Worker 完成下载和图片规范校验后锁定、刷新并重检素材/内容版本与审批状态，成功存储后才切换同组封面。对象写入后的异常走既有补偿；同一候选已 ready 时重放不重新下载。
+3. 失败下载的素材重试保留已选候选和许可依据，不重新执行搜索；每轮重试使用递增序号，避免固定幂等键返回旧失败 Job。素材行锁串行化序号更新。`asset.download` 已加入恢复策略注册表，采用领域状态保护。
+4. 修复上一阶段遗漏的 API/TypeScript `provider_kind` 类型：数据库已有 media/search，但响应 Schema 仍只接受 text/embedding，媒体证据查询可能报 500。新增 reviewer/admin 专用素材证据分页接口，复用 Job 证据的脱敏序列化。前端区分搜索与下载，提供素材级证据入口，并防止快速切换素材时旧响应覆盖新面板。
+5. 没有新增迁移，head 保持 `a5b6c7d8e9f0`，公开表数仍为 33。定向合同/下载/Worker/账本回归为 `90 passed, 53 subtests passed`；完整回归及提交/CI 结果继续写入工程台账 `CF-20260917-01`。前端 ESLint、2 项 SSR、Vinext 和 Next.js/TypeScript 生产构建通过。
+6. 用户新授权自有 Ubuntu 机器内部测试，公网和付费云部署继续暂停。已验证 TCP/22 与主机身份，已生成专用 SSH 密钥；用户追加公钥后仍被服务器拒绝，正在等待权限/指纹诊断。没有把已验证的网络连接写成已部署。实施顺序和资源边界见 `docs/ubuntu_private_test_setup.md`。
+
+本轮仍未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件；未调用真实 Provider/社媒或创建素材、草稿、公开发布。普通 SHA-256、证据生命周期、真实 Provider 合同、多 Worker 完成提交/fencing、企业运行体系仍是后续审计项。

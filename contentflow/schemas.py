@@ -564,7 +564,7 @@ class ProviderInvocationAttemptResponse(BaseModel):
     request_key: str
     entity_type: str
     entity_id: str
-    provider_kind: Literal["text", "embedding"]
+    provider_kind: Literal["text", "embedding", "media", "search"]
     provider_name: str
     model_name: str
     operation: str

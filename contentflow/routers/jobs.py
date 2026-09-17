@@ -29,6 +29,7 @@ from ..pagination import (
     UpdatedAfter,
     paginate,
 )
+from ..provider_invocations import provider_invocation_attempt_response_data
 from ..schemas import (
     JobContextResponse,
     JobManualReviewAction,
@@ -279,34 +280,7 @@ def list_job_provider_invocations(
         scalar=False,
     )
     return [
-        ProviderInvocationAttemptResponse(
-            id=attempt.id,
-            invocation_id=invocation.id,
-            request_key=invocation.request_key,
-            entity_type=invocation.entity_type,
-            entity_id=invocation.entity_id,
-            provider_kind=invocation.provider_kind,
-            provider_name=invocation.provider_name,
-            model_name=invocation.model_name,
-            operation=invocation.operation,
-            request_sha256=invocation.request_sha256,
-            request_bytes=invocation.request_bytes,
-            attempt_number=attempt.attempt_number,
-            status=attempt.status,
-            idempotency_key_sent=attempt.idempotency_key_sent,
-            provider_request_id=attempt.provider_request_id,
-            provider_request_id_source=attempt.provider_request_id_source,
-            response_sha256=attempt.response_sha256,
-            response_bytes=attempt.response_bytes,
-            response_model=attempt.response_model,
-            usage_source=attempt.usage_source,
-            input_tokens=attempt.input_tokens,
-            output_tokens=attempt.output_tokens,
-            total_tokens=attempt.total_tokens,
-            error_type=attempt.error_type,
-            started_at=attempt.started_at,
-            completed_at=attempt.completed_at,
-        )
+        provider_invocation_attempt_response_data(attempt, invocation)
         for attempt, invocation in rows
     ]
 

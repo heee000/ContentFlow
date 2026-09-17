@@ -64,15 +64,19 @@ from .job_queue import (
 )
 from .knowledge_service import index_document
 from .media_providers import (
+    MediaGeneration,
     MediaProviderError,
     build_media_provider,
     download_generated_media,
     media_provider_profile_fingerprint,
+    validate_media_download_url,
 )
 from .object_storage import build_object_storage, is_managed_storage_uri
 from .prompt_eval import execute_prompt_eval_run
+from .publish_evidence import PublishEvidenceError, normalize_publish_evidence
 from .provider_invocations import (
     LedgeredEmbeddingProvider,
+    LedgeredMediaDownloader,
     LedgeredMediaProvider,
     LedgeredSearchProvider,
     ProviderInvocationLedger,
@@ -614,6 +618,240 @@ def handle_asset_search(
     }
 
 
+def handle_asset_download(
+    session: Session, payload: dict[str, Any], settings: Settings
+) -> dict[str, Any]:
+    asset_id = str(payload.get("asset_id") or "")
+    candidate_id = str(payload.get("candidate_id") or "")
+    if not asset_id or not candidate_id:
+        raise MediaProviderError("素材下载任务参数无效", retryable=False)
+    asset = session.get(Asset, asset_id)
+    if asset is None:
+        raise ValueError("素材任务不存在")
+    metadata = dict(asset.metadata_json or {})
+    selected_candidate = metadata.get("selected_candidate")
+    if (
+        asset.status == "ready"
+        and isinstance(selected_candidate, dict)
+        and selected_candidate.get("id") == candidate_id
+    ):
+        return {"asset_id": asset.id, "status": asset.status}
+    if asset.status == "stale":
+        return {"asset_id": asset.id, "status": asset.status}
+    if asset.kind != "image" or asset.provider != "openverse":
+        raise MediaProviderError("素材任务不是开放图库下载任务", retryable=False)
+    if asset.status not in {"queued", "failed"}:
+        raise MediaProviderError("素材当前状态不能下载图库候选", retryable=False)
+    pending = metadata.get("pending_candidate_selection")
+    if not isinstance(pending, dict) or pending.get("candidate_id") != candidate_id:
+        raise MediaProviderError("素材下载选择凭证无效", retryable=False)
+    try:
+        requested_version = int(payload.get("content_version"))
+    except (TypeError, ValueError) as error:
+        raise MediaProviderError("素材下载内容版本无效", retryable=False) from error
+    if requested_version < 1 or asset.content_version != requested_version:
+        raise MediaProviderError("素材下载内容版本已变化", retryable=False)
+    candidates = metadata.get("search_candidates")
+    if not isinstance(candidates, list):
+        raise MediaProviderError("图片搜索候选元数据无效", retryable=False)
+    candidate = next(
+        (
+            item
+            for item in candidates
+            if isinstance(item, dict) and item.get("id") == candidate_id
+        ),
+        None,
+    )
+    if candidate is None:
+        raise MediaProviderError("图片搜索候选不存在", retryable=False)
+    generation = MediaGeneration(
+        status="ready",
+        download_url=str(candidate.get("download_url") or ""),
+        mime_type="image/jpeg",
+        filename="searched-image.jpg",
+    )
+    allowed_hosts = tuple(settings.image_search_download_allowed_hosts)
+    call_metadata: dict[str, Any] = {}
+    downloader = LedgeredMediaDownloader(
+        ledger=ProviderInvocationLedger(session.get_bind()),
+        workspace_id=asset.workspace_id,
+        entity_id=asset.id,
+        provider_name="openverse",
+        model_name="openverse-image-download-v1",
+        operation="search.download",
+    )
+    try:
+        validate_media_download_url(
+            generation.download_url, allowed_hosts, require_https=True,
+        )
+        raw = downloader.download(
+            request={
+                "candidate_id": candidate_id,
+                "download_url": generation.download_url,
+                "max_bytes": settings.max_upload_bytes,
+                "allowed_hosts": sorted(allowed_hosts),
+                "require_https": True,
+                "max_redirects": 5,
+            },
+            invoke=lambda: download_generated_media(
+                generation,
+                max_bytes=settings.max_upload_bytes,
+                allowed_hosts=allowed_hosts,
+                require_https=True,
+                call_metadata=call_metadata,
+            ),
+            call_metadata=call_metadata,
+        )
+        normalized = normalize_publish_evidence(
+            raw,
+            filename="searched-image.jpg",
+            kind="screenshot",
+            max_bytes=settings.max_upload_bytes,
+            max_pixels=settings.publish_evidence_max_pixels,
+        )
+    except MediaProviderError:
+        raise
+    except (PublishEvidenceError, ValueError):
+        raise MediaProviderError(
+            "所选图片无法通过安全下载或图片规范校验",
+            retryable=False,
+        ) from None
+
+    asset_query = select(Asset).where(Asset.id == asset_id)
+    content_query = select(ContentItem).where(
+        ContentItem.id == asset.content_item_id,
+        ContentItem.workspace_id == asset.workspace_id,
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        asset_query = asset_query.with_for_update()
+        content_query = content_query.with_for_update()
+    asset = session.scalar(asset_query.execution_options(populate_existing=True))
+    content = session.scalar(content_query.execution_options(populate_existing=True))
+    if asset is None or content is None:
+        raise MediaProviderError("素材或关联内容已不存在", retryable=False)
+    if asset.status == "stale":
+        return {"asset_id": asset.id, "status": asset.status}
+    current_metadata = dict(asset.metadata_json or {})
+    current_pending = current_metadata.get("pending_candidate_selection")
+    if (
+        asset.status != "queued"
+        or asset.provider != "openverse"
+        or asset.content_version != requested_version
+        or content.version != requested_version
+        or content.status != "approved"
+        or not isinstance(current_pending, dict)
+        or current_pending.get("candidate_id") != candidate_id
+    ):
+        raise MediaProviderError(
+            "下载完成前素材或内容状态已经变化，结果未写入",
+            retryable=False,
+        )
+
+    storage = build_ledgered_object_storage(
+        session,
+        settings,
+        owner_type="asset",
+        owner_id=asset.id,
+    )
+    stored = storage.put(
+        workspace_id=asset.workspace_id,
+        category="assets",
+        filename=f"openverse-cover.{normalized.extension}",
+        stream=BytesIO(normalized.data),
+        content_type=normalized.mime_type,
+    )
+    try:
+        cleanup_job_id = None
+        if (
+            is_managed_storage_uri(settings, asset.storage_uri)
+            and asset.storage_uri != stored.uri
+        ):
+            previous_checksum = current_metadata.get("checksum")
+            if not isinstance(previous_checksum, str) or len(previous_checksum) != 64:
+                previous_checksum = None
+            _allocation, cleanup_job = request_storage_deletion(
+                session,
+                settings=settings,
+                workspace_id=asset.workspace_id,
+                storage_uri=asset.storage_uri,
+                owner_type="asset",
+                owner_id=asset.id,
+                category="assets",
+                filename=f"{asset.id}.object",
+                size_bytes=asset.size_bytes,
+                checksum=previous_checksum,
+                mime_type=asset.mime_type,
+            )
+            cleanup_job_id = cleanup_job.id if cleanup_job is not None else None
+        asset.status = "ready"
+        asset.storage_uri = stored.uri
+        asset.mime_type = stored.mime_type
+        asset.size_bytes = stored.size_bytes
+        asset.error = None
+        current_metadata.pop("pending_candidate_selection", None)
+        asset.metadata_json = {
+            **current_metadata,
+            "selected": True,
+            "selected_candidate": {
+                key: value
+                for key, value in candidate.items()
+                if key != "download_url"
+            },
+            "license_checked_by_user_id": current_pending.get(
+                "license_checked_by_user_id"
+            ),
+            "license_checked_at": current_pending.get("license_checked_at"),
+            "checksum": stored.checksum,
+            "source_checksum": normalized.source_sha256,
+        }
+        candidate_group = current_metadata.get("candidate_group")
+        if candidate_group:
+            siblings = list(
+                session.scalars(
+                    select(Asset)
+                    .where(
+                        Asset.content_item_id == content.id,
+                        Asset.workspace_id == asset.workspace_id,
+                        Asset.content_version == content.version,
+                        Asset.id != asset.id,
+                    )
+                    .limit(settings.asset_max_items_per_content_version + 1)
+                )
+            )
+            if len(siblings) > settings.asset_max_items_per_content_version:
+                raise MediaProviderError(
+                    "当前内容版本素材数量超过配置上限",
+                    retryable=False,
+                )
+            for sibling in siblings:
+                sibling_metadata = dict(sibling.metadata_json or {})
+                if sibling_metadata.get("candidate_group") == candidate_group:
+                    sibling_metadata["selected"] = False
+                    sibling.metadata_json = sibling_metadata
+        record_audit(
+            session,
+            action="asset.select",
+            entity_type="asset",
+            entity_id=asset.id,
+            workspace_id=asset.workspace_id,
+            actor_user_id=current_pending.get("license_checked_by_user_id"),
+            metadata={
+                "content_item_id": content.id,
+                "candidate_group": candidate_group,
+                "provider": asset.provider,
+                "cleanup_job_id": cleanup_job_id,
+            },
+        )
+        session.flush()
+    except Exception:
+        try:
+            storage.delete(stored.uri)
+        except Exception:
+            pass
+        raise
+    return {"asset_id": asset.id, "status": asset.status}
+
+
 def _store_generation(
     *,
     session: Session,
@@ -621,13 +859,50 @@ def _store_generation(
     settings: Settings,
     generation,
 ) -> None:
+    allowed_hosts = tuple(settings.media_download_allowed_hosts)
     try:
-        data = download_generated_media(
-            generation,
-            max_bytes=settings.max_upload_bytes,
-            allowed_hosts=tuple(settings.media_download_allowed_hosts),
-            require_https=settings.production,
-        )
+        if generation.content is None and generation.download_url:
+            validate_media_download_url(
+                generation.download_url,
+                allowed_hosts,
+                require_https=settings.production,
+            )
+            call_metadata: dict[str, Any] = {}
+            model_name = (
+                settings.image_model if asset.kind == "image" else settings.video_model
+            )
+            downloader = LedgeredMediaDownloader(
+                ledger=ProviderInvocationLedger(session.get_bind()),
+                workspace_id=asset.workspace_id,
+                entity_id=asset.id,
+                provider_name=asset.provider,
+                model_name=model_name,
+                operation="media.download",
+            )
+            data = downloader.download(
+                request={
+                    "download_url": generation.download_url,
+                    "max_bytes": settings.max_upload_bytes,
+                    "allowed_hosts": sorted(allowed_hosts),
+                    "require_https": settings.production,
+                    "max_redirects": 5,
+                },
+                invoke=lambda: download_generated_media(
+                    generation,
+                    max_bytes=settings.max_upload_bytes,
+                    allowed_hosts=allowed_hosts,
+                    require_https=settings.production,
+                    call_metadata=call_metadata,
+                ),
+                call_metadata=call_metadata,
+            )
+        else:
+            data = download_generated_media(
+                generation,
+                max_bytes=settings.max_upload_bytes,
+                allowed_hosts=allowed_hosts,
+                require_https=settings.production,
+            )
     except MediaProviderError:
         raise
     except ValueError:
@@ -1564,6 +1839,7 @@ HANDLERS: dict[str, Handler] = {
     "connector.test": handle_connector_test,
     "asset.generate": handle_asset_generate,
     "asset.search": handle_asset_search,
+    "asset.download": handle_asset_download,
     "asset.poll": handle_asset_poll,
     "publish.dispatch": handle_publish_dispatch,
     "publish.reconcile": handle_publish_reconcile,
