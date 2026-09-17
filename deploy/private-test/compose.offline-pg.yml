@@ -1,0 +1,8 @@
+# linux/amd64 config ID independently verified after pulling the canonical
+# pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+# on the connected machine. docker-save/load does not preserve RepoDigests.
+# Apply only after checking the transfer archive SHA-256 and loaded image ID.
+services:
+  postgres:
+    image: sha256:5fa1d4c74299c466a1a051ed66ce7a44b69cf27b66444a202f7e5592963ed596
+    pull_policy: never

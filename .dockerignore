@@ -1,10 +1,13 @@
-.git
-.venv
-__pycache__
-*.pyc
-.contentflow
-web/node_modules
-web/.next
-web/dist
-web/.openai
-tests
+# Send only backend build inputs; never send local credentials or knowledge data.
+*
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!alembic.ini
+!contentflow/
+!contentflow/**
+!migrations/
+!migrations/**
+**/__pycache__
+**/*.pyc
+**/.env*

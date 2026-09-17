@@ -963,3 +963,13 @@
 - 本地验证：Node 24.19.0 下 ESLint、2 项 SSR、Vinext 构建、Next.js 16.3.5/TypeScript 生产构建通过；npm moderate 审计为 0 漏洞，Python 依赖审计为 0 已知漏洞。系统默认 Node 22.11 低于项目要求，本轮只在验证进程内使用已安装的合规 Node，没有修改全局安装。
 - 远程签收：[CI #35203918464](https://github.com/heee000/ContentFlow/actions/runs/35203918464) 的真实 PostgreSQL/MinIO 为 `345 passed, 199 subtests passed`、分支覆盖率 82.53%；前端构建和漏洞审计、后端/Prometheus、安全审计、可复现源码/SBOM 与签名证明均成功。保留 7 项框架警告，不将其说成测试失败或已消除。该结果也签收 `CF-20260917-01` 的下载改动；没有重复推送或降低 CI 门槛。
 - 边界：恢复同摘要下载只解决制品获取，不等于旧 MinIO 的长期维护/安全支持签收；自有 Ubuntu 的 CPU 兼容性、镜像可达性、峰值内存和备份恢复仍待实机验收。
+
+### CF-20260917-04：私人测试基座与 API-only 轻量镜像
+
+- 问题：旧电脑可用内存有限，完整后端镜像总带 PyTorch/BGE；根 Compose 有开发端口/默认口令，不宜直接用于共享网络；根 Docker 构建上下文未以白名单排除本地敏感资料；Ubuntu 无法稳定直连 Docker Hub。
+- 选择：用户明确允许按需迁移现有 API 配置，并选择 Embedding API，尚待选型/提供 Key。旧数据、知识和素材不迁移；付费云和公网仍暂停。
+- 实现：新增独立基础 Compose（不含 Web/API/Worker），只启 PostgreSQL/MinIO，internal 网络、无端口映射、内存/PID 上限、日志轮转、独立持久卷。初始化仅在 700 目录独占创建 600 的随机凭据文件；对象应用凭据限制到单 bucket，不等于数据库角色拆分已完成。
+- 镜像：Dockerfile 新增 `INCLUDE_LOCAL_EMBEDDINGS`，默认 true 保持原路径；false 时不安装本地模型依赖。根 `.dockerignore` 采用必要源码白名单。API-only 镜像约 412 MB，运行依赖导入与无 torch 检查通过；不将体积减少等同于已测内存节省。
+- 网络：Quay 同摘要 Server/Client 已拉取；pgvector 由 Windows 官方摘要拉取后导出压缩包，经 SSH 搬运。额外覆盖文件只接受已核对的 linux/amd64 config ID 并禁止拉取；须先核对压缩包 hash 和 load 后 ID。未改变服务器 DNS/代理、未使用第三方镜像、未停现有 Windows 服务。
+- 验证：私人/既有公网部署配置 9 项通过，Ruff/diff 检查通过；目标 bash/sh/Compose 静态校验、600 权限、Docker 权限和开机启动验证通过。live bucket 权限、PostgreSQL/pgvector 启动、重启持久化、整栈登录与真实 API 仍待验证，不能标为已部署完成。
+- 增量：MinIO 已健康，live 初始化验证非匿名 bucket、应用可列出业务 bucket 且管理 API 拒绝，关闭上一条的 bucket 权限等待项；其他验证仍待完成。推荐的硅基流动 BGE-M3 当前免费、原生 1024 维；Ubuntu 无 Key HTTPS 探测返回 401，仅证明网络连通。选型依据和免费限制已记录，尚未注册、充值、发送业务内容或复制 API Key。

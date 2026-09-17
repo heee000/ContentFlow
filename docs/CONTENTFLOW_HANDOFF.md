@@ -2127,3 +2127,10 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 实机为 AMD A6-9210、2 逻辑 CPU、AVX2、3.7 GiB RAM（当时可用约 1.6 GiB）、已有 3.7 GiB swap、机械盘根分区空闲约 846 GiB。既有后台和桌面进程保留；这些是静态预检，不是整栈/BGE 容量验收。
 - 新增 `deploy/private-test/install-docker.sh`，通过目标机 bash 语法/帮助、参数/非 root 拒绝和传输哈希核验。使用现有 Ubuntu 源安装 Docker/Compose，需要操作者手动 sudo，并显式接受 docker 组 root 等价权限；不修改 sudoers 或 SSH，不启动应用容器。Docker 会初始化自身网络规则。`.sh` 固定 LF 防止 Windows 换行破坏 Linux 执行。
 - 当前等待操作者执行安装脚本；Docker 和应用尚未安装。下一步从新 SSH 会话核验组权限、daemon 与 Compose，再建立独立私有栈，不能直接运行带开发默认端口/弱口令的根 Compose。尚未搬迁业务数据、凭据、知识文件或模型缓存，公网部署继续暂停。
+
+### 21.55.3 Docker 已就绪，改用 Embedding API
+
+- 用户已执行安装，新会话确认 Docker 29.1.3/Compose 2.40.3、docker 组、enabled/active，替代上一节“Docker 未安装”状态。当前用户选择 Embedding API，并允许安全迁移现有 API 配置；仅缺合适的 Embedding 服务/Key，不再要求用户处理 SSH/Docker 安装。
+- 新增私人基础 Compose、随机凭据/bucket 初始化脚本和离线 pgvector 覆盖，目标目录与 `.env` 分别为 700/600；只是基座，不含应用服务。Ubuntu Quay 镜像已取得，Docker Hub 超时由 Windows 同摘要离线搬运处理；压缩包必须先核验完整哈希再 load，勿加载残留的未完成 archive。
+- 后端可选不安装本地 Embedding 依赖，默认保持原行为；约 412 MB API-only 镜像已在本机完成无网络导入验证。构建上下文改白名单，不读取/传送受保护知识资料。9 项部署配置测试通过，其他运行签收边界见工程台账 `CF-20260917-04`。
+- 用户最新询问 Embedding 与 LLM 的区别及高性价比选择；应先解释并给注册/Key 获取步骤，再接真实配置。未选择目标服务前，不读取并搬运现有密钥或发送知识内容到新的供应商。应用部署、持久化、登录和真实检索尚未完成，公网继续冻结。

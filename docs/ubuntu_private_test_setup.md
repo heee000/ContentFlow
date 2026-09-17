@@ -27,11 +27,23 @@ Docker 未安装，sudo 要求密码。Docker CE 官方 APT 地址一次请求�
 
 Docker 启动会初始化自己的网络/防火墙规则，因此不能将安装描述为“防火墙完全不变”；当前脚本没有配置业务端口映射，也没有启动 ContentFlow 容器。
 
-脚本已经通过目标 Ubuntu 的 `bash -n`、帮助输出、缺少参数拒绝（退出码 2）与非 root 拒绝（退出码 1）；上传前后 SHA-256 一致。仓库为 `.sh` 显式固定 LF，避免 Windows 签出引入 CRLF。已给操作者一次性 sudo 命令，当前等待其本机执行，**尚未安装 Docker**。
+脚本已经通过目标 Ubuntu 的 `bash -n`、帮助输出、缺少参数拒绝（退出码 2）与非 root 拒绝（退出码 1）；上传前后 SHA-256 一致。仓库为 `.sh` 显式固定 LF，避免 Windows 签出引入 CRLF。操作者已执行安装；新 SSH 会话验证 Docker 29.1.3、Compose 2.40.3、docker 组权限及 daemon enabled/active，安装已签收。
 
 安装完成后用新 SSH 会话验证组权限、daemon 和 Compose，再进入 ContentFlow 的独立目录、配置与镜像准备。脚本存在不等于已安装，尚未复制业务数据库或密钥。
 
 主机地址、用户名和凭据在操作者自己的连接配置中维护，不写入公开部署模板。
+
+## Docker 安装后的准备增量
+
+- 实测当时约 1.8 GiB 可用内存、swap 使用约 690 MiB。用户已明确选择 **Embedding API**，并允许按需安全复制现有 API 配置；不复制旧数据库、知识库或素材。用户尚需注册/提供合适的 Embedding API Key，不能伪造占位 Key 或切换为 hash 冒充真实接入。
+- MinIO Server/Client 官方 Quay 固定摘要镜像已在 Ubuntu 拉取成功。Docker Hub 对 pgvector 的请求超时；Windows 当前 Docker Engine 27.4.0 可用且能取得同一固定摘要，改为本机保存镜像、压缩后经 SSH 传输。没有修改服务器 DNS/代理，也没有引入非官方镜像源。
+- pgvector 源端摘要为 `sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb`，linux/amd64 config ID 为 `sha256:5fa1d4c74299c466a1a051ed66ce7a44b69cf27b66444a202f7e5592963ed596`。未压缩 archive 为 446161920 字节，压缩包为 152452401 字节，后者 SHA-256 为 `15629343a6437d72f7e3e74184fc6a23ffc816aa0e7a65ceb114eded7283fa61`。**传输完成、目标哈希、load 和启动仍待验证**，部分文件不能加载或当作完整包。
+- 独立测试目录已创建为 700；初始化脚本生成独立随机数据库/对象存储口令，`.env` 为 600，未打印内容；没有复制已有 API 密钥。新基座配置无宿主端口，使用 internal 数据网络、资源上限、持久卷、日志轮转及独立 bucket 应用权限，另附按 config ID 锁定的离线 pgvector 覆盖文件。
+- Windows 已成功构建 API-only 后端，约 412 MB；无网络/只读容器中 Worker、psycopg、boto3 导入通过，确认不存在 torch/sentence-transformers。现有约 2.47 GB 本地模型镜像和运行容器均未替换。镜像大小不是运行内存指标，默认含本地依赖的分支本轮未重新构建。
+- `.dockerignore` 改为后端必要输入白名单，构建上下文约 722 kB；避免把业务知识、运行数据或密钥发送到构建器。私人/公网配置回归合计 9 项通过，目标机 shell/Compose 静态核验通过；**整栈、持久化、API 真实调用和用户登录尚未签收**。
+- MinIO 已在独立 internal 网络启动并健康，业务 bucket 设为非匿名；真实初始化验证应用凭据可列出业务 bucket，调用管理 API 被拒绝。没有公开端口，也没有业务资料。PostgreSQL 压缩镜像仍在传输中，不能把 MinIO 就绪说成整栈就绪。
+- Embedding 选型建议（2026-09-17）：硅基流动 `BAAI/bge-m3`，Base `https://api.siliconflow.cn/v1`，模型原生 1024 维，当前官方价格页标为免费。免费模型有实名认证和固定速率限制；不承诺永久价格或 SLA。服务端一次短 DNS 超时后，较长有界 HTTPS 探测返回 401，证明网络/认证端点可达，不是 Key 或向量调用通过。尚未注册、充值或发送任何知识内容。
+- 依据：[价格](https://siliconflow.cn/pricing)、[免费模型限制](https://docs.siliconflow.cn/docs/userguide/faqs/rate-limit-and-upgradation)、[Embedding API](https://docs.siliconflow.cn/docs/api/embeddings-post)、[BGE-M3 模型卡](https://huggingface.co/BAAI/bge-m3)。原生 1024 维不等同于支持可选 `dimensions` 请求字段；接入时须按目标合同验证，不能仅凭模型同名复用旧向量。
 
 ## 先完成 SSH 认证
 
