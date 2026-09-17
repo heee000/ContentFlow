@@ -93,6 +93,15 @@ def test_private_app_only_exposes_loopback_and_preserves_production_guards() -> 
         if name != "caddy":
             assert not service.get("ports")
     assert services["caddy"]["ports"] == ["127.0.0.1:3800:8080"]
+    assert services["caddy"]["cap_drop"] == ["ALL"]
+    assert services["caddy"]["user"] == "65532:65532"
+    assert services["caddy"]["read_only"] is True
+    assert "http://localhost:8080/health/live" in services["caddy"]["healthcheck"]["test"]
+    caddy_dockerfile = (DEPLOY / "Dockerfile.caddy").read_text("utf-8")
+    assert "RUN setcap -r /usr/bin/caddy" in caddy_dockerfile
+    caddy_config = (DEPLOY / "Caddyfile").read_text("utf-8")
+    assert "route {" in caddy_config
+    assert caddy_config.index("respond @wrong_host") < caddy_config.index("handle @backend")
     for name in ("api", "worker"):
         environment = services[name]["environment"]
         assert environment["CONTENTFLOW_ENVIRONMENT"] == "production"
@@ -106,7 +115,9 @@ def test_private_app_only_exposes_loopback_and_preserves_production_guards() -> 
         assert "outbound" in services[name]["networks"]
         assert services[name]["env_file"] == [{"path": "./runtime.env", "format": "raw"}]
     assert services["web"]["networks"] == ["app"]
-    assert services["caddy"]["networks"] == ["app"]
+    assert services["caddy"]["networks"] == ["app", "ingress"]
+    assert document["networks"]["ingress"]["driver_opts"]["com.docker.network.bridge.host_binding_ipv4"] == "127.0.0.1"
+    assert all("ingress" not in services[name]["networks"] for name in ("api", "worker", "web"))
 
 
 def test_runtime_preparation_is_exclusive_and_copies_no_root_keys(tmp_path) -> None:

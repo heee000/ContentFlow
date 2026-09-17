@@ -2,6 +2,18 @@
 
 更新：2026-09-17。范围是用户自有电脑上的私人测试；既有公网/云服务器部署仍暂停。
 
+**当前结论**：私人六服务已启动，Windows localhost:3600 的实际登录和真实知识索引通过；数据库/对象存储重启后数据校验通过。下方早期“待安装/待 Key/未迁移”等段落保留为过程记录，不能当作当前阻塞。最新应用源码为 `8a5e300`，完整 CI 356 passed / 199 subtests；配置实机修复见工程台账 `CF-20260917-08`。
+
+## 现在怎样体验
+
+在建立了专用 SSH 隧道的这台 Windows 打开 **http://localhost:3600/**，不是 Ubuntu IP，也不是旧 Windows 服务的 localhost:3000。新工作区为 `Ubuntu Private Test 20260917`，没有旧活动；登录资料保存在本轮 `.contentflow/private-test-transfer-20260917/private-test-login.json`，已被 Git 忽略，不上传或复制到公开文档。
+
+当前可以登录、浏览资源与系统、检查知识库和任务队列、创建活动。已有一个明确标记为合成测试的知识文件，真实索引成功；不是从旧知识文件拷贝。内容生成前仍需要在管理页完成 Prompt 版本、评测、独立审核与激活；生产保护没有关闭。微信渠道未迁移，本轮没有创建微信草稿或公开发布。
+
+已验收：PostgreSQL/MinIO/API/Web/Caddy 就绪、Worker 真实执行索引、API 鉴权、Host 限制、浏览器 Secure/HttpOnly Cookie、重启前后对象哈希/向量/文档一致。只重启了私人容器，不是主机断电或异机恢复测试。六容器低负载采样约 550 MiB，系统 available 1357 MiB、swap 843 MiB；暂时足够低并发体验，不能据此承诺长期高负载。
+
+入口配置特别注意：Caddy 需要去除不必要的二进制低端口 capability，并同时接内部 app 与单独 ingress 网络才能在当前 Docker 建立回环端口映射；后者不是出口隔离。Host 拒绝必须位于显式 route 的 proxy 之前。Windows 隧道使用 IPv6 远端字面量但不加 `-6`，否则 IPv4 回环绑定失败。均不需要修改 SSH 认证、系统 DNS、全局代理或关闭生产保护。
+
 ## 连接准备过程（最新状态见实机预检）
 
 - 用户报告 Ubuntu 24.04.2 LTS、2 核 CPU、4 GB RAM、约 800 GB 可用存储；这些尚不是远程资源采样。

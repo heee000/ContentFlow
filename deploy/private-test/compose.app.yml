@@ -105,16 +105,26 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
     ports: ["127.0.0.1:3800:8080"]
-    networks: [app]
+    # Docker does not publish ports for containers attached only to internal
+    # networks. Keep backend networks internal; give only the proxy an ingress.
+    networks: [app, ingress]
     depends_on:
       api:
         condition: service_healthy
       web:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     mem_limit: 96m
     pids_limit: 64
 
 networks:
   app:
     internal: true
+  ingress:
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
   outbound:

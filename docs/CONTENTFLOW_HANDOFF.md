@@ -2148,3 +2148,11 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 已新增生产门禁保留的私人应用 Compose、Caddy、白名单 Provider 导出和独立运行密钥生成。只复制授权 API 配置，旧业务数据/账户不迁移。Windows localhost:3600 经 SSH 到 Ubuntu 回环入口，独立 Secure/HttpOnly Cookie 避免旧 Windows 实例干扰，不开放校园网/公网。
 - 三个应用镜像的压缩包完整 hash 与源/目标全部层、运行字段匹配已确认。Docker 27→29 归一旧空字段导致 image ID 改变，已逐项解释；不能随意忽略任何 ID 不一致。生产 Settings 验证通过，但首次安装态迁移 CLI 暴露漏打包资产错误，数据库迁移尚未执行。
 - 修复 `contentflow-migrate` 的非 editable 安装路径：wheel 明确携带迁移资产，使用受控安装前缀及绝对路径，不受 CWD 影响；新增含 `%` 路径和错误 CWD 的真实临时迁移回归。相关 13 项通过，新镜像构建/真实 CLI 与整栈签收继续执行。详见台账 `CF-20260917-06/07`，不能把基础服务就绪写成用户全流程可用。
+
+### 21.55.6 私人测试环境已启动并验证真实索引
+
+- 应用源码部署为 `8a5e300`；[CI #35212620332](https://github.com/heee000/ContentFlow/actions/runs/35212620332) 四个 Job 全绿，356 passed / 199 subtests。已安装 CLI 从 `/tmp` 对实际 PostgreSQL 迁移通过；迁移 head 未变。
+- Caddy 实机暴露文件 capability 冲突、仅 internal 网络无法发布端口和默认指令排序绕过 Host 拒绝三个问题，均已修复并实测。仅 Caddy 加普通 ingress bridge，data/app 保持 internal，仍只映射 Ubuntu 回环端口；Caddy 不是出口隔离。SSH 去掉影响 IPv4 本地绑定的 `-6`，实际 HTTP 和浏览器登录通过。详见 `CF-20260917-08`。
+- 新管理员与工作区完全独立，凭据只在私人运行目录和本机忽略目录；保留旧实例全部数据。一个合成资料已完成真实 Embedding 索引与调用账本。重启私人 DB/MinIO/API/Worker 后对象 checksum、文档、1024 维向量和单次调用证据仍正确，无 runnable Job。
+- 入口为 Windows http://localhost:3600/；浏览器 Secure/HttpOnly Cookie 保持开启。当前无经评测、独立审核和激活的 Prompt release，也未迁移微信渠道或验证本轮内容/媒体/发布全链路。不要关闭生产治理或自行伪造双人批准；下一阶段按明确测试流程推进。
+- 空闲采样六容器合计约 550 MiB，宿主约 1357 MiB available，swap 843 MiB；不是峰值/长稳保证。异机备份、固定出口和企业运行体系仍未完成。公网继续暂停；受保护知识文件仍未读、改、暂存或提交。

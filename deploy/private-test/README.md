@@ -25,7 +25,7 @@ Docker archive 不一定保留 RepoDigests。Docker 27 导出、Docker 29 加载
 
 ## 应用配置与启动
 
-1. 在开发机或 CI 构建后端（`INCLUDE_LOCAL_EMBEDDINGS=false`）和 Web；Web 构建参数 `NEXT_PUBLIC_CONTENTFLOW_API_BASE=http://localhost:3600/api/v1`。从官方来源取得 Caddy，所有镜像经完整包校验与加载身份核验后再使用。
+1. 在开发机或 CI 构建后端（`INCLUDE_LOCAL_EMBEDDINGS=false`）和 Web；Web 构建参数 `NEXT_PUBLIC_CONTENTFLOW_API_BASE=http://localhost:3600/api/v1`。Caddy 使用本目录 `Dockerfile.caddy` 基于固定官方摘要构建：移除二进制不再需要的 `CAP_NET_BIND_SERVICE`，避免清空容器 capabilities 后启动报 EPERM。可用 `docker build --network none --build-arg CADDY_IMAGE=<已验真的本地ID> -t <本地标签> - < Dockerfile.caddy`，stdin 构建不发送含凭据的目录。所有镜像核验后再使用，不能通过增权绕过启动问题。
 2. 仅在操作者明确授权复制 API 配置后，执行 `prepare-runtime.py export --container <已确认的源容器> --embedding-file <独立配置> --output <新的私有 providers.json>`。程序只导出白名单 Provider 参数，不复制旧数据库、用户账户、签名密钥或业务文件。将该文件经 SSH 传到私人目录。
 3. 在 Ubuntu 执行 `python3 prepare-runtime.py prepare --infra-env .env --providers providers.json --output runtime.env`。独占创建 600 文件，生成独立应用签名、凭据加密和指标密钥；只复制 S3 应用权限，不复制 MinIO 管理权限。已有文件不会被覆盖。Compose 需支持 `env_file.format: raw`（实测 2.40.3），防止 Key 中 `$` 被插值。
 4. 在该私人目录创建 `images.env`，包含 `CONTENTFLOW_RELEASE_SHA`（实际应用源码的完整 40 位 SHA）以及 `CONTENTFLOW_BACKEND_IMAGE`、`CONTENTFLOW_WEB_IMAGE`、`CONTENTFLOW_CADDY_IMAGE`（逐一验证的 `sha256:` image ID）。不要使用浮动标签。密钥不写入该文件。
@@ -51,9 +51,11 @@ cf_compose=(docker compose --env-file .env --env-file images.env \
 
 SSH 隧道只负责访问页面，关闭 Windows 隧道不会停止 Ubuntu Worker。电脑重启、网络隔离、Ubuntu 地址变化可能要求重连；不是自动跨网络远程访问方案。不得把此隧道的私网地址当作微信公网白名单地址。
 
+Windows 隧道命令不要加 `-6`：它不仅限制远端地址族，也会导致 `127.0.0.1` 本地监听无法解析。直接使用远端 IPv6 字面量即可，保留本地 IPv4 回环绑定。后台启动进程不等于隧道成功，必须实际请求 localhost:3600 的 readiness，再检查浏览器。
+
 ## 资源与边界
 
-- 基础服务无宿主端口；数据和前端网络均为 `internal: true`。API/Worker 另有出口网络以调用真实 API；Web/Caddy 仅在内部前端网络，Caddy 只映射回环端口。
+- 基础服务无宿主端口；数据和前端网络均为 `internal: true`。API/Worker 另有出口网络以调用真实 API；Web 仅在内部前端网络。Docker 29 对仅接 internal 网络的容器不建立宿主端口映射，因此只有 Caddy 另接普通 ingress bridge（默认绑定回环），仍显式只映射 `127.0.0.1:3800`。该入口网络不是出口隔离，不能声称 Caddy 没有出站能力；它不持有业务密钥，也不接数据网络。
 - PostgreSQL 内存上限 512 MiB，MinIO 384 MiB，初始化进程 128 MiB；日志轮转、PID 上限、持久卷和 `no-new-privileges` 均显式配置。上限不是容量签收，仍须实机测量。
 - API/Worker 各 512 MiB，Web 256 MiB，Caddy 96 MiB；Caddy 非 root、只读根文件系统、清空 capabilities、临时目录限额。总上限不代表实际常驻内存，旧电脑必须监测 swap、OOM 和队列积压。
 - 当前 PostgreSQL 用户仍是数据库容器初始化管理员，**不是**已完成的运行时最小权限角色拆分。不得把内部隔离称为企业级数据库权限治理。

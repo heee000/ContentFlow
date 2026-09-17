@@ -1000,3 +1000,17 @@
 - 根因：`PROJECT_ROOT = __file__.parents[1]` 在安装后指向 site-packages，wheel 又没有包含仓库根目录的 alembic.ini/migrations。配置文件不存在时 Alembic 创建空配置，最终无法找到迁移目录。即使读取到配置，原相对 script_location 还依赖当前目录。
 - 修复：setuptools 明确把 ini/env.py/template/全部 version 文件打入 wheel 的 `share/contentflow`；解析器只从受控源码目录或安装前缀选择完整资产，使用绝对迁移路径并处理 `%` 插值，缺失资源明确失败。不搜索任意 CWD 的迁移代码，不修改/伪造数据库版本，也不绕过已有未版本化库检查。
 - 回归：新增 wheel 资产声明、模拟非 editable 安装且 CWD 含错误配置、含百分号安装路径、真正临时 SQLite 升级至 head 和缺资源拒绝。相关部署/引导/打包合计 13 项通过；新版 API-only 镜像正在重建，必须再用已安装 CLI 在 `/tmp` 实际迁移验收。
+- 签收：新版镜像在 Windows 无网络/只读根文件系统、工作目录 `/tmp` 执行已安装 CLI，从临时空 SQLite 升至 head；修复镜像完整传输、层/运行配置匹配后，Ubuntu 从 `/tmp` 执行同一 CLI 对真实 PostgreSQL 通过。`8a5e300a551db64978b29b29b4ebd286f56f7fa0` 的 [CI #35212620332](https://github.com/heee000/ContentFlow/actions/runs/35212620332) 全绿，356 passed / 199 subtests，覆盖率摘要 83%，保留 7 项框架警告。
+
+### CF-20260917-08：真实私人入口与重启验收暴露的配置问题
+
+- Caddy 启动 EPERM：官方二进制带 `cap_net_bind_service=ep`，与非 root / `cap_drop=ALL` 组合冲突。新增 `Dockerfile.caddy`，基于已验真官方镜像离线移除该文件能力；端口为 8080，不需要增权。目标构建只发送 2 KiB Dockerfile、不包含凭据目录；无网络、只读根、no-new-privileges、无 capabilities 的 `caddy version` 验证通过。
+- 容器健康却无宿主入口：实测 Docker 29 对仅连接 internal 网络的 Caddy 保留 HostConfig.PortBindings，但 NetworkSettings.Ports 为 null。只为 Caddy 增加普通 ingress bridge，默认/显式绑定均为回环；data/app internal 不变。入口网络并非出站隔离，不再宣称 Caddy 无出口；代理不持有业务 Key、不连接 data 网络。[Docker 网络说明](https://docs.docker.com/engine/network/)
+- Host 门禁顺序：实际非法 Host 探针曾返回 200，原因是 Caddy 默认指令排序让 proxy handle 先于 respond。改为显式 route 顺序，实测非法 Host 403、正常 localhost readiness 200。新增 Caddy 健康检查，不能再把 restart 策略或 Compose 的运行态概称为入口健康。
+- SSH 转发：`-6` 同时限制本地监听地址族，导致 Windows `127.0.0.1` 绑定报 getaddrinfo 错误；取消该选项，远端继续使用已验证 IPv6 字面量。仅回环隧道实际请求通过，严格主机验证保留。早期“启动后台 PID”不是成功证据，后续以真实 HTTP 签收替代。
+- 应用签收：空库新建独立管理员；API 登录、未登录 401、非法 Host 403、production 配置与 Prompt 治理门禁通过。一个合成知识文件经正常上传/对象账本/Job/Worker/真实 Embedding 入库，形成 1 条 1024 维向量与 1 次 succeeded Provider attempt。没有读取/迁移旧知识，没有伪造 hash 模型。
+- 浏览器签收：真实工作台登录成功，专用 access/refresh Cookie 的 Secure/HttpOnly/SameSite=Lax 均通过浏览器检查；令牌和密码未打印。服务重启后重新加载页面仍保持正确工作区登录，知识库显示 1 份合成资料、1 个知识块、已索引。
+- 持久化签收：确认 runnable Job 为 0 后停止私人 API/Worker、重启 PostgreSQL/MinIO、恢复应用。前后同一合成文档均 indexed，对象实际字节 SHA-256 与记录相符，向量仍 1024 维，Provider attempt 仍只有 1 次 succeeded，没有因重启重复调用。不是主机断电或异机备份恢复演练。
+- 资源采样：重启恢复后六服务 Docker 内存合计约 550 MiB；宿主 MemAvailable 1357 MiB、swap 已用 843 MiB（包含既有桌面/后台负载）。只证明低负载可启动与索引，不是并发、长时运行或峰值容量保证。相关配置/迁移回归 14 项通过。
+- 剩余：新库尚无经评测、独立审核并激活的 Prompt release；没有迁移微信渠道，未跑本轮内容/媒体/发布全流程，不以部署健康冒充完成。运行数据库最小权限、异机备份、真实告警、固定微信公网出口与长稳测试仍待后续。
+- 用量：本次 Worker 索引账本报告 33 tokens，加上三次协议/语义最小探针共报告 108 tokens；这是服务返回用量，不是独立账单审计。重启校验没有重新索引或追加 AI 调用。
