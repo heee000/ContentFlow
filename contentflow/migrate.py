@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 from alembic import command
 from alembic.config import Config
@@ -70,7 +71,16 @@ def validate_public_restore_contract(script: str) -> list[str]:
 
 
 def _alembic_config(connection: Connection) -> Config:
-    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    # Editable/source runs and installed wheels have different asset locations.
+    # Never select migration code from the process's arbitrary working directory.
+    roots = (PROJECT_ROOT, Path(sys.prefix) / "share" / "contentflow")
+    root = next((candidate for candidate in roots
+                 if (candidate / "alembic.ini").is_file()
+                 and (candidate / "migrations" / "env.py").is_file()), None)
+    if root is None:
+        raise RuntimeError("ContentFlow migration assets are missing; reinstall the complete package")
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations").replace("%", "%%"))
     config.attributes["connection"] = connection
     return config
 

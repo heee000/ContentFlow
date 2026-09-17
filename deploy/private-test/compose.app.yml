@@ -1,0 +1,120 @@
+x-app-environment: &app-environment
+  CONTENTFLOW_ENVIRONMENT: production
+  CONTENTFLOW_RELEASE_SHA: ${CONTENTFLOW_RELEASE_SHA:?Set the verified application source SHA}
+  CONTENTFLOW_ALLOW_REGISTRATION: "false"
+  CONTENTFLOW_ALLOW_MOCK_PROVIDERS: "false"
+  CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS: "true"
+  CONTENTFLOW_METRICS_ENABLED: "true"
+  CONTENTFLOW_AUTH_RATE_LIMIT_ENABLED: "true"
+  CONTENTFLOW_TRUSTED_PROXY_HOPS: "1"
+  CONTENTFLOW_ACCESS_COOKIE_NAME: contentflow_private_access
+  CONTENTFLOW_REFRESH_COOKIE_NAME: contentflow_private_refresh
+  CONTENTFLOW_PUBLIC_BASE_URL: http://localhost:3600
+  CONTENTFLOW_CORS_ORIGINS: '["http://localhost:3600"]'
+  CONTENTFLOW_STORAGE_BACKEND: s3
+  CONTENTFLOW_EMBEDDING_PROVIDER: openai-compatible
+  CONTENTFLOW_EMBEDDING_DIMENSIONS: "1024"
+  CONTENTFLOW_WORKER_POLL_SECONDS: "2"
+  CONTENTFLOW_WORKER_HEARTBEAT_SECONDS: "10"
+  CONTENTFLOW_WORKER_LEASE_SECONDS: "300"
+  CONTENTFLOW_WORKER_MAX_ATTEMPTS: "4"
+  CONTENTFLOW_WORKER_STALE_SECONDS: "45"
+  CONTENTFLOW_WORKER_QUEUE_STALL_SECONDS: "300"
+  CONTENTFLOW_WORKER_DATABASE_RETRY_INITIAL_SECONDS: "1"
+  CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_SECONDS: "30"
+  CONTENTFLOW_WORKER_DATABASE_RETRY_MAX_ATTEMPTS: "8"
+  CONTENTFLOW_WORKER_DATABASE_RETRY_JITTER_RATIO: "0.2"
+
+x-runtime: &runtime
+  restart: unless-stopped
+  pull_policy: never
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  api:
+    <<: *runtime
+    image: ${CONTENTFLOW_BACKEND_IMAGE:?Set a verified locally loaded image ID}
+    env_file:
+      - path: ./runtime.env
+        format: raw
+    environment: *app-environment
+    # Migration runs once in an explicit maintenance step before API/Worker.
+    command: ["uvicorn", "contentflow.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    networks: [data, app, outbound]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+    stop_grace_period: 30s
+    mem_limit: 512m
+    pids_limit: 128
+
+  worker:
+    <<: *runtime
+    image: ${CONTENTFLOW_BACKEND_IMAGE:?Set a verified locally loaded image ID}
+    env_file:
+      - path: ./runtime.env
+        format: raw
+    environment: *app-environment
+    command: ["contentflow-worker"]
+    networks: [data, outbound]
+    depends_on:
+      api:
+        condition: service_healthy
+    stop_grace_period: 10m
+    mem_limit: 512m
+    pids_limit: 128
+
+  web:
+    <<: *runtime
+    image: ${CONTENTFLOW_WEB_IMAGE:?Set a verified locally loaded image ID}
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      HOSTNAME: 0.0.0.0
+    networks: [app]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    mem_limit: 256m
+    pids_limit: 128
+
+  caddy:
+    <<: *runtime
+    image: ${CONTENTFLOW_CADDY_IMAGE:?Set a verified locally loaded image ID}
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      XDG_CONFIG_HOME: /tmp/config
+      XDG_DATA_HOME: /tmp/data
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    ports: ["127.0.0.1:3800:8080"]
+    networks: [app]
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    mem_limit: 96m
+    pids_limit: 64
+
+networks:
+  app:
+    internal: true
+  outbound:

@@ -69,3 +69,8 @@ select = ["E4", "E7", "E9", "F"]
 
 [tool.setuptools.packages.find]
 include = ["contentflow*"]
+
+[tool.setuptools.data-files]
+"share/contentflow" = ["alembic.ini"]
+"share/contentflow/migrations" = ["migrations/env.py", "migrations/script.py.mako"]
+"share/contentflow/migrations/versions" = ["migrations/versions/*.py"]

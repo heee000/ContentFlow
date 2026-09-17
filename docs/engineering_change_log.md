@@ -983,3 +983,20 @@
 - 定向回归：Ruff 通过，26 项与 6 subtests 通过。完整覆盖率、构建和 CI 后续签收；BGE-M3 测试只是基础语义 smoke，不等于多语言/长文/领域检索基准。
 - 部署阻塞：Ubuntu 的既有 IPv6/IPv4 本次均超时，已请用户确认唤醒和当前地址；压缩镜像传输已正常结束，远端 hash/load、PostgreSQL、完整应用与旧数据迁移仍未执行。避免将历史连接成功当作当前可用。
 - 后续：用户确认地址未变、未休眠；本机路由为 WLAN 直连，较长超时重连后身份/认证成功，未改网络配置，不能将超时归因于用户休眠。Windows 完整测试发生原生 access violation（Pydantic Settings/Alembic 堆栈），故不记全量通过；更新镜像构建/导入成功，完整回归转 Linux CI 验证，保留 Windows 原生崩溃诊断项。
+- 远程签收：提交 `f2908246a273406825245930821cf5267bf96dee` 的 [CI #35209824845](https://github.com/heee000/ContentFlow/actions/runs/35209824845) 四个 Job 全部成功；真实 PostgreSQL/MinIO 为 `351 passed, 199 subtests passed`，覆盖率摘要 83%，保留 7 项警告。Ubuntu 本机另以合成文本完成 3×1024 向量与基础语义排序探针，报告 25 tokens；累计三次最小探针 75 tokens，不含后续知识索引。
+
+### CF-20260917-06：Ubuntu 私人应用栈、隔离凭据和浏览器入口
+
+- 问题：基础库就绪不等于完整应用；生产 Cookie、前端编译期 API 地址、出口网络、治理开关和旧实例登录冲突必须一起处理。离线镜像在 Docker 27→29 加载后 ID 改变，也不能直接放行。
+- 实现：新增 `compose.app.yml`、Caddy 和白名单 Provider 导出/独立运行配置生成脚本。保持 production、注册关闭、禁止 mock、Prompt 治理、共享限流与指标鉴权；新建应用签名/凭据加密/指标 Key，仅复制授权的文本、媒体和 Embedding 参数，不复制旧账户或业务库。运行 env 使用 raw 模式保留 Key 的字面量字符，目标配置为 600，拒绝覆盖已有文件。
+- 网络与资源：只有 Caddy 映射 Ubuntu 回环端口 3800，经 Windows 专用 SSH 隧道访问 localhost:3600；数据库、对象存储和前端采用 internal 网络，仅 API/Worker 有出口。各服务显式内存/PID/日志上限，单 Worker；Caddy 非 root、只读、去 capabilities。Secure/HttpOnly Cookie 不关闭，采用独立名称避免和旧 Windows 本地实例冲突。
+- 镜像身份：pgvector 完整压缩包 SHA-256 匹配；Docker 29 去掉旧空/false 字段后 config ID 从 `5fa1d4…` 变为 `4be5e8…`。逐项核验源/目标架构、全部 RootFS 层和运行配置后才更新覆盖文件。真实 PostgreSQL 16.14、vector 0.8.5 与 MinIO 健康；对象应用权限仍限单 bucket。不能将该特定格式转换作为放行未知 ID 的通用理由。
+- 构建与最小测试：API-only 新镜像、API Base 为 localhost:3600 的 Next.js Web 及官方摘要 Caddy 已完成 Windows 构建/获取；256883475 字节应用压缩包目标 hash 匹配后才加载。配置回归 11 项通过，Ruff 通过；本机 pytest 缓存存在权限警告，不影响该 11 项断言结果。
+- 剩余验收：应用运行时、迁移、首次管理员、浏览器 Cookie、真实知识索引、容器重启持久化和资源采样仍需逐项实际执行后补记。未启公网、未发布社媒、未复制旧知识/素材；数据库运行角色拆分、异机备份恢复和稳定出口尚未完成。
+
+### CF-20260917-07：非 editable 安装漏打包迁移资产
+
+- 触发：Ubuntu 的 production 配置校验已通过，但真实 `contentflow-migrate` 报 `No 'script_location' key found in configuration`，迁移尚未开始。源码/可编辑安装的旧测试未覆盖容器中 console entrypoint 的路径差异。
+- 根因：`PROJECT_ROOT = __file__.parents[1]` 在安装后指向 site-packages，wheel 又没有包含仓库根目录的 alembic.ini/migrations。配置文件不存在时 Alembic 创建空配置，最终无法找到迁移目录。即使读取到配置，原相对 script_location 还依赖当前目录。
+- 修复：setuptools 明确把 ini/env.py/template/全部 version 文件打入 wheel 的 `share/contentflow`；解析器只从受控源码目录或安装前缀选择完整资产，使用绝对迁移路径并处理 `%` 插值，缺失资源明确失败。不搜索任意 CWD 的迁移代码，不修改/伪造数据库版本，也不绕过已有未版本化库检查。
+- 回归：新增 wheel 资产声明、模拟非 editable 安装且 CWD 含错误配置、含百分号安装路径、真正临时 SQLite 升级至 head 和缺资源拒绝。相关部署/引导/打包合计 13 项通过；新版 API-only 镜像正在重建，必须再用已安装 CLI 在 `/tmp` 实际迁移验收。

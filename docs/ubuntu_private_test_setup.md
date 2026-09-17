@@ -59,7 +59,17 @@ Docker 启动会初始化自己的网络/防火墙规则，因此不能将安装
 
 本轮 Windows 完整覆盖率测试在迁移测试期间发生 Python 原生 `access violation`，没有产生完整通过结论；堆栈涉及 Pydantic Settings/Alembic，根因尚未定位，不将其无证据归因于业务代码或环境。定向回归及真实适配器测试通过，更新的 API-only Docker 镜像构建与无网络导入通过。完整回归使用 Linux CI 核验，Windows 崩溃仍保留为诊断项。
 
-## 先完成 SSH 认证
+## 2026-09-17 应用部署增量
+
+SSH 已恢复，MinIO 与 PostgreSQL 已在独立私网健康运行。pgvector 压缩包完整 hash 匹配，Docker 27→29 的旧空字段归一导致加载 ID 变化，经全部层和运行字段匹配后确认；实测 PostgreSQL 16.14 / vector 0.8.5。无需操作者重新追加公钥、装 Docker 或提供 Embedding Key。
+
+授权范围内的文本/媒体配置已从旧实例白名单导出，与独立 Embedding 配置一起经 SSH 存入新的 600 运行文件。应用签名、凭据加密、指标 Key 全部独立新建；旧数据库、旧账户、知识、素材和 MinIO 管理权限没有迁移到应用。
+
+Ubuntu 真实 Embedding 最小探针通过（3×1024，有限数值，相关句优先，25 tokens），含 Windows 两次共报告 75 tokens。`f290824` 的 Linux CI 全绿，351 passed / 199 subtests；Windows 原生崩溃诊断仍保留。应用镜像压缩传输已完整校验，正在加载和启动；登录、索引、重启持久化不因此自动算通过。
+
+访问方案为 Windows **http://localhost:3600/** → 严格验证的 SSH 隧道 → Ubuntu 回环 Caddy:3800。不是校园网直接开放，不是公网部署；页面及 API 使用同源地址，独立 Cookie 名，生产 Secure/HttpOnly 不关闭。详细可复用步骤见 `deploy/private-test/README.md`。
+
+## SSH 认证故障时的历史排查（当前已解决）
 
 已登录 Ubuntu 的操作者检查以下输出；只有路径权限和公钥指纹，不要求发送密码或私钥：
 
@@ -79,7 +89,7 @@ ssh-keygen -lf "$env:USERPROFILE\.ssh\contentflow_ubuntu_test.pub"
 ## 认证通过后的实施顺序
 
 1. **只读预检**：核实 x86_64、CPU 型号/指令集、RAM/swap、物理磁盘、Docker/Compose、已有服务、睡眠配置和 sudo 权限。旧 AMD/Intel CPU 的实际依赖兼容性需要实测，不能只按“2 核”估算。
-2. **低资源内部栈**：单 Worker；Web/API/PostgreSQL/pgvector/MinIO；文本和媒体采用用户已选择的 API，本地 BGE-M3 小批量起步。构建尽量在开发机或 CI 完成，不在运行业务时同时构建。监控全套按需启动。
+2. **低资源内部栈**：单 Worker；Web/API/PostgreSQL/pgvector/MinIO；文本、Embedding 和媒体采用用户已选择的 API，不在旧电脑加载本地 BGE。构建尽量在开发机或 CI 完成，不在运行业务时同时构建。监控全套按需启动。
 3. **独立部署配置**：使用独立目录/项目名/数据卷，数据库和对象存储不映射到整个局域网；对外入口采用私有 HTTPS 反向代理或 SSH 隧道。明确网页 API Base、Cookie、CORS、代理层数及注册策略，不能通过关闭生产保护来“修好登录”。根目录 Compose 是开发配置，不能不经调整直接作为共享服务器配置。
 4. **凭据和数据**：先运行空测试数据库；用户现有知识库/素材/数据库是否迁移需明确选择后执行。密钥通过独立文件或 Secret 注入，不提交 Git；Windows `.venv`、`node_modules`、运行缓存不复制到 Linux。切换 Embedding 模型必须重建向量，不能混用旧 BGE 向量。
 5. **主机运行保障**：确认 Docker/服务开机启动，服务器不自动休眠；使用持久数据卷，数据库和对象备份到不同物理设备。swap 仅为 OOM 缓冲；索引期间的可用内存、换页、队列等待和 API 响应才是判断是否要升级 RAM/切 Embedding API 的依据。

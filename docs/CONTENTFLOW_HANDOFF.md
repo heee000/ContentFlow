@@ -2141,3 +2141,10 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 新增通用 `CONTENTFLOW_EMBEDDING_SEND_DIMENSIONS=false` 适配固定输出维度的接口，默认 true 不变；返回维度检查继续强制。账本区分可选参数模式，同时保留默认请求身份。详见台账 `CF-20260917-05`，不能把调用成功说成完整 RAG 或费用签收。
 - 原有 SSH IPv6 与 IPv4 在本次重连都超时，已请用户唤醒电脑或提供 `hostname -I` 最新输出。传输进程已完成，但压缩包目标 hash/load 与 PostgreSQL 启动必须在恢复后实际核验；不得加载此前中断的未压缩 archive。现有 Windows 运行服务未动，公网仍冻结。
 - 用户已确认电脑未休眠、地址仍相同；路由为 WLAN 直连，后续 SSH 重连成功，不再等用户改地址或安装软件。Windows 完整覆盖率测试出现原生 access violation 而非完整通过；定向 26 项/6 subtests、真实适配器和新版 Docker 镜像通过。提交后必须用 Linux CI 完整签收，保留 Windows 崩溃边界，不反复盲跑。
+
+### 21.55.5 Ubuntu 私人应用栈与安装态迁移修复
+
+- `f290824` 的 [CI #35209824845](https://github.com/heee000/ContentFlow/actions/runs/35209824845) 四个 Job 全绿，351 passed / 199 subtests。SSH 已恢复；PostgreSQL 16.14 / vector 0.8.5、MinIO 与单 bucket 应用权限已实测。Ubuntu 真实 Embedding 探针亦通过，不再等待操作者给地址、Key 或安装 Docker。
+- 已新增生产门禁保留的私人应用 Compose、Caddy、白名单 Provider 导出和独立运行密钥生成。只复制授权 API 配置，旧业务数据/账户不迁移。Windows localhost:3600 经 SSH 到 Ubuntu 回环入口，独立 Secure/HttpOnly Cookie 避免旧 Windows 实例干扰，不开放校园网/公网。
+- 三个应用镜像的压缩包完整 hash 与源/目标全部层、运行字段匹配已确认。Docker 27→29 归一旧空字段导致 image ID 改变，已逐项解释；不能随意忽略任何 ID 不一致。生产 Settings 验证通过，但首次安装态迁移 CLI 暴露漏打包资产错误，数据库迁移尚未执行。
+- 修复 `contentflow-migrate` 的非 editable 安装路径：wheel 明确携带迁移资产，使用受控安装前缀及绝对路径，不受 CWD 影响；新增含 `%` 路径和错误 CWD 的真实临时迁移回归。相关 13 项通过，新镜像构建/真实 CLI 与整栈签收继续执行。详见台账 `CF-20260917-06/07`，不能把基础服务就绪写成用户全流程可用。

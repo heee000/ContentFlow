@@ -1,0 +1,26 @@
+{
+  admin off
+  auto_https off
+  persist_config off
+}
+
+:8080 {
+  @wrong_host not host localhost
+  respond @wrong_host "Use the localhost SSH tunnel" 403
+
+  @backend path /api/* /health/live /health/ready
+  handle @backend {
+    reverse_proxy api:8000
+  }
+  handle {
+    reverse_proxy web:3000
+  }
+  request_body {
+    max_size 105MB
+  }
+  header {
+    -Server
+    X-Content-Type-Options nosniff
+    X-Frame-Options DENY
+  }
+}
