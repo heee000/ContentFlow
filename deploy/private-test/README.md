@@ -69,6 +69,16 @@ Windows 隧道命令不要加 `-6`：它不仅限制远端地址族，也会导�
 
 访问策略由 tailnet 管理，ContentFlow 登录为第二层认证；未做额外 ACL 最小化前不声称“只开放了 443 给全部已邀请用户”。当前反向代理不信任上游转发头，客户端 IP 限流可能归并为同一代理出口；不要为取真实 IP 直接信任所有私网 X-Forwarded-For。设备凭据到期、客户端更新、主机休眠/断电、异机备份与微信固定出口仍需单独管理。
 
+### Windows 同时运行 Clash/Mihomo 时
+
+先区分三条链路：已入网的 Tailscale peer、保留证书验证但通过 `curl --resolve` 指定该 peer 的 HTTPS、普通域名的系统直连/实际浏览器代理。前两者正常而普通域名返回 fake-IP 或代理失败时，不重装服务器、不关闭 TLS，也不把同网段或自检成功当作浏览器验收。
+
+经操作者允许后，备份 Clash 配置，只为**实际服务的确切域名**增加 hosts 映射、fake-IP 排除和优先路由；通过全局扩展脚本保存，避免只改生成 YAML。若普通 DIRECT 超时而系统直连成功，可以用仅该规则引用的 `type: direct` 出站，将 `interface-name` 设为实测的 Tailscale 网卡名；不得修改全局默认出口或替换现有代理组。固定映射使用已验证的 Tailscale 节点 IP，不使用校园网/家庭网络 IP；节点删除重建、网卡改名或切换 fake-IP 模式时需要复核。
+
+应用前应比较完整配置，确认其他字段不变，校验脚本幂等与 Mihomo `-t`；通过既有本地控制接口重载，不额外公开控制端口。应用后须分别验证普通域名直连、显式代理请求、真实浏览器登录/刷新和原代理的正常 HTTPS。保留回退副本；不能将脚本已落盘等同于订阅更新、代理重启或主机重启已测试。私人订阅、节点配置与认证字段不进入公开仓库。
+
+依据：[Mihomo DNS](https://wiki.metacubex.one/config/dns/)、[定向 DIRECT 出站](https://wiki.metacubex.one/config/proxies/direct/)、[Clash Verge 扩展脚本](https://www.clashverge.dev/guide/script.html)。
+
 ## 资源与边界
 
 - 基础服务无宿主端口；数据和前端网络均为 `internal: true`。API/Worker 另有出口网络以调用真实 API；Web 仅在内部前端网络。Docker 29 对仅接 internal 网络的容器不建立宿主端口映射，因此只有 Caddy 另接普通 ingress bridge（默认绑定回环），仍显式只映射 `127.0.0.1:3800`。该入口网络不是出口隔离，不能声称 Caddy 没有出站能力；它不持有业务密钥，也不接数据网络。
