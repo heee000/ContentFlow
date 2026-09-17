@@ -301,6 +301,32 @@ class ProviderInvocationLedgerTest(unittest.TestCase):
             )
         self.assertNotIn("sensitive embedding input", serialized)
 
+        # Switching optional wire parameters must not reuse the earlier logical
+        # request identity, even for the same Job/entity/ordinal and input.
+        original_key = provider.request_key
+        provider.send_dimensions = False
+        native_wrapped = LedgeredEmbeddingProvider(
+            provider,
+            ledger=ProviderInvocationLedger(self.engine),
+            workspace_id=self.workspace_id,
+            entity_type="knowledge_document",
+            entity_id="document-ledger",
+            operation="embedding.knowledge_index",
+            provider_name="openai-compatible",
+        )
+        with self.Session() as session:
+            with provider_job_context(session.get(Job, self.job_id)):
+                native_wrapped.encode_many(
+                    ["sensitive embedding input one", "sensitive input two"]
+                )
+        self.assertNotEqual(provider.request_key, original_key)
+        with self.Session() as session:
+            invocations = list(session.scalars(select(ProviderInvocation)))
+            self.assertEqual(len(invocations), 2)
+            self.assertNotEqual(
+                invocations[0].request_sha256, invocations[1].request_sha256
+            )
+
     def test_retry_closes_a_previous_unfinished_attempt_before_starting_next(self):
         ledger = ProviderInvocationLedger(self.engine)
         evidence_sha256, evidence_bytes = canonical_evidence(

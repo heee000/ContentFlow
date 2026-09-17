@@ -125,6 +125,7 @@ class Settings(BaseSettings):
     embedding_api_key: str | None = None
     embedding_model: str | None = None
     embedding_dimensions: int = 1024
+    embedding_send_dimensions: bool = True
     local_embedding_model: str = "BAAI/bge-m3"
     local_embedding_revision: str = "5617a9f61b028005a4858fdac845db406aefb181"
     local_embedding_device: str = "cpu"

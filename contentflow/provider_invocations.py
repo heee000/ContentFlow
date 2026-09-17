@@ -580,13 +580,16 @@ class LedgeredEmbeddingProvider:
         if not texts:
             return []
         self.ordinal += 1
-        request_sha256, request_bytes = canonical_evidence(
-            {
-                "model": self.model_name,
-                "dimensions": self.dimensions,
-                "input": texts,
-            }
-        )
+        request_evidence = {
+            "model": self.model_name,
+            "dimensions": self.dimensions,
+            "input": texts,
+        }
+        # Preserve existing request identities in default mode. Native-dimension
+        # requests are distinct, even though output-size validation stays active.
+        if not getattr(self.provider, "send_dimensions", True):
+            request_evidence["dimensions_sent"] = False
+        request_sha256, request_bytes = canonical_evidence(request_evidence)
         job_id = current_provider_job_id(self.workspace_id)
         request_key = stable_provider_request_key(
             workspace_id=self.workspace_id,

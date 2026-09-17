@@ -30,6 +30,7 @@ Docker archive 不一定保留 RepoDigests。本版本的 `compose.offline-pg.ym
 - 当前 PostgreSQL 用户仍是数据库容器初始化管理员，**不是**已完成的运行时最小权限角色拆分。不得把内部隔离称为企业级数据库权限治理。
 - 重启/备份/恢复验证未通过前，不放入唯一副本的业务数据。不要执行 `down -v`、清卷或覆盖 `.env` 来解决问题。
 - 用户已选择 Embedding API。后端可使用 `--build-arg INCLUDE_LOCAL_EMBEDDINGS=false` 构建，去掉本地 PyTorch/模型运行库；默认仍保留本地模型支持，不改变既有部署方式。API 模式不能调用本地 BGE，且真实服务必须返回 1024 维。
+- 对原生固定维度、不接受可选 `dimensions` 请求字段的服务，设置 `CONTENTFLOW_EMBEDDING_SEND_DIMENSIONS=false`；这只省略请求字段，不会放宽返回向量长度校验。默认 true 保持既有服务行为，不能根据一次失败静默重试或自动改模式。
 - API/Worker 的生产安全、治理、注册控制与 Cookie 保护不能为“跑起来”关闭。现有 API 密钥已获准按需安全迁移，但旧数据库、知识库和素材未获本轮迁移选择，不自动复制。
 
 实时进度与尚未完成的验收见 `docs/ubuntu_private_test_setup.md`。

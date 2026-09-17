@@ -45,6 +45,20 @@ Docker 启动会初始化自己的网络/防火墙规则，因此不能将安装
 - Embedding 选型建议（2026-09-17）：硅基流动 `BAAI/bge-m3`，Base `https://api.siliconflow.cn/v1`，模型原生 1024 维，当前官方价格页标为免费。免费模型有实名认证和固定速率限制；不承诺永久价格或 SLA。服务端一次短 DNS 超时后，较长有界 HTTPS 探测返回 401，证明网络/认证端点可达，不是 Key 或向量调用通过。尚未注册、充值或发送任何知识内容。
 - 依据：[价格](https://siliconflow.cn/pricing)、[免费模型限制](https://docs.siliconflow.cn/docs/userguide/faqs/rate-limit-and-upgradation)、[Embedding API](https://docs.siliconflow.cn/docs/api/embeddings-post)、[BGE-M3 模型卡](https://huggingface.co/BAAI/bge-m3)。原生 1024 维不等同于支持可选 `dimensions` 请求字段；接入时须按目标合同验证，不能仅凭模型同名复用旧向量。
 
+## Embedding 真实接入验证
+
+用户已直接提供并授权使用硅基流动 Key。不再要求用户另建文件；密钥仅存本轮 Git 忽略的本地运行配置，不写入本文或提交。既有文本/媒体密钥仍未迁移。
+
+1. 一次最小协议探针发送 3 句合成文本，返回模型 `BAAI/bge-m3`、3 条 1024 维有限数值向量，服务报告 25 tokens。
+2. 按官方合同补充通用 `CONTENTFLOW_EMBEDDING_SEND_DIMENSIONS`，默认 true，固定维度服务设置 false 后省略可选请求参数，但仍严格校验返回维度。该开关通过既有开发/公网 Compose 透传；未关闭生产门禁、未增加供应商专属默认值。
+3. 通过 ContentFlow 的 `Settings → build_embedding_provider → encode_many` 实际链路再次调用同样合成文本，返回维度正确且相关句相似度高于无关句，服务报告 25 tokens；两次合计 50 tokens。该结果是连通性/格式/简单语义 smoke，不是完整 RAG 质量或账单审计。
+4. 账本在省略字段模式加入受控证据标记，防止同一 Job/entity/ordinal 切换请求模式时误用旧逻辑身份；默认模式保留旧摘要计算。定向 26 项与 6 subtests 通过，覆盖默认发送、省略字段、仍拒绝错误维度、配置透传及账本请求分离。
+5. 后续连接 Ubuntu 时已知 IPv6 与 IPv4 均超时，已请用户唤醒/核实最新地址，没有反复追加公钥或更改认证规则。压缩包传输进程已正常结束，但目标机的完整 SHA-256/load/数据库启动尚未验证。等待连接恢复期间只完成本地测试、镜像与记录，不把 Key 验证成功写成部署已完成。
+
+用户随后确认电脑未休眠、地址不变。Windows 路由核查为 WLAN 同网段直连；使用较长连接超时且显式无 SSH ProxyCommand 的重连成功，主机身份与认证保持有效。不能据一次重连成功归因于代理或休眠，也没有修改系统网络配置。继续执行远端镜像完整性与数据库验证。
+
+本轮 Windows 完整覆盖率测试在迁移测试期间发生 Python 原生 `access violation`，没有产生完整通过结论；堆栈涉及 Pydantic Settings/Alembic，根因尚未定位，不将其无证据归因于业务代码或环境。定向回归及真实适配器测试通过，更新的 API-only Docker 镜像构建与无网络导入通过。完整回归使用 Linux CI 核验，Windows 崩溃仍保留为诊断项。
+
 ## 先完成 SSH 认证
 
 已登录 Ubuntu 的操作者检查以下输出；只有路径权限和公钥指纹，不要求发送密码或私钥：

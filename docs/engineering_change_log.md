@@ -973,3 +973,13 @@
 - 网络：Quay 同摘要 Server/Client 已拉取；pgvector 由 Windows 官方摘要拉取后导出压缩包，经 SSH 搬运。额外覆盖文件只接受已核对的 linux/amd64 config ID 并禁止拉取；须先核对压缩包 hash 和 load 后 ID。未改变服务器 DNS/代理、未使用第三方镜像、未停现有 Windows 服务。
 - 验证：私人/既有公网部署配置 9 项通过，Ruff/diff 检查通过；目标 bash/sh/Compose 静态校验、600 权限、Docker 权限和开机启动验证通过。live bucket 权限、PostgreSQL/pgvector 启动、重启持久化、整栈登录与真实 API 仍待验证，不能标为已部署完成。
 - 增量：MinIO 已健康，live 初始化验证非匿名 bucket、应用可列出业务 bucket 且管理 API 拒绝，关闭上一条的 bucket 权限等待项；其他验证仍待完成。推荐的硅基流动 BGE-M3 当前免费、原生 1024 维；Ubuntu 无 Key HTTPS 探测返回 401，仅证明网络连通。选型依据和免费限制已记录，尚未注册、充值、发送业务内容或复制 API Key。
+
+### CF-20260917-05：固定维度 Embedding API 兼容与真实调用验证
+
+- 问题：用户提供 BGE-M3 Key 后，官方合同指出其输出固定 1024 维，不支持可选 `dimensions` 请求字段；当前 OpenAI-compatible 适配器总会发送，存在协议兼容风险。不能通过更换 mock 或取消返回维度校验处理。
+- 解决：新增通用 `embedding_send_dimensions`（默认 true），目标环境显式设 false；Settings、工厂与开发/公网 Compose 透传。只省略请求字段，仍检查返回数量、维度和有限数值；没有按供应商名硬编码例外，也没有失败后自动重试另一种格式。
+- 取证：默认账本摘要保持原样，省略字段模式增加受控模式标记，测试确认相同 Job/entity/ordinal/input 改模式后得到不同请求身份。不会把不同 wire 参数的调用混入原 attempt。
+- 实测：使用用户明确授权的 Key，两次仅包含 3 句合成文本的调用均返回 3×1024 有限向量，各报告 25 tokens；第二次经过实际 ContentFlow 适配器，相关句排序高于无关句。没有发送用户知识资料；Key 不进入日志/文档/Git，未自动充值。
+- 定向回归：Ruff 通过，26 项与 6 subtests 通过。完整覆盖率、构建和 CI 后续签收；BGE-M3 测试只是基础语义 smoke，不等于多语言/长文/领域检索基准。
+- 部署阻塞：Ubuntu 的既有 IPv6/IPv4 本次均超时，已请用户确认唤醒和当前地址；压缩镜像传输已正常结束，远端 hash/load、PostgreSQL、完整应用与旧数据迁移仍未执行。避免将历史连接成功当作当前可用。
+- 后续：用户确认地址未变、未休眠；本机路由为 WLAN 直连，较长超时重连后身份/认证成功，未改网络配置，不能将超时归因于用户休眠。Windows 完整测试发生原生 access violation（Pydantic Settings/Alembic 堆栈），故不记全量通过；更新镜像构建/导入成功，完整回归转 Linux CI 验证，保留 Windows 原生崩溃诊断项。

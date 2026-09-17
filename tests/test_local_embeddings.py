@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import sys
 import tempfile
@@ -232,6 +233,7 @@ class LocalEmbeddingTest(unittest.TestCase):
         self.assertEqual(vectors, [[1.0, 0.0], [0.0, 1.0]])
         self.assertEqual(client.kwargs["headers"]["Idempotency-Key"], "b" * 64)
         self.assertEqual(client.kwargs["json"]["input"], ["第一段", "第二段"])
+        self.assertEqual(client.kwargs["json"]["dimensions"], 2)
         self.assertEqual(
             provider.last_call_metadata,
             {
@@ -245,6 +247,36 @@ class LocalEmbeddingTest(unittest.TestCase):
                 "total_tokens": 9,
             },
         )
+
+    def test_native_dimension_api_omits_field_but_still_validates_size(self):
+        observed = []
+
+        def respond(request):
+            observed.append(json.loads(request.content))
+            return httpx.Response(200, json={
+                "data": [{"index": 0, "embedding": [1.0, 0.0]}],
+            })
+
+        settings = Settings(
+            _env_file=None,
+            database_url="sqlite:///test.db",
+            embedding_provider="openai-compatible",
+            embedding_api_base="https://embeddings.example/v1",
+            embedding_api_key="test-only",
+            embedding_model="native-size-model",
+            embedding_dimensions=2,
+            embedding_send_dimensions=False,
+        )
+        provider = build_embedding_provider(settings)
+        self.assertFalse(provider.send_dimensions)
+        provider.client.close()
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            provider.client = client
+            self.assertEqual(provider.encode("test"), [1.0, 0.0])
+            self.assertNotIn("dimensions", observed[-1])
+            provider.dimensions = 3
+            with self.assertRaisesRegex(RuntimeError, "Embedding 维度不匹配"):
+                provider.encode("test")
 
     def test_cache_prepare_writes_pinned_manifest_and_offline_verify_reads_it(self):
         class FakeProvider:

@@ -155,12 +155,14 @@ class OpenAICompatibleEmbeddingProvider:
         api_key: str,
         model: str,
         dimensions: int,
+        send_dimensions: bool = True,
         client: httpx.Client | None = None,
     ):
         self.endpoint = f"{api_base.rstrip('/')}/embeddings"
         self.api_key = api_key
         self.model_name = model
         self.dimensions = dimensions
+        self.send_dimensions = send_dimensions
         self.client = client or httpx.Client(timeout=60)
         self.last_call_metadata: dict[str, object] = {"usage_source": "not_reported"}
         self._invocation_key: str | None = None
@@ -189,16 +191,18 @@ class OpenAICompatibleEmbeddingProvider:
         }
         if invocation_key is not None:
             headers["Idempotency-Key"] = invocation_key
+        payload = {
+            "model": self.model_name,
+            "input": texts,
+            "encoding_format": "float",
+        }
+        if self.send_dimensions:
+            payload["dimensions"] = self.dimensions
         try:
             response = self.client.post(
                 self.endpoint,
                 headers=headers,
-                json={
-                    "model": self.model_name,
-                    "input": texts,
-                    "dimensions": self.dimensions,
-                    "encoding_format": "float",
-                },
+                json=payload,
             )
             self.last_call_metadata.update(
                 _provider_request_metadata(headers=response.headers)
@@ -269,6 +273,7 @@ def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
             api_key=settings.resolved_embedding_api_key,
             model=settings.embedding_model,
             dimensions=settings.embedding_dimensions,
+            send_dimensions=settings.embedding_send_dimensions,
         )
     if settings.embedding_provider == "bge-m3-local":
         return LocalBGEM3EmbeddingProvider(
