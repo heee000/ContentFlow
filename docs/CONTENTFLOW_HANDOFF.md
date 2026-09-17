@@ -2119,3 +2119,11 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 首轮 [CI #35202826024](https://github.com/heee000/ContentFlow/actions/runs/35202826024) 的失败来自新收录依赖漏洞和原 MinIO Docker Hub 地址不可拉取；后端未执行，不能记为真实 PostgreSQL 签收。
 - 前端已更新 Next.js/eslint-config-next 16.3.5、sharp 0.35.4、js-yaml 4.3.2、fflate 0.7.5；Node 24.19.0 的 lint/test/双构建与 npm/Python 审计通过。MinIO 改用官方 Quay 同一内容摘要，开发 Compose 同步固定 Server/Client 摘要。详见工程台账 `CF-20260917-03`，修复后 CI 另记。
 - SSH 的空 authorized_keys 已由用户追加修复，服务器身份和默认认证配置匹配；另发现本地新私钥的意外口令，修正需明确确认，当前没有成功免密或完成部署的证据。最新状态见内部测试准备文档。
+
+### 21.55.2 CI 签收与 SSH 排障完成
+
+- 修复提交 `8544dabfd97607a997f798e63681b288c95d88f4` 已以 John Wang 身份普通推送；[CI #35203918464](https://github.com/heee000/ContentFlow/actions/runs/35203918464) 四个 Job 全部成功。真实 PostgreSQL/MinIO 为 `345 passed, 199 subtests passed`，分支覆盖率 82.53%；前端、依赖审计、Prometheus、源码/SBOM 和签名证据通过。第一轮失败已完成修复，不再把 GitHub 认证或推送当作阻塞。
+- 用户明确授权修正专用新密钥后，空口令验证成功；经用户给出的 IPv6 登录成功，主机别名沿用已验证记录，未降低严格主机验证。SSH 已通，不要再次要求用户追加公钥、改认证规则或提供密码。
+- 实机为 AMD A6-9210、2 逻辑 CPU、AVX2、3.7 GiB RAM（当时可用约 1.6 GiB）、已有 3.7 GiB swap、机械盘根分区空闲约 846 GiB。既有后台和桌面进程保留；这些是静态预检，不是整栈/BGE 容量验收。
+- 新增 `deploy/private-test/install-docker.sh`，通过目标机 bash 语法/帮助、参数/非 root 拒绝和传输哈希核验。使用现有 Ubuntu 源安装 Docker/Compose，需要操作者手动 sudo，并显式接受 docker 组 root 等价权限；不修改 sudoers 或 SSH，不启动应用容器。Docker 会初始化自身网络规则。`.sh` 固定 LF 防止 Windows 换行破坏 Linux 执行。
+- 当前等待操作者执行安装脚本；Docker 和应用尚未安装。下一步从新 SSH 会话核验组权限、daemon 与 Compose，再建立独立私有栈，不能直接运行带开发默认端口/弱口令的根 Compose。尚未搬迁业务数据、凭据、知识文件或模型缓存，公网部署继续暂停。

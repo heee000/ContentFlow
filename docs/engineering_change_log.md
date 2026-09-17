@@ -945,18 +945,21 @@
 
 ### CF-20260917-02：自有 Ubuntu 私人测试环境准备
 
-- 状态：进行中，SSH 密钥认证待排障；未开始安装或部署。
-- 用户提供：Ubuntu 24.04.2 LTS、2 核/4 GB、约 800 GB 可用存储；尚未远程实测 CPU 型号、磁盘介质或峰值资源。
+- 状态：SSH 密钥认证已成功；实机预检和安装脚本核验完成，等待操作者执行一次 sudo 安装；应用尚未部署。
+- 实机资源：AMD A6-9210、x86_64、2 个逻辑 CPU、AVX2；内存 3.7 GiB/可用约 1.6 GiB，已有 swap 3.7 GiB；机械磁盘，根文件系统空闲约 846 GiB。已有后台和桌面进程未被停止；峰值资源和 BGE 推理尚未验收。
 - 已做：Windows 到 TCP/22 连通，SSH 主机身份与 known_hosts 匹配；在 Windows 用户 `.ssh` 生成专用 Ed25519 密钥并保留私钥本地。用户提供诊断已确认家目录、`.ssh`、`authorized_keys` 权限/所有者正常，但 authorized_keys 为 0 字节；公钥未写入是本次拒绝的直接原因。已给出 Ubuntu 直接追加公钥及核对指纹的命令，等待验证，不要求发送密码。
 - 路径：先解决认证、确认 Docker/sudo/硬件/网络，再创建独立低资源内部栈；先验空测试库和持久化，再接真实 API。已有数据的迁移选择与凭据注入单独处理。完整步骤见 `docs/ubuntu_private_test_setup.md`。
 - 范围：自有机器内部测试获得授权；公网部署仍暂停，不开放数据库管理端口，不创建付费云资源，不复制 Windows 依赖到 Linux。
+- 排障收束：用户直接追加公钥修复了空 authorized_keys；另确认生成专用密钥时 PowerShell 引号导致意外口令。用户明确授权后仅修正该新密钥，未修改其他密钥或服务器认证规则。IPv4 后续超时，使用用户提供的 IPv6 和原已验证 HostKeyAlias 成功免密连接，StrictHostKeyChecking 保持开启。
+- 安装准备：新增 `deploy/private-test/install-docker.sh`，只处理 Ubuntu 24.04 的现有非 root 部署用户，从现有 Ubuntu 软件源安装 Docker/Compose；显式标志确认 docker 组 root 等价访问，遇到冲突包停止，sudo 密码由用户在自己的终端输入。Docker 自身网络规则可能初始化，不改 SSH/sudoers、不启动应用容器。目标机 bash 语法、帮助、缺参/非 root 拒绝和上传哈希一致已验证；`.sh` 强制 LF。尚未执行管理员安装，不能记为部署成功。
 
 ### CF-20260917-03：部署前依赖安全更新与 MinIO 镜像获取恢复
 
-- 状态：本地已验证，修复后 CI 待签收。
+- 状态：修复提交 `8544dabfd97607a997f798e63681b288c95d88f4` 已普通推送，修复后 CI 四个 Job 全部成功。
 - 触发：`eb16d37` 已正常普通推送，但 [CI #35202826024](https://github.com/heee000/ContentFlow/actions/runs/35202826024) 在前端审计检出 7 项依赖漏洞；后端在启动 MinIO 时收到 Docker Hub `pull access denied`，尚未执行 PostgreSQL 测试。不是 Git push 或仓库账户认证失败。
 - 前端修复：Next.js/eslint-config-next 从 16.2.12 更新为 16.3.5，sharp override 从 0.35.3 更新为 0.35.4；原兼容范围内更新锁定的 js-yaml 4.3.1→4.3.2、fflate 0.7.4→0.7.5。没有使用 `npm audit fix --force`，没有关闭审计或提高漏洞放行阈值。
 - 公告依据：[Next.js Windows RCE](https://github.com/advisories/GHSA-p293-qw3h-jr36)、[Next.js AVIF](https://github.com/advisories/GHSA-2xp9-vwfh-vxw4)、[sharp/libheif](https://github.com/advisories/GHSA-rgj7-g3m4-5g8c)、[js-yaml](https://github.com/advisories/GHSA-2883-xcg3-v3hh)、[fflate](https://github.com/advisories/GHSA-px8p-9vwx-vf98)。公告说明潜在影响范围，不能据此推断本地已经遭到攻击。
 - 镜像修复：通过 registry manifest 实测官方 `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` 的摘要仍为既有 `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`，CI 改用该同内容地址。开发 Compose 同步固定摘要；MinIO Client 仍为 RELEASE.2025-04-16T18-13-26Z，Quay 摘要固定为 `sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3`。没有替换存储产品或迁移已有数据。
 - 本地验证：Node 24.19.0 下 ESLint、2 项 SSR、Vinext 构建、Next.js 16.3.5/TypeScript 生产构建通过；npm moderate 审计为 0 漏洞，Python 依赖审计为 0 已知漏洞。系统默认 Node 22.11 低于项目要求，本轮只在验证进程内使用已安装的合规 Node，没有修改全局安装。
+- 远程签收：[CI #35203918464](https://github.com/heee000/ContentFlow/actions/runs/35203918464) 的真实 PostgreSQL/MinIO 为 `345 passed, 199 subtests passed`、分支覆盖率 82.53%；前端构建和漏洞审计、后端/Prometheus、安全审计、可复现源码/SBOM 与签名证明均成功。保留 7 项框架警告，不将其说成测试失败或已消除。该结果也签收 `CF-20260917-01` 的下载改动；没有重复推送或降低 CI 门槛。
 - 边界：恢复同摘要下载只解决制品获取，不等于旧 MinIO 的长期维护/安全支持签收；自有 Ubuntu 的 CPU 兼容性、镜像可达性、峰值内存和备份恢复仍待实机验收。

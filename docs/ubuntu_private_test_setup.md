@@ -2,7 +2,7 @@
 
 更新：2026-09-17。范围是用户自有电脑上的私人测试；既有公网/云服务器部署仍暂停。
 
-## 已确认与待确认
+## 连接准备过程（最新状态见实机预检）
 
 - 用户报告 Ubuntu 24.04.2 LTS、2 核 CPU、4 GB RAM、约 800 GB 可用存储；这些尚不是远程资源采样。
 - 用户已启用 OpenSSH，并完成过 Windows 到 Ubuntu 的交互式登录。
@@ -11,7 +11,25 @@
 - 用户反馈已执行公钥追加，但专用密钥仍被服务器拒绝。握手确认客户端发送了预期密钥；用户随后提供权限/指纹诊断，确认家目录 750、`.ssh` 700、`authorized_keys` 600 且所有者正确，但文件为 0 字节。已给出 Ubuntu 直接追加公钥的命令；仍须实际免密连接验证后才能标记成功。
 - 尚未安装服务器软件、复制业务数据、修改服务器防火墙、配置真实 Provider 或执行平台测试。
 
-后续诊断：用户直接追加公钥后指纹已与 Windows 匹配，sshd 默认配置为 `PubkeyAuthentication yes`、标准 authorized_keys 路径、`StrictModes yes`，服务器主机指纹一致。只读检查另外确认 Windows PowerShell 7 的命令引号使本轮新建私钥带上意外口令；私钥/公钥配对正确。自动审批拒绝直接移除口令，当前等待用户对仅修正这把新密钥的明确确认。该本地问题须修正后复验，尚不把全部认证失败归因于唯一原因。
+后续诊断：用户直接追加公钥后指纹已与 Windows 匹配，sshd 默认配置为 `PubkeyAuthentication yes`、标准 authorized_keys 路径、`StrictModes yes`，服务器主机指纹一致。只读检查另外确认 Windows PowerShell 7 的命令引号使本轮新建私钥带上意外口令；私钥/公钥配对正确。自动审批拒绝直接移除口令，随后用户明确同意仅修正这把新密钥。完成结果见下节，原公钥落盘问题与本地口令问题分别记录，不混为服务器认证规则异常。
+
+## 实机预检与一次手动安装
+
+用户已明确同意仅修正新密钥，意外口令已移除并通过空口令读取验证。随后 IPv4 连接超时，但经用户已提供的 IPv6 成功免密登录；使用原已验证主机的 HostKeyAlias 保持 StrictHostKeyChecking。SSH 认证阻塞已解除。
+
+2026-09-17 实测：AMD A6-9210、x86_64、2 个逻辑 CPU、含 AVX2；内存约 3.7 GiB，可用约 1.6 GiB，已有 swap 约 3.7 GiB/使用 465 MiB；931.5 GiB 机械磁盘，根文件系统空闲约 846 GiB。一个用户既有后台进程约占 576 MiB，桌面应用也占用内存；这些进程未被终止。AVX2 只是指令集信息，不是 PyTorch/BGE 实机推理签收。
+
+Docker 未安装，sudo 要求密码。Docker CE 官方 APT 地址一次请求连接重置，GitHub HTTPS 返回 200；现有 Ubuntu APT 列表提供 docker.io 29.1.3 与 docker-compose-v2 2.40.3，因此私人测试先使用 Ubuntu 维护的包，不添加其他软件源或移除现有软件。
+
+已准备 `deploy/private-test/install-docker.sh`。它仅接受 Ubuntu 24.04、现有非 root 用户及显式 `--grant-docker-access`，遇到已有冲突包会停止；从现有 APT 源安装 Docker/Compose，启用 Docker 并追加部署用户到 docker 组。操作者在自己的终端用 sudo 执行一次，密码不交给代理。
+
+**docker 组具有 root 等价的容器管理权限**，只对该自有测试机的指定部署用户授予；没有修改 sudoers、SSH、桌面服务、应用数据或公开 Docker daemon TCP 端口。[Docker 官方说明](https://docs.docker.com/engine/install/linux-postinstall/)
+
+Docker 启动会初始化自己的网络/防火墙规则，因此不能将安装描述为“防火墙完全不变”；当前脚本没有配置业务端口映射，也没有启动 ContentFlow 容器。
+
+脚本已经通过目标 Ubuntu 的 `bash -n`、帮助输出、缺少参数拒绝（退出码 2）与非 root 拒绝（退出码 1）；上传前后 SHA-256 一致。仓库为 `.sh` 显式固定 LF，避免 Windows 签出引入 CRLF。已给操作者一次性 sudo 命令，当前等待其本机执行，**尚未安装 Docker**。
+
+安装完成后用新 SSH 会话验证组权限、daemon 和 Compose，再进入 ContentFlow 的独立目录、配置与镜像准备。脚本存在不等于已安装，尚未复制业务数据库或密钥。
 
 主机地址、用户名和凭据在操作者自己的连接配置中维护，不写入公开部署模板。
 
