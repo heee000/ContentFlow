@@ -2156,3 +2156,4 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 新管理员与工作区完全独立，凭据只在私人运行目录和本机忽略目录；保留旧实例全部数据。一个合成资料已完成真实 Embedding 索引与调用账本。重启私人 DB/MinIO/API/Worker 后对象 checksum、文档、1024 维向量和单次调用证据仍正确，无 runnable Job。
 - 入口为 Windows http://localhost:3600/；浏览器 Secure/HttpOnly Cookie 保持开启。当前无经评测、独立审核和激活的 Prompt release，也未迁移微信渠道或验证本轮内容/媒体/发布全链路。不要关闭生产治理或自行伪造双人批准；下一阶段按明确测试流程推进。
 - 空闲采样六容器合计约 550 MiB，宿主约 1357 MiB available，swap 843 MiB；不是峰值/长稳保证。异机备份、固定出口和企业运行体系仍未完成。公网继续暂停；受保护知识文件仍未读、改、暂存或提交。
+- 最终配置提交 `611399e` 的 [CI #35214913017](https://github.com/heee000/ContentFlow/actions/runs/35214913017) 全绿，356 passed / 199 subtests。浏览器重载仍登录、知识库显示真实索引成功；六容器无 OOM/自动重启。登录资料与本机重连说明在 `.contentflow/private-test-transfer-20260917/`，不提交其秘密。应用源码 SHA 仍为 `8a5e300`，此后为入口配置与记录变更，不虚改应用镜像的来源声明。
