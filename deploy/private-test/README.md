@@ -53,6 +53,22 @@ SSH 隧道只负责访问页面，关闭 Windows 隧道不会停止 Ubuntu Worke
 
 Windows 隧道命令不要加 `-6`：它不仅限制远端地址族，也会导致 `127.0.0.1` 本地监听无法解析。直接使用远端 IPv6 字面量即可，保留本地 IPv4 回环绑定。后台启动进程不等于隧道成功，必须实际请求 localhost:3600 的 readiness，再检查浏览器。
 
+## 可选：Tailscale 私有 HTTPS
+
+这是一层可回退覆盖配置，不是公网发布。Windows/手机必须安装并登录同一授权私网；只启动 Serve，不启动 Funnel、出口节点、子网路由或 Tailscale SSH。服务器仍只发布回环 Caddy，数据库/对象存储不开放宿主端口。
+
+1. 从官方源安装客户端，Ubuntu 可使用 `sudo tailscale up --accept-dns=false --accept-routes=false --hostname=contentflow-test` 保留原 DNS/默认出口；按设备链接由操作者登录并确认加入正确账号。已有配置先检查，不使用 reset 或强制重新认证覆盖其他用途。
+2. 从实际 `tailscale status --json` 的 Self.DNSName 取得设备完整域名（去掉末尾点）。在管理台确认 MagicDNS/HTTPS；申请公有 CA 证书会将设备域名永久写入 CT 日志，事先确认并避免使用含个人信息的设备名。
+3. 使用相同 Web 源码构建新镜像，`NEXT_PUBLIC_CONTENTFLOW_API_BASE=https://<实际设备域名>/api/v1`。保留旧 localhost Web 镜像；传输后核对 archive 哈希、全部镜像层和运行配置，取得目标机不可变 image ID。
+4. 在私人运行目录执行 `python3 prepare-tailnet.py --hostname <实际设备域名> --web-image sha256:<已验证目标ID> --output tailnet.env`。脚本拒绝 URL、通配符、端口、换行、非法 DNS 标签和浮动镜像，并拒绝覆盖已存在的文件。配置没有账号或密钥。
+5. 每条 Compose 命令同时加 `--env-file tailnet.env` 和最后的 `-f compose.tailnet.yml`。先 `config --quiet` 并核对合并后的生产保护/回环映射，再在无 runnable Job 时执行 `up -d --wait --wait-timeout 180 api worker web caddy`。不迁移数据库、不清卷、不重生成运行密钥。
+6. 用 `sudo tailscale serve --bg http://127.0.0.1:3800` 启动持久私有 HTTPS 代理。确认 `tailscale serve status --json` 只有 HTTPS 和预期代理、没有 AllowFunnel。该配置只接受确切设备 Host；localhost 仅保留健康检查，旧 `localhost:3600` 工作台地址不再适用。
+7. 在服务器运行 `python3 verify-tailnet.py --account-file <私人测试登录JSON>`。脚本将目标绑定到本机实际 Tailscale 节点，正常验证 CA/主机名，检查匿名拒绝、非法 Host、同源 Web、Cookie 登录/刷新/退出与治理；不上传资料、调用 AI 或发布内容。凭据不进命令参数/输出，临时 Cookie 文件位于私人临时目录并在结束时清理。此脚本是服务器自检，**不能代替 Windows/手机真实浏览器和异网验收**。
+
+回退：先确认队列无运行任务，使用原来不带 `tailnet.env/compose.tailnet.yml` 的完整 Compose 参数重建四个应用服务；核验 localhost SSH 登录后，执行 `sudo tailscale serve --https=443 off` 关闭本次 Serve。保留数据卷、runtime.env、images.env 和原 Caddyfile，不使用 `down -v`。Tailscale 客户端本身不因回退而被卸载。
+
+访问策略由 tailnet 管理，ContentFlow 登录为第二层认证；未做额外 ACL 最小化前不声称“只开放了 443 给全部已邀请用户”。当前反向代理不信任上游转发头，客户端 IP 限流可能归并为同一代理出口；不要为取真实 IP 直接信任所有私网 X-Forwarded-For。设备凭据到期、客户端更新、主机休眠/断电、异机备份与微信固定出口仍需单独管理。
+
 ## 资源与边界
 
 - 基础服务无宿主端口；数据和前端网络均为 `internal: true`。API/Worker 另有出口网络以调用真实 API；Web 仅在内部前端网络。Docker 29 对仅接 internal 网络的容器不建立宿主端口映射，因此只有 Caddy 另接普通 ingress bridge（默认绑定回环），仍显式只映射 `127.0.0.1:3800`。该入口网络不是出口隔离，不能声称 Caddy 没有出站能力；它不持有业务密钥，也不接数据网络。

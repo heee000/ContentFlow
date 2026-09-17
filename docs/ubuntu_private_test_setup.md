@@ -2,11 +2,11 @@
 
 更新：2026-09-17。范围是用户自有电脑上的私人测试；既有公网/云服务器部署仍暂停。
 
-**当前结论**：私人六服务已启动，Windows localhost:3600 的实际登录和真实知识索引通过；数据库/对象存储重启后数据校验通过。下方早期“待安装/待 Key/未迁移”等段落保留为过程记录，不能当作当前阻塞。最新应用源码为 `8a5e300`，完整 CI 356 passed / 199 subtests；配置实机修复见工程台账 `CF-20260917-08`。
+**当前结论**：私人六服务已切换 Tailscale HTTPS，服务器端真实 TLS、Cookie 登录/刷新/退出、既有知识读取与数据校验通过；Windows 客户端尚未完成安装，浏览器跨设备/手机异网验收仍待执行。下方 localhost:3600 和“待安装/待 Key/未迁移”等保留为过程记录，不代表当前入口。应用源码仍为 `8a5e300`；此前完整 CI 356 passed / 199 subtests，本轮新增覆盖配置定向 18 项通过，尚不代表本轮完整 CI。详见台账 `CF-20260917-09`。
 
 ## 现在怎样体验
 
-在建立了专用 SSH 隧道的这台 Windows 打开 **http://localhost:3600/**，不是 Ubuntu IP，也不是旧 Windows 服务的 localhost:3000。新工作区为 `Ubuntu Private Test 20260917`，没有旧活动；登录资料保存在本轮 `.contentflow/private-test-transfer-20260917/private-test-login.json`，已被 Git 忽略，不上传或复制到公开文档。
+现在应在已加入同一授权 Tailscale 网络的设备上打开 Serve 输出的 **HTTPS 网址**；实际地址在本机私人使用说明中，不把账号/授权地址写入公开模板。旧 localhost:3600 工作台入口已不适用，仅保留回环健康检查和可回退配置；旧 Windows localhost:3000 实例不受影响。新工作区为 `Ubuntu Private Test 20260917`，没有旧活动；登录资料保存在 `.contentflow/private-test-transfer-20260917/private-test-login.json`，已被 Git 忽略，不上传或复制到公开文档。
 
 当前可以登录、浏览资源与系统、检查知识库和任务队列、创建活动。已有一个明确标记为合成测试的知识文件，真实索引成功；不是从旧知识文件拷贝。内容生成前仍需要在管理页完成 Prompt 版本、评测、独立审核与激活；生产保护没有关闭。微信渠道未迁移，本轮没有创建微信草稿或公开发布。
 
@@ -112,3 +112,30 @@ ssh-keygen -lf "$env:USERPROFILE\.ssh\contentflow_ubuntu_test.pub"
 ## 网络边界
 
 客户端换网络不会改变常驻 Worker 的出口；服务器所在网络改变出口或使用不同代理仍可能触发微信白名单问题。SSH/Tailscale 私网地址不是微信所见的公网出口。是否需要固定出口网关，等实际服务器出口和网络稳定性采样后再决定。
+
+## 2026-09-17 Tailscale 私网接入准备（尚未完成远程访问）
+
+用户选择先用自有电脑私人测试，注册 Tailscale 后授权继续安装；这不是恢复公网部署，也不授权开启 Funnel、出口节点或校园网子网路由。
+
+- 已实机安装官方 Tailscale 1.102.4，`tailscaled` 为 enabled/active。Ubuntu 对包站点 DNS 查询间歇超时，改由 Windows 下载官方 Ubuntu Noble 包，再经严格主机验证的 SSH 上传。目标 `gpgv` 验证官方 InRelease 签名，签名清单的 Packages SHA-256 和最终 deb SHA-256 均匹配；不关闭 TLS、SSH 或软件签名校验。
+- 已确认依赖 iptables/iproute2 存在。`apt-get --no-download` 安装本地绝对路径出现内部 Pathname 错误且未安装；随后仅对已校验的 deb 执行 `dpkg --install` 成功，没有卸载、升级其他包。尚未添加 Tailscale APT 更新源，后续需要补充可用的签名更新路径，不能声称已配置自动更新。
+- 首次连接使用 `--accept-dns=false --accept-routes=false --hostname=contentflow-test`，不启用 Tailscale SSH、出口节点或 Funnel。安装后 `/etc/resolv.conf` 哈希与基线相同，原六个 ContentFlow 容器继续运行，readiness 的 database/storage 均为 ok；应用源码仍是 `8a5e300`。
+- 初次 `up --timeout=30s` 超时，但稍后的 daemon 完成控制端通信并返回设备登录地址；当前为 Logged out / 等待浏览器授权，不是已入网。管理台已登录不等于设备授权页沿用会话，实际设备页仍要求重新登录。授权地址、用户账号和凭据不写入本文。
+- Windows 1.102.4 官方 MSI 已完整下载，Authenticode 为 Valid、发行者为 Tailscale Inc.。发起安装的 UAC 请求返回“用户取消”，客户端未安装；已询问是否重发，未绕过或自动反复弹窗。
+- 浏览器控制故障已按用户要求交给“电脑相关”任务修复，本任务重置控制会话后实测重新读取现有 Edge 管理台成功。没有通过代理切换或绕过网址/请求头安全检查恢复。该工具修复不属于 ContentFlow 源码修改。
+
+接续点：由用户完成设备登录/授权及 Windows 安装确认；HTTPS 确认页已打开但未提交。启用 HTTPS 会将证书设备域名永久写入公开 CT 日志，网站本身仍可保持私有，已就这一点请求确认。授权完成后才能签收设备列表、准确设备域名与权限，再调整 Web 构建期 API Base、API 公共地址/CORS 和入口 Host/代理配置，配置 Serve 并测试真实 HTTPS 登录、素材访问与手机跨网连接。现阶段**未启用 Serve、未开放公网、未改应用入口、未完成异机备份或固定微信出口**。
+
+依据：[官方软件源](https://pkgs.tailscale.com/stable/)、[CLI 连接参数](https://tailscale.com/docs/reference/tailscale-cli/up)、[HTTPS 与证书透明度](https://tailscale.com/docs/how-to/set-up-https-certificates)。
+
+### 后续签收：Ubuntu 已连接、Serve 已启用、服务器端 HTTPS 通过
+
+用户随后完成设备登录并明确允许 HTTPS 的 CT 公示。浏览器管理台显示节点 Connected、HTTPS 已开启，服务器为 Running/Online、Health 空。Serve 在后台只代理回环 Caddy，配置无 AllowFunnel。
+
+新增独立 `compose.tailnet.yml`、`Caddyfile.tailnet`、独占配置生成器和 HTTPS 验证脚本；原 SSH-only 配置/镜像不覆盖。Web 以实际 HTTPS API Base 重建，使用已验真 Node 摘要。压缩 archive 106919714 字节、SHA-256 `dfa443b2cccf642ad8cdb6eaf57336d88cd3ce6888b99f7a4908082aa9a854a9`；目标加载后全部 9 层和运行配置匹配。Docker 27/29 去除旧空字段导致 ID 变化，源 `8dd20e…`、目标 `4a126b…` 均已核验，未忽略未知差异。
+
+合并配置验证生产治理/注册/Mock 限制不变、仍只映射回环 3800。确认队列为空后只重建四个应用服务，不重启 DB/MinIO 或迁移数据。服务器真实 HTTPS 自检通过：CA/主机名正常验证、readiness、匿名 401、错误 Host 403、Web HTTPS CSP、Secure/HttpOnly/Lax 双 Cookie、登录/刷新/退出、原有 1 份知识读取、治理仍强制。对象 checksum、1024 维向量和仅 1 次 succeeded Provider attempt 保持一致，runnable Job 为 0。
+
+定向回归 18 项与 Ruff 通过；初次沙箱内测试无法创建临时目录，使用已批准的独立项目内临时目录在沙箱外执行后通过，未改系统 ACL。Caddy 配置由目标已加固镜像离线验证通过；本机旧标签仍指向带 capability 的原始镜像，不能将那个标签当作已验收加固镜像。
+
+**剩余**：Windows 安装 UAC 仍待用户明确重发或手动安装，尚未完成本轮浏览器/手机异网测试；不要把服务器自检当作跨设备签收。精细 ACL、真实客户端 IP 限流、设备凭据续期、签名更新源、备份/长稳与固定微信出口未在本轮完成。

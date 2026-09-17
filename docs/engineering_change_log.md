@@ -1015,3 +1015,16 @@
 - 剩余：新库尚无经评测、独立审核并激活的 Prompt release；没有迁移微信渠道，未跑本轮内容/媒体/发布全流程，不以部署健康冒充完成。运行数据库最小权限、异机备份、真实告警、固定微信公网出口与长稳测试仍待后续。
 - 用量：本次 Worker 索引账本报告 33 tokens，加上三次协议/语义最小探针共报告 108 tokens；这是服务返回用量，不是独立账单审计。重启校验没有重新索引或追加 AI 调用。
 - 最终签收：配置实现提交 `611399e` 已以 John Wang 身份普通推送；[CI #35214913017](https://github.com/heee000/ContentFlow/actions/runs/35214913017) 四个 Job 全部成功，356 passed / 199 subtests，覆盖率摘要 83%。恢复后六容器均未记录 OOM 或自动重启，实际回环 readiness 仍成功。后续只补记本条文档，不重建已验收应用镜像或重复运行计费测试。
+
+### CF-20260917-09：跨网络私人访问的客户端准备与准确断点
+
+- 问题：Windows localhost SSH 入口不能供其他网络的设备直接访问。选择 Tailscale 私有网络与后续 Serve HTTPS；不启用公网 Funnel，也不把私网接入当作固定微信出口。
+- 已做：用户授权安装；官方包签名、清单及完整文件哈希验证通过，Ubuntu 1.102.4 已安装，服务 enabled/active；DNS 不接管、不接受子网路由。Windows 官方 MSI 签名有效但 UAC 被取消，安装未完成。文件下载和 SSH 上传的半包没有被执行；本地 apt 的 no-download 路径错误改用仅安装已验真单包的 dpkg 解决，已有依赖满足。
+- 工具故障：按用户明确要求向现有“电脑相关”任务求助；对方修复策略加载超时后，本任务重新连接并实际读取用户 Edge 的 Tailscale 管理台成功，不以对方报告代替本任务验证。
+- 验收：Ubuntu 原六服务未中断、数据库/存储 readiness 正常，DNS 配置哈希未变。未重建镜像、迁移数据、调用 AI 或发布社媒。没有改 sudoers、关闭认证或把 sudo 密码存入项目文件。
+- 未完成：设备页要求重新登录；HTTPS/CT 公示确认待用户选择，Windows 是否重新发起安装待回复。未开启 Serve、未变更 ContentFlow localhost 配置，尚无跨网可用结论。HTTPS 域名、Host/CORS/前端 API Base、访问策略、证书、登录与手机移动网验证留待设备授权后执行；官方更新源仍待补齐。
+- 记录：详见 `docs/ubuntu_private_test_setup.md` 的 Tailscale 段。私人安装包和登录地址不提交；原受保护未跟踪知识资料未读取、修改或暂存。
+- 后续用户已完成设备授权并允许 HTTPS/CT 公示；实测节点 Running/Online、无 Health 告警，管理台 HTTPS 已启用。配置 Serve 私网入口，不启用 AllowFunnel。新增可回退覆盖配置、严格域名/镜像校验和独占生成、无 AI/发布副作用的 HTTPS 验证脚本。
+- Web 按真实域名重建并经 archive SHA-256、全部 9 层及运行配置匹配后部署；源/目标 ID 的 Docker 旧空字段归一差异已解释。先验证队列为空及合并配置保护，再只重建四个应用服务。DB/MinIO、运行凭据、受保护知识文件不变。
+- 服务器端真实 TLS、匿名拒绝/Host 防护、Web HTTPS CSP、Secure/HttpOnly/Lax Cookie 登录/刷新/退出、治理和已有知识读取均通过；对象 checksum/1024 维向量/Provider attempt 未变化，无 runnable Job 或新 AI 调用。18 项定向回归、Ruff 和目标加固 Caddy 离线配置验证通过。
+- 当前剩余边界：Windows UAC 取消后的安装授权仍待回复，浏览器跨设备/移动网验收未完成。未做精细 tailnet ACL、真实客户端 IP 透传与限流、设备凭据续期、自动更新/异机备份/固定微信出口；不因此声称企业级公网交付。

@@ -2157,3 +2157,19 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 入口为 Windows http://localhost:3600/；浏览器 Secure/HttpOnly Cookie 保持开启。当前无经评测、独立审核和激活的 Prompt release，也未迁移微信渠道或验证本轮内容/媒体/发布全链路。不要关闭生产治理或自行伪造双人批准；下一阶段按明确测试流程推进。
 - 空闲采样六容器合计约 550 MiB，宿主约 1357 MiB available，swap 843 MiB；不是峰值/长稳保证。异机备份、固定出口和企业运行体系仍未完成。公网继续暂停；受保护知识文件仍未读、改、暂存或提交。
 - 最终配置提交 `611399e` 的 [CI #35214913017](https://github.com/heee000/ContentFlow/actions/runs/35214913017) 全绿，356 passed / 199 subtests。浏览器重载仍登录、知识库显示真实索引成功；六容器无 OOM/自动重启。登录资料与本机重连说明在 `.contentflow/private-test-transfer-20260917/`，不提交其秘密。应用源码 SHA 仍为 `8a5e300`，此后为入口配置与记录变更，不虚改应用镜像的来源声明。
+
+### 21.55.7 Tailscale 客户端准备完成一侧，等待设备授权
+
+- 用户明确选择私人跨网络访问并授权安装。Ubuntu 官方 Tailscale 1.102.4 已验签安装，daemon enabled/active；不接管 DNS、不接受子网路由、不启用出口节点、Tailscale SSH 或 Funnel。原六服务和 readiness 复核正常，原 localhost SSH 入口未改。
+- 设备尚为 Logged out：控制端已返回授权地址，但 Edge 新设备页要求用户重新登录。管理台已注册不等于已授权该机器。HTTPS 的永久 CT 域名公示确认也未提交。Windows 官方 MSI 已验签，但 UAC 返回用户取消，已询问是否重发，不能自动绕过。
+- 浏览器控制故障已由用户指定的“电脑相关”任务修复，并在本任务重置后实测管理台读取成功；不再重复排查已解决的控制工具初始化。修复是工具侧局部等待预算调整，不属于本仓库源码。
+- 下一步先确认用户设备登录/Windows 安装/HTTPS 授权，取得实际节点域名与权限，再做 Serve 和 ContentFlow Web API Base、公共 URL/CORS、Host/代理一致性改造及跨网验收。更新源、异机备份和固定微信出口仍未完成；不要声称已可随时随地访问，也不要关闭生产保护。
+- 详细安装证据、遇到的问题及待验收边界见 `CF-20260917-09` 与 `docs/ubuntu_private_test_setup.md` 最新节。授权地址/密码/安装包留在私人上下文或忽略目录，受保护知识文件不动。
+
+### 21.55.8 私有 HTTPS 服务端已签收，待客户端安装与跨网实测
+
+- 用户随后完成设备授权并同意 HTTPS/CT；管理台与服务器均验证已连接，HTTPS 开启。`tailscale serve --bg` 已代理回环 3800，无 AllowFunnel；不是公网发布，也不改变微信出站 IP。
+- 已应用 `compose.tailnet.yml` 覆盖和 `Caddyfile.tailnet`，Web 按真实域名重建；旧 SSH-only 配置及旧镜像保留可回退。现在使用 Serve HTTPS 网址，旧 localhost:3600 UI 不再适用；不能只启动原 compose.app.yml 后声称 HTTPS 仍正常。维护命令必须含 `--env-file tailnet.env -f compose.tailnet.yml`，完整顺序见 README。
+- 服务器自检通过真实证书、登录/刷新/退出、Secure/HttpOnly Cookie、匿名/Host 拒绝、知识读取和治理；既有对象 checksum、1024 维向量、1 次 Provider attempt 保持不变，runnable Job 为 0，无新增 AI 调用。18 项定向测试、Ruff、目标 Caddy 验证通过。应用源仍 `8a5e300`，本轮只有部署覆盖/验证脚本/前端构建参数与记录变化。
+- Windows 官方安装器曾被 UAC 取消，已请求明确重发或由用户手动安装，尚无 Windows 客户端与手机异网验收。当前最终阻塞不是 Ubuntu sudo、API Key 或浏览器控制；不要重复要这些信息或重装已完成的服务器。
+- 后续还需精细 ACL、真实客户端 IP 限流、设备凭据/更新维护、备份和长稳。细节见 `CF-20260917-09`、私人部署记录；不要以服务端 curl 自检替代真实浏览器签收。

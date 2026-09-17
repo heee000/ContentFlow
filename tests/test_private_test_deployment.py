@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
 import yaml
 
 
@@ -152,3 +153,54 @@ def test_runtime_preparation_is_exclusive_and_copies_no_root_keys(tmp_path) -> N
     command[-1] = str(forbidden)
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
     assert result.returncode != 0 and not forbidden.exists()
+
+
+def test_tailnet_overlay_preserves_isolation_and_governance() -> None:
+    overlay = yaml.safe_load((DEPLOY / "compose.tailnet.yml").read_text("utf-8"))
+    assert set(overlay["services"]) == {"api", "worker", "web", "caddy"}
+    assert "networks" not in overlay
+    for service in overlay["services"].values():
+        assert not set(service) & {"ports", "networks", "privileged", "command", "cap_add"}
+    for name in ("api", "worker"):
+        env = overlay["services"][name]["environment"]
+        assert set(env) == {"CONTENTFLOW_PUBLIC_BASE_URL", "CONTENTFLOW_CORS_ORIGINS"}
+        assert env["CONTENTFLOW_PUBLIC_BASE_URL"].startswith("https://${CONTENTFLOW_PRIVATE_HOST:?")
+        assert env["CONTENTFLOW_CORS_ORIGINS"].startswith('["https://${CONTENTFLOW_PRIVATE_HOST:?')
+    assert overlay["services"]["caddy"]["volumes"] == ["./Caddyfile.tailnet:/etc/caddy/Caddyfile:ro"]
+    config = (DEPLOY / "Caddyfile.tailnet").read_text("utf-8")
+    assert "@wrong_host not host {$CONTENTFLOW_PRIVATE_HOST}" in config
+    assert config.index("handle @local_health") < config.index("respond @wrong_host")
+    assert config.index("respond @wrong_host") < config.index("handle @backend")
+    # Caddy must not trust forwarded headers from arbitrary private networks.
+    assert "trusted_proxies" not in config
+
+
+@pytest.mark.parametrize("hostname", [
+    "https://device.example.ts.net", "device.example.ts.net.", "*.example.ts.net",
+    "device.example.com", "device.example.ts.net:443", "device.example.ts.net\nlocalhost",
+    "localhost", "-device.example.ts.net", "a" * 64 + ".example.ts.net",
+])
+def test_tailnet_settings_reject_host_injection(tmp_path, hostname) -> None:
+    target = tmp_path / "tailnet.env"
+    result = subprocess.run(
+        [sys.executable, str(DEPLOY / "prepare-tailnet.py"), "--hostname", hostname,
+         "--web-image", "sha256:" + "a" * 64, "--output", str(target)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0 and not target.exists()
+
+
+def test_tailnet_settings_are_exclusive_and_require_immutable_image(tmp_path) -> None:
+    target = tmp_path / "tailnet.env"
+    command = [sys.executable, str(DEPLOY / "prepare-tailnet.py"),
+               "--hostname", "device.example.ts.net", "--web-image", "latest",
+               "--output", str(target)]
+    assert subprocess.run(command, capture_output=True).returncode != 0
+    assert not target.exists()
+    command[command.index("latest")] = "sha256:" + "a" * 64
+    assert subprocess.run(command, capture_output=True).returncode == 0
+    original = target.read_bytes()
+    assert b"CONTENTFLOW_PRIVATE_HOST=device.example.ts.net\n" in original
+    assert b"\r" not in original
+    assert subprocess.run(command, capture_output=True).returncode != 0
+    assert target.read_bytes() == original
