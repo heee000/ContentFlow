@@ -1028,3 +1028,11 @@
 - Web 按真实域名重建并经 archive SHA-256、全部 9 层及运行配置匹配后部署；源/目标 ID 的 Docker 旧空字段归一差异已解释。先验证队列为空及合并配置保护，再只重建四个应用服务。DB/MinIO、运行凭据、受保护知识文件不变。
 - 服务器端真实 TLS、匿名拒绝/Host 防护、Web HTTPS CSP、Secure/HttpOnly/Lax Cookie 登录/刷新/退出、治理和已有知识读取均通过；对象 checksum/1024 维向量/Provider attempt 未变化，无 runnable Job 或新 AI 调用。18 项定向回归、Ruff 和目标加固 Caddy 离线配置验证通过。
 - 当前剩余边界：Windows UAC 取消后的安装授权仍待回复，浏览器跨设备/移动网验收未完成。未做精细 tailnet ACL、真实客户端 IP 透传与限流、设备凭据续期、自动更新/异机备份/固定微信出口；不因此声称企业级公网交付。
+
+### CF-20260918-01：Windows 私网客户端安装签收与代理冲突定位
+
+- 安装：用户同意重发后后台提权仍返回“取消”，但用户未看见弹窗，实际原因未定；不将系统错误归责为用户主动取消。用户直接打开同一已验签官方 MSI 后，实测 Tailscale 1.102.4、服务 Running/Automatic；由用户亲自完成设备入网。
+- 连接：保持 `accept-dns=false`、`accept-routes=false`，两端在线、客户端无 Health 告警，Tailscale ping 直连成功。Windows 指定已验证节点 IP 的单次 HTTPS readiness 为 200，数据库/存储 ok、应用 SHA 仍为 `8a5e300`；没有跳过 TLS 验证或变更系统 hosts。
+- 未通过项：普通域名被当前 Mihomo fake-IP DNS 解析到代理合成地址，Windows 同路径代理 HTTPS 失败，Edge 为 `ERR_CONNECTION_CLOSED`。这是客户端代理/DNS 兼容问题，不是 Tailscale 未登录、Ubuntu 服务故障或之前的浏览器工具初始化超时。
+- 后续授权：已询问是否允许仅为 ContentFlow 服务域名增加可回退解析/直连设置，尚未修改代理、全局 DNS、TUN 或其他网站规则。真实浏览器会话、手机异网和内容生成/发布仍未验收；没有调用 AI、迁移数据或读取受保护知识文件。
+- CI：实现提交 `75a473e` 的 [CI #35229216117](https://github.com/heee000/ContentFlow/actions/runs/35229216117) 四个 Job 全部成功。本次仅记录运行验收，不重复构建已验证镜像。
