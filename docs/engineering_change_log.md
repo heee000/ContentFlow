@@ -1052,3 +1052,13 @@
 - 专项任务报告节点 DNS 的受控 A/B 支持其为主要故障点，并完成代理与正式浏览器回归；其修复记录保存在任务私人目录。本仓库不复制代理订阅、浏览器启动配置或凭据，不把对方报告写成本任务独立复测。旧校验器的固定配置基线已不适用于当前环境，禁止用 reload 覆盖后续网络修复。
 - 用户再次要求继续项目后，Windows Tailscale 实测 Running/无 Health 告警，但目标 Ubuntu Online=false；固定节点 IP 且保留证书验证的 HTTPS、Tailscale SSH、旧 IPv6 SSH 均超时，旧 IPv4 在 banner 阶段超时。没有远端身份认证成功，不能断言主机故障原因或当前容器/数据状态。
 - 已把当前结论从“浏览器已签收”更新为“历史验收通过、当前服务器不可达”，等待 Ubuntu 本机的地址、tailnet 与服务状态输出。没有重装、重启、修改网络或业务数据；原未跟踪知识文件仍未读/改/暂存，真实模型和社媒零调用。
+
+### CF-20260918-04：网络恢复签收与单人内测启动障碍
+
+- 问题与归因边界：Ubuntu 本机曾报告 controlplane 域名无法解析；用户修复网络后，本任务实测 Tailscale 与原局域网 SSH 均成功、域名恢复解析。没有把此前 Logged out/NoState 当作删除凭据的依据，未执行重新注册、重装或网络配置修改；具体网络修复由用户执行，不记为本任务成果。
+- 恢复证据：六容器运行，Worker 心跳先后为 1 秒/8 秒；Windows 与 Ubuntu 的保留证书校验、指定已验证节点 HTTPS readiness 均成功，Windows 首页 200。数据库和对象存储 ok，应用 SHA 仍为 `8a5e300`。该请求不覆盖当前浏览器代理/普通 DNS 或手机异网链路。
+- 重启边界：主机 uptime 与用户开机描述一致，Tailscale/Docker/SSH enabled，容器 restart=unless-stopped；Worker RestartCount=1、其他五个为 0，全部 OOMKilled=false。Worker 历史日志含数据库连接异常，当前心跳正常；尚未完整归因该次退出，不能记为零错误的主机启动验收。宿主 available 1666 MiB、swap 已用 146 MiB，仅为当时低负载快照。
+- 数据/配置盘点：1 份 indexed 合成资料、1 个 succeeded Job；1 个管理员成员；Prompt release、Eval suite、Eval run、活动、内容、渠道均为 0。production 与治理保护保持开启，mock 禁止，文本/Embedding 为真实 API。此次未重新索引、读知识正文、校验对象字节或增加 Provider 调用。
+- 新发现：企业默认双人规则与目前单管理员私人测试冲突。`activate_prompt_eval_suite` 拒绝创建者激活，`approve_prompt_release` 拒绝创建者审批，且真实目标模型 Eval 是批准/激活前置条件。不能通过代理操作两个账号伪装独立审核，也不能把 HTTP 健康当作内容全链路成功。
+- 后续选择：由真实独立审核者参与，或经用户明确确认后实现显式单人内测策略；后一方案减少人员分离保护，但仍需保留默认双人治理、真实 Eval、人工审批、认证/Cookie/RBAC/审计。当前没有实现或启用新策略，也未增权、改数据库或关闭门禁。
+- 记录修正：更新内部测试文档顶部的“当前不可达”断点，增加真实生成→人工审稿→AI/人工素材→微信草稿→异网/备份验收顺序。保留旧网络故障与旧验收历史，不覆盖 Windows 私人运行说明、代理配置或受保护知识文件。

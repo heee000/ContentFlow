@@ -2194,3 +2194,11 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 用户恢复 ContentFlow 任务后，本任务重新检查 Windows Tailscale 为 Running，但 Ubuntu 节点 Online=false；私网 HTTPS/SSH 和旧 IPv6 入口超时，旧 IPv4 在 banner 阶段超时，未取得远端身份认证。不是浏览器工具未恢复，也不是缺 API Key/密码/安装包；主机离线原因尚未确定。
 - 暂停需要远端的验收，等用户在 Ubuntu 本机提供 `hostname -I`、`tailscale status`、`systemctl is-active tailscaled docker` 输出。不要要求重复安装或追加公钥。恢复后先复核六服务、Serve/HTTPS 与历史合成知识数据，再继续生产 Prompt 治理和真实生成/素材测试；微信渠道与手机异网仍未签收。
 - 本轮只读排查及更新断点，没有重启或变更服务器、没有新增 AI/社媒操作。受保护知识文件保持原样；此前已通过的验收保留为历史证据，不宣称当前远程服务可访问。
+
+### 21.55.12 网络恢复，转入单人内测治理选择
+
+- 用户提供的 Ubuntu 错误显示控制域名 DNS 解析失败；不能仅凭 Logged out/NoState 判定凭据失效。用户随后修复网络，本任务已通过 Tailscale 和原局域网 SSH 实际登录，保持严格主机校验；不要再让用户重装、追加公钥或重复提供密钥。
+- 六容器运行，Worker 最新心跳在线，数据库/存储 readiness 正常，指定已验证节点且保留 TLS 校验的 Windows 首页为 200；Serve 仍为私网 HTTPS，应用来源仍 `8a5e300`。Tailscale/Docker/SSH enabled，容器 unless-stopped；Worker 有 1 次自动重启且历史日志含数据库错误，当前恢复不能写成从未失败或重启根因已关闭。原合成资料和索引任务状态保留。
+- 新库只读盘点为 1 个 admin 成员，Prompt release/Eval suite/Eval run/活动/内容/渠道均为 0；真实文本/Embedding 已配置，mock 禁止，production Prompt 治理开启。下一步不是直接生成，而是确认单人测试采用何种审批策略。
+- 现有规则禁止套件创建者激活自己的 Eval，禁止 Prompt 创建者审批自己的版本；不得自行造第二个账号完成形式上的双人审批。建议显式的单人内测策略，但这会减少人员分离保护，需用户确认后实现；保留企业默认、真实评测、人工确认、认证/权限/审计，不关闭治理。
+- 本轮仅更新恢复与后续验收记录，未改变应用配置、创建账号、调用模型或发布社媒。具体顺序见 `docs/ubuntu_private_test_setup.md` 的“下一阶段”；受保护未跟踪知识文件仍不读取、修改、暂存或提交。
