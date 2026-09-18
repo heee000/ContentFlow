@@ -2,7 +2,7 @@
 
 更新：2026-09-18。范围是用户自有电脑上的私人测试；既有公网/云服务器部署仍暂停。
 
-**当前结论**：私人六服务已切换 Tailscale HTTPS，Windows 客户端已安装、授权入网，并完成真实 Edge 登录、已有知识读取与刷新后会话保持。用户授权的单域名 Clash/Mihomo 兼容配置已生效，系统代理与 TUN 保持开启，普通域名的直连和代理 HTTPS readiness 均返回 200；浏览器双 Cookie 的 Secure/HttpOnly/Lax 属性通过。手机移动网及主机重启后验收仍待执行。下方 localhost:3600 和“待安装/待 Key/未迁移”等保留为过程记录，不代表当前入口。应用源码仍为 `8a5e300`；部署配置提交 `75a473e` 的 CI 四个 Job 已全部成功，定向覆盖配置 18 项通过。详见台账 `CF-20260917-09`、`CF-20260918-01/02`。
+**当前结论（2026-09-18 恢复任务时）**：Windows 代理/浏览器工具已由“电脑相关”完成专项修复；本任务没有再改 Windows 网络。重新检查时 Windows Tailscale 为 Running、Health 无告警，但 Ubuntu 节点 Online=false，私人 HTTPS/SSH 均连接超时，旧局域网/IPv6 SSH 入口也未能登录；现在等待操作者在 Ubuntu 本机检查联网及 tailscaled/docker 状态。不能据此断定断电、休眠或数据丢失，也不能沿用此前成功记录声称当前可访问。此前私人六服务、真实 Edge 登录/知识读取/刷新和安全 Cookie 已通过的证据仍有效，但属于历史验收；手机移动网、主机重启及完整业务验收仍待执行。应用最后验证来源为 `8a5e300`，当前远端无法复核；部署配置提交 `75a473e` 的 CI 四个 Job 已全部成功。详见台账 `CF-20260918-03`。
 
 ## 现在怎样体验
 
@@ -161,3 +161,11 @@ ssh-keygen -lf "$env:USERPROFILE\.ssh\contentflow_ubuntu_test.pub"
 真实 Edge 已登录独立 Ubuntu 工作区，知识库显示原合成文件已索引、1 个知识块，刷新后仍为正确账户与工作区。只检查 Cookie 名/路径/安全属性，未输出值：access 路径 `/api/v1`，refresh 路径 `/api/v1/auth`，两者均 Secure/HttpOnly/SameSite=Lax。页面已留给用户继续体验；不调用 AI、不新建活动、不触发社媒发布。
 
 持久化扩展脚本已保存并通过等价性/幂等性验证，但未为测试而重启整个 Clash、更新订阅或重启主机，不能据此声称这些生命周期已实测。手机移动网、完整业务生成/媒体/发布、Prompt 治理发布、微信渠道迁移、备份和长稳仍是后续任务。回退副本和本机操作说明在私人目录，不提交订阅、节点参数、账号或凭据。
+
+### 网络专项修复后的当前断点：Ubuntu 节点不可达
+
+用户反馈外网代理异常后，按其要求交由已有“电脑相关”任务独占修复。该任务报告受控对照发现：保留 ContentFlow 定向配置、仅修正代理节点 DNS 后外网请求成功；仅移除定向配置但保留原 DNS 时仍失败。节点 DNS 修正及正式 Edge/内置浏览器操作最终通过，详细证据与回退保存在该任务自己的私人工作目录。此结论是专项任务的报告，不冒充本任务重新完成了其全部对照。当前代理环境与早期 7890/rule/TUN 基线不同，不运行旧私人校验器的 reload、不恢复整份旧 Clash 配置、不为了 ContentFlow 再次调整全局代理。
+
+用户要求继续项目后，本任务重新只读检查：Windows Tailscale 正常，目标 Ubuntu 节点仍离线；指定已验证节点 IP 且保留 CA/域名验证的 HTTPS readiness 连接超时，Tailscale SSH 超时。原 IPv6 SSH 连接超时，原局域网 IPv4 在 SSH banner 阶段超时，没有通过主机认证，不能把该地址上的 TCP 响应当作已确认同一服务器。最初沙箱内 Tailscale 命名管道 Access denied 已在授权环境重测，不将权限错误误写为客户端故障。
+
+下一步只需操作者在 Ubuntu 本机确认网络已连接并执行 `hostname -I`、`tailscale status`、`systemctl is-active tailscaled docker`，提供输出。不要重复安装 Docker/Tailscale、追加 SSH 公钥、生成 Key、关闭生产门禁或删除数据卷。恢复后先检查六服务、Serve/HTTPS 和原知识数据，再继续 Prompt 治理与真实内容链路；当前无新增 AI 调用、账号迁移或社媒发布。
