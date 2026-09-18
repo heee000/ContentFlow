@@ -1,0 +1,11 @@
+# Explicit opt-in only. Apply after compose.tailnet.yml, never to a public stack.
+# The application also validates the exact workspace and private HTTPS origin.
+x-single-operator: &single-operator
+  CONTENTFLOW_PROMPT_APPROVAL_POLICY: single_operator_private
+  CONTENTFLOW_SINGLE_OPERATOR_WORKSPACE_ID: ${CONTENTFLOW_SINGLE_OPERATOR_WORKSPACE_ID:?Set the authorized private workspace UUID}
+
+services:
+  api:
+    environment: *single-operator
+  worker:
+    environment: *single-operator

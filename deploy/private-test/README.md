@@ -81,6 +81,8 @@ Windows 隧道命令不要加 `-6`：它不仅限制远端地址族，也会导�
 
 ## 资源与边界
 
+单人私人内测如需自审批，必须显式授权并在最后追加 `compose.single-operator.yml` 和指定工作区的 `single-operator.env`，不能关闭治理或伪造第二人。默认仍为双人策略；完整约束、维护命令与回退见 [单人内测审批](../../docs/private_single_operator_policy.md)。
+
 - 基础服务无宿主端口；数据和前端网络均为 `internal: true`。API/Worker 另有出口网络以调用真实 API；Web 仅在内部前端网络。Docker 29 对仅接 internal 网络的容器不建立宿主端口映射，因此只有 Caddy 另接普通 ingress bridge（默认绑定回环），仍显式只映射 `127.0.0.1:3800`。该入口网络不是出口隔离，不能声称 Caddy 没有出站能力；它不持有业务密钥，也不接数据网络。
 - PostgreSQL 内存上限 512 MiB，MinIO 384 MiB，初始化进程 128 MiB；日志轮转、PID 上限、持久卷和 `no-new-privileges` 均显式配置。上限不是容量签收，仍须实机测量。
 - API/Worker 各 512 MiB，Web 256 MiB，Caddy 96 MiB；Caddy 非 root、只读根文件系统、清空 capabilities、临时目录限额。总上限不代表实际常驻内存，旧电脑必须监测 swap、OOM 和队列积压。

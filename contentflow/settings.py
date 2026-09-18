@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
+from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -48,6 +50,10 @@ class Settings(BaseSettings):
     allow_registration: bool = True
     allow_mock_providers: bool = False
     require_governed_prompts: bool = False
+    prompt_approval_policy: Literal["dual_control", "single_operator_private"] = (
+        "dual_control"
+    )
+    single_operator_workspace_id: UUID | None = None
     metrics_enabled: bool = False
     metrics_bearer_token: str | None = Field(default=None, max_length=4096)
     cors_origins: list[str] = Field(
@@ -273,7 +279,36 @@ class Settings(BaseSettings):
     def resolved_embedding_api_key(self) -> str | None:
         return self.embedding_api_key or self.model_api_key
 
+    def prompt_approval_policy_for(self, workspace_id: str) -> str:
+        if (
+            self.prompt_approval_policy == "single_operator_private"
+            and self.single_operator_workspace_id is not None
+            and str(self.single_operator_workspace_id) == workspace_id
+        ):
+            return "single_operator_private"
+        return "dual_control"
+
     def validate_runtime(self) -> None:
+        if self.prompt_approval_policy == "single_operator_private":
+            origin = urlparse(self.public_base_url)
+            if (
+                self.single_operator_workspace_id is None
+                or not self.require_governed_prompts
+                or self.allow_registration
+                or origin.scheme != "https"
+                or not re.fullmatch(
+                    r"[a-z0-9-]+\.[a-z0-9-]+\.ts\.net", origin.netloc
+                )
+                or origin.path not in {"", "/"}
+                or origin.query
+                or origin.fragment
+                or self.cors_origins != [self.public_base_url.rstrip("/")]
+            ):
+                raise ValueError(
+                    "Single-operator approval requires an explicit workspace UUID, "
+                    "governed prompts, disabled registration and a single HTTPS "
+                    "Tailscale origin; verify Serve is private (no Funnel) separately"
+                )
         if self.production and (
             self.secret_key == "change-this-in-production" or len(self.secret_key) < 32
         ):

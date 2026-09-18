@@ -39,6 +39,7 @@ from ..prompt_eval import (
     get_active_eval_suite,
     normalize_eval_cases,
     require_current_passed_eval,
+    verify_eval_approval_policy,
     verify_eval_suite,
 )
 from ..prompt_governance import (
@@ -442,6 +443,7 @@ def list_prompt_releases(principal: Admin, session: Db, settings: AppSettings):
         settings=settings,
     )
     return PromptGovernanceResponse(
+        approval_policy=settings.prompt_approval_policy_for(principal.workspace_id),
         active={
             "source": active.source,
             "version": active.version,
@@ -565,10 +567,16 @@ def approve_prompt_release(
         release_id=release_id,
         lock=True,
     )
-    if release.created_by_user_id == principal.user_id:
+    policy = settings.prompt_approval_policy_for(principal.workspace_id)
+    self_review = release.created_by_user_id == principal.user_id
+    if self_review and policy == "dual_control":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="创建者不能审批自己的 Prompt 版本",
+        )
+    if self_review and len(payload.note.strip()) < 3:
+        raise HTTPException(
+            status_code=422, detail="单人内测审批必须填写本人确认说明（至少 3 个字符）"
         )
     if release.status != "draft":
         raise HTTPException(
@@ -588,6 +596,8 @@ def approve_prompt_release(
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
         metadata={
+            "approval_policy": policy,
+            "self_review": self_review,
             "release_number": release.release_number,
             "prompt_hashes": dict(release.prompt_hashes_json),
         },
@@ -606,6 +616,7 @@ def reject_prompt_release(
     payload: PromptReviewRequest,
     principal: Admin,
     session: Db,
+    settings: AppSettings,
 ):
     note = payload.note.strip()
     if not note:
@@ -619,7 +630,11 @@ def reject_prompt_release(
         release_id=release_id,
         lock=True,
     )
-    if release.created_by_user_id == principal.user_id:
+    policy = settings.prompt_approval_policy_for(principal.workspace_id)
+    if (
+        release.created_by_user_id == principal.user_id
+        and policy == "dual_control"
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="创建者不能复核自己的 Prompt 版本",
@@ -641,6 +656,8 @@ def reject_prompt_release(
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
         metadata={
+            "approval_policy": policy,
+            "self_review": release.created_by_user_id == principal.user_id,
             "release_number": release.release_number,
             "reason": note,
             "prompt_hashes": dict(release.prompt_hashes_json),
@@ -707,6 +724,8 @@ def activate_prompt_release(
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
         metadata={
+            "approval_policy": settings.prompt_approval_policy_for(principal.workspace_id),
+            "self_review": release.created_by_user_id == release.reviewed_by_user_id,
             "release_number": release.release_number,
             "previous_release_id": previous_release_id,
             "prompt_hashes": dict(release.prompt_hashes_json),
@@ -718,7 +737,7 @@ def activate_prompt_release(
 
 
 @router.get("/prompt-eval", response_model=PromptEvalGovernanceResponse)
-def list_prompt_eval(principal: Admin, session: Db):
+def list_prompt_eval(principal: Admin, session: Db, settings: AppSettings):
     suites = list(
         session.scalars(
             select(PromptEvalSuite)
@@ -737,6 +756,7 @@ def list_prompt_eval(principal: Admin, session: Db):
     )
     active = next((suite for suite in suites if suite.status == "active"), None)
     return PromptEvalGovernanceResponse(
+        approval_policy=settings.prompt_approval_policy_for(principal.workspace_id),
         active_suite=(prompt_eval_suite_response(active) if active else None),
         suites=[prompt_eval_suite_response(suite) for suite in suites],
         runs=[prompt_eval_run_response(run) for run in runs],
@@ -882,6 +902,8 @@ def activate_prompt_eval_suite(
     suite_id: str,
     principal: Admin,
     session: Db,
+    settings: AppSettings,
+    payload: PromptReviewRequest | None = None,
 ):
     lock_workspace(session, principal.workspace_id)
     suite = get_prompt_eval_suite_or_404(
@@ -890,10 +912,16 @@ def activate_prompt_eval_suite(
         suite_id=suite_id,
         lock=True,
     )
-    if suite.created_by_user_id == principal.user_id:
+    policy = settings.prompt_approval_policy_for(principal.workspace_id)
+    self_activation = suite.created_by_user_id == principal.user_id
+    if self_activation and policy == "dual_control":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="创建者不能激活自己的 Prompt Eval 套件",
+        )
+    if self_activation and (payload is None or len(payload.note.strip()) < 3):
+        raise HTTPException(
+            status_code=422, detail="单人内测激活必须填写本人确认说明（至少 3 个字符）"
         )
     if suite.status not in {"draft", "retired"}:
         raise HTTPException(
@@ -931,6 +959,9 @@ def activate_prompt_eval_suite(
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
         metadata={
+            "approval_policy": policy,
+            "self_activation": self_activation,
+            "confirmation_note": payload.note.strip() if payload else None,
             "version": eval_suite_version(suite.version_number),
             "suite_hash": suite.suite_hash,
             "previous_suite_id": previous_suite_id,
@@ -971,6 +1002,7 @@ def evaluate_prompt_release(
         if suite is None:
             raise ValueError("当前工作区没有生效的 Prompt Eval 套件")
         verify_eval_suite(suite)
+        verify_eval_approval_policy(suite, settings)
     except (EvalIntegrityError, PromptIntegrityError) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

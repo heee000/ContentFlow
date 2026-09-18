@@ -429,6 +429,7 @@ type PromptRelease = {
 };
 
 type PromptGovernance = {
+  approval_policy: "dual_control" | "single_operator_private";
   active: {
     source: "builtin" | "workspace_release";
     version: string;
@@ -498,6 +499,7 @@ type PromptEvalRun = {
 };
 
 type PromptEvalGovernance = {
+  approval_policy: "dual_control" | "single_operator_private";
   active_suite: PromptEvalSuite | null;
   suites: PromptEvalSuite[];
   runs: PromptEvalRun[];
@@ -4567,6 +4569,8 @@ function AdministrationView({
   const promptDraftBase = promptDraftSource === "builtin"
     ? promptGovernance?.builtin
     : promptGovernance?.active;
+  const singleOperator = promptGovernance?.approval_policy === "single_operator_private";
+  const singleOperatorEval = promptEval?.approval_policy === "single_operator_private";
 
   const checkAuditIntegrity = useCallback(async () => {
     setAuditChecking(true);
@@ -4722,7 +4726,9 @@ function AdministrationView({
         },
       });
       formElement.reset();
-      flash("Eval 套件草稿已创建，需由另一名管理员激活");
+      flash(singleOperatorEval
+        ? "Eval 套件草稿已创建，需填写本人确认说明后激活"
+        : "Eval 套件草稿已创建，需由另一名管理员激活");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -4736,12 +4742,17 @@ function AdministrationView({
     if (!window.confirm(
       `确认${verb} ${suite.version}？现有 Prompt 的旧评测证据将立即失效。`,
     )) return;
+    let note: string | undefined;
+    if (singleOperatorEval && suite.created_by_user_id === currentSession.user.id) {
+      note = window.prompt("单人内测：你将确认自己创建的评测套件，没有独立第二人复核。请填写确认说明（至少 3 个字符）")?.trim();
+      if (!note || note.length < 3) return;
+    }
     setBusy(`eval-suite-${suite.id}`);
     setError("");
     try {
       await api<PromptEvalSuite>(
         `/admin/prompt-eval/suites/${suite.id}/activate`,
-        { method: "POST" },
+        { method: "POST", ...(note ? { body: { note } } : {}) },
       );
       flash(`${suite.version} 已成为当前 Eval 门禁`);
       await onChanged();
@@ -4796,7 +4807,9 @@ function AdministrationView({
         },
       });
       formElement.reset();
-      flash("Prompt 草稿已创建，需由另一名管理员审批后才能发布");
+      flash(singleOperator
+        ? "Prompt 草稿已创建，须通过真实评测并由本人明确确认后才能激活"
+        : "Prompt 草稿已创建，需由另一名管理员审批后才能发布");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -4815,7 +4828,13 @@ function AdministrationView({
       if (!reason?.trim()) return;
       body = { note: reason.trim() };
     } else if (action === "approve") {
-      body = { note: "" };
+      if (singleOperator && release.created_by_user_id === currentSession.user.id) {
+        const note = window.prompt("单人内测：这是本人确认，不是双人审批。请先核对评测结果并填写确认说明（至少 3 个字符）")?.trim();
+        if (!note || note.length < 3) return;
+        body = { note };
+      } else {
+        body = { note: "" };
+      }
     } else {
       const verb = release.status === "retired" ? "回滚到" : "激活";
       if (!window.confirm(
@@ -4857,7 +4876,7 @@ function AdministrationView({
       <PageHeading
         eyebrow="Administration"
         title="团队、Prompt 治理与审计"
-        description="管理协作边界、Prompt 双人审批与回滚，以及关键操作记录。只有管理员可以访问本页。"
+        description="管理协作边界、Prompt 审批策略与回滚，以及关键操作记录。只有管理员可以访问本页。"
       />
       {error ? <p className="inline-error" role="alert">{error}</p> : null}
       <section className="admin-form-grid">
@@ -5001,6 +5020,12 @@ function AdministrationView({
         </div>
         {promptGovernance ? (
           <>
+            {singleOperator ? (
+              <p className="permission-note" role="status">
+                当前工作区为单人内测审批：没有独立第二人复核，操作会记录为本人确认。
+                真实模型评测、内容人工审核和发布门禁仍然有效。其他工作区默认双人审批。
+              </p>
+            ) : null}
             {!promptGovernance.ready_for_generation ? (
               <p className="permission-note" role="status">
                 生成已被治理策略阻断：{promptGovernance.generation_block_reason}
@@ -5009,8 +5034,9 @@ function AdministrationView({
             {promptGovernance.governance_required
               && promptGovernance.active.source === "builtin" ? (
                 <p className="form-note">
-                  生产初始化顺序：添加第二名管理员；创建 Eval 套件并由对方激活；
-                  创建 Prompt 草稿；使用当前目标模型运行评测；最后由另一名管理员审批并激活。
+                  {singleOperator
+                    ? "单人内测初始化：创建 Eval 套件并填写说明激活；创建 Prompt 草稿；使用当前目标模型评测；通过后由本人确认并激活。"
+                    : "生产初始化顺序：添加第二名管理员；创建 Eval 套件并由对方激活；创建 Prompt 草稿；使用当前目标模型运行评测；最后由另一名管理员审批并激活。"}
                 </p>
               ) : null}
             <div className="prompt-active-summary">
@@ -5053,7 +5079,9 @@ function AdministrationView({
                       : "基于当前生效版本创建新草稿"}
                   </h3>
                   <p className="form-note">
-                    草稿创建后不可修改；创建者不能自行审批，必须由另一名管理员复核。
+                    {singleOperator
+                      ? "草稿创建后不可修改；单人内测允许创建者填写确认说明后审批，不代表独立复核。"
+                      : "草稿创建后不可修改；创建者不能自行审批，必须由另一名管理员复核。"}
                     审批与激活前还必须通过当前 Eval 套件。审计日志只保存版本与哈希，不保存 Prompt 正文。
                   </p>
                 </div>
@@ -5143,7 +5171,10 @@ function AdministrationView({
             <h3>创建不可变 Eval 套件草稿</h3>
             <p className="form-note">
               套件必须覆盖 plan、generate、review，并为每个用例提供确定性断言。
-              创建者不能自行激活；运行结果不保存模型正文，只保存哈希、字节数与失败项。
+              {singleOperatorEval
+                ? "单人内测允许创建者填写确认说明后激活；"
+                : "创建者不能自行激活；"}
+              运行结果不保存模型正文，只保存哈希、字节数与失败项。
             </p>
           </div>
           <div className="form-grid">
@@ -5182,10 +5213,10 @@ function AdministrationView({
             <StatusBadge key="status" value={suite.status} />,
             <div className="table-actions" key="actions">
               {suite.status === "active" ? <span>当前门禁</span> : null}
-              {suite.status !== "active" && suite.created_by_user_id === currentSession.user.id
+              {suite.status !== "active" && !singleOperatorEval && suite.created_by_user_id === currentSession.user.id
                 ? <span>等待其他管理员</span>
                 : null}
-              {suite.status !== "active" && suite.created_by_user_id !== currentSession.user.id ? (
+              {suite.status !== "active" && (singleOperatorEval || suite.created_by_user_id !== currentSession.user.id) ? (
                 <button
                   className="table-link"
                   disabled={busy === `eval-suite-${suite.id}`}
@@ -5196,7 +5227,9 @@ function AdministrationView({
               ) : null}
             </div>,
           ])}
-          empty="还没有 Eval 套件；创建并由另一名管理员激活后才能审批 Prompt"
+          empty={singleOperatorEval
+            ? "还没有 Eval 套件；创建并填写本人确认说明激活后，才能运行 Prompt 评测"
+            : "还没有 Eval 套件；创建并由另一名管理员激活后才能审批 Prompt"}
         />
       </section>
 
@@ -5269,7 +5302,7 @@ function AdministrationView({
             <StatusBadge key="status" value={release.status} />,
             <div className="table-actions" key="actions">
               {release.status === "draft"
-                && release.created_by_user_id !== currentSession.user.id ? (
+                && (singleOperator || release.created_by_user_id !== currentSession.user.id) ? (
                   <>
                     <button
                       className="table-link"
@@ -5280,7 +5313,7 @@ function AdministrationView({
                       title={currentEvalRun(release.id)?.status === "passed" ? "审批" : "需先通过当前 Eval 套件"}
                       onClick={() => void reviewPromptRelease(release, "approve")}
                     >
-                      审批
+                      {singleOperator && release.created_by_user_id === currentSession.user.id ? "本人确认" : "审批"}
                     </button>
                     <button
                       className="table-link danger-text"
@@ -5292,6 +5325,7 @@ function AdministrationView({
                   </>
                 ) : null}
               {release.status === "draft"
+                && !singleOperator
                 && release.created_by_user_id === currentSession.user.id ? (
                   <span>等待其他管理员</span>
                 ) : null}

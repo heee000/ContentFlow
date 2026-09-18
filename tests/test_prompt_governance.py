@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from sqlalchemy import select
 from contentflow import db
 from contentflow.api import create_app
 from contentflow.entities import (
+    AuditLog,
     Campaign,
     Job,
     PromptEvalRun,
@@ -230,6 +232,7 @@ class PromptGovernanceTest(unittest.TestCase):
         self.assertFalse(baseline.json()["governance_required"])
         self.assertTrue(baseline.json()["ready_for_generation"])
         self.assertIsNone(baseline.json()["generation_block_reason"])
+        self.assertEqual(baseline.json()["approval_policy"], "dual_control")
         self.assertEqual(baseline.json()["releases"], [])
 
         invalid = self.client.post(
@@ -516,6 +519,111 @@ class PromptGovernanceTest(unittest.TestCase):
             session.rollback()
             text_provider.assert_not_called()
             embedding_provider.assert_not_called()
+
+
+    def enable_single_operator(self):
+        self.settings.prompt_approval_policy = "single_operator_private"
+        self.settings.single_operator_workspace_id = UUID(self.workspace_id)
+        self.settings.require_governed_prompts = True
+        self.settings.allow_registration = False
+        self.settings.public_base_url = "https://test.tailtest.ts.net"
+        self.settings.cors_origins = [self.settings.public_base_url]
+        self.settings.validate_runtime()
+
+    def test_single_operator_is_scoped_confirmed_evaluated_and_audited(self):
+        self.enable_single_operator()
+        overview = self.client.get(
+            "/api/v1/admin/prompt-releases", headers=self.owner_headers
+        ).json()
+        self.assertEqual(overview["approval_policy"], "single_operator_private")
+        isolated = self.client.get(
+            "/api/v1/admin/prompt-releases", headers=self.reviewer_personal_headers
+        ).json()
+        self.assertEqual(isolated["approval_policy"], "dual_control")
+        suite = self.client.post(
+            "/api/v1/admin/prompt-eval/suites", headers=self.owner_headers,
+            json={"name": "Private single operator suite", "cases": self.eval_cases()},
+        ).json()
+        suite_url = f"/api/v1/admin/prompt-eval/suites/{suite['id']}/activate"
+        self.assertEqual(self.client.post(
+            suite_url, headers=self.owner_headers
+        ).status_code, 422)
+        activated = self.client.post(
+            suite_url, headers=self.owner_headers,
+            json={"note": "Private test owner confirms; not independent review"},
+        )
+        self.assertEqual(activated.status_code, 200, activated.text)
+        release = self.create_release("single-operator")
+        approve_url = f"/api/v1/admin/prompt-releases/{release['id']}/approve"
+        self.assertEqual(self.client.post(
+            approve_url, headers=self.owner_headers, json={"note": ""}
+        ).status_code, 422)
+        self.assertEqual(self.client.post(
+            approve_url, headers=self.owner_headers, json={"note": "Owner confirmation"}
+        ).status_code, 409)  # No eval: the exception must not bypass the gate.
+        evaluation = self.client.post(
+            f"/api/v1/admin/prompt-releases/{release['id']}/evaluate",
+            headers=self.owner_headers, json={"provider": "mock"},
+        )
+        self.assertEqual(evaluation.status_code, 202, evaluation.text)
+        self.assertTrue(self.worker.run_once())
+        approved = self.client.post(
+            approve_url, headers=self.owner_headers, json={"note": "Owner confirmation"}
+        )
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(approved.json()["created_by_user_id"],
+                         approved.json()["reviewed_by_user_id"])
+        self.activate(release["id"])
+        with db.SessionLocal() as session:
+            event = session.scalar(select(AuditLog).where(
+                AuditLog.action == "prompt_release.approve",
+                AuditLog.entity_id == release["id"],
+            ))
+            self.assertEqual(event.metadata_json["approval_policy"], "single_operator_private")
+            self.assertIs(event.metadata_json["self_review"], True)
+            suite_event = session.scalar(select(AuditLog).where(
+                AuditLog.action == "prompt_eval_suite.activate",
+                AuditLog.entity_id == suite["id"],
+            ))
+            self.assertIs(suite_event.metadata_json["self_activation"], True)
+        self.settings.prompt_approval_policy = "dual_control"
+        overview = self.client.get(
+            "/api/v1/admin/prompt-releases", headers=self.owner_headers
+        ).json()
+        self.assertFalse(overview["ready_for_generation"])
+        self.assertIn("单人激活", overview["generation_block_reason"])
+        self.assertEqual(self.client.post(
+            f"/api/v1/admin/prompt-releases/{release['id']}/evaluate",
+            headers=self.owner_headers, json={"provider": "mock"},
+        ).status_code, 409)
+
+    def test_dual_policy_rejects_prior_self_review_even_with_independent_suite(self):
+        self.enable_single_operator()
+        release = self.create_release("restore-dual")
+        # The setup suite is independently activated. Only the release is self-reviewed.
+        evaluation = self.client.post(
+            f"/api/v1/admin/prompt-releases/{release['id']}/evaluate",
+            headers=self.owner_headers, json={"provider": "mock"},
+        )
+        self.assertEqual(evaluation.status_code, 202)
+        self.assertTrue(self.worker.run_once())
+        approved = self.client.post(
+            f"/api/v1/admin/prompt-releases/{release['id']}/approve",
+            headers=self.owner_headers, json={"note": "Private owner confirmation"},
+        )
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.activate(release["id"])
+        self.settings.prompt_approval_policy = "dual_control"
+        overview = self.client.get(
+            "/api/v1/admin/prompt-releases", headers=self.owner_headers
+        ).json()
+        self.assertFalse(overview["ready_for_generation"])
+        self.assertIn("单人审批", overview["generation_block_reason"])
+        response = self.client.post(
+            f"/api/v1/admin/prompt-releases/{release['id']}/activate",
+            headers=self.owner_headers,
+        )
+        self.assertEqual(response.status_code, 409)
 
 
 if __name__ == "__main__":

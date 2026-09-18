@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,39 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy" / "private-test"
+
+
+def test_acceptance_fixture_uses_valid_synthetic_inputs_without_submission():
+    from contentflow.prompt_eval import normalize_eval_cases
+    from contentflow.schemas import CampaignCreate, PromptEvalSuiteCreate
+
+    spec = importlib.util.spec_from_file_location("acceptance_fixture", DEPLOY / "acceptance_fixture.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fixture = module.build_fixture()
+    CampaignCreate.model_validate(fixture["campaign"])
+    suite = PromptEvalSuiteCreate.model_validate(fixture["suite"])
+    cases = normalize_eval_cases([case.model_dump() for case in suite.cases])
+    assert len(cases) == 6
+    assert {case["stage"] for case in cases} == {"plan", "generate", "review"}
+    assert fixture["campaign"]["image_source"] == "generate"
+    assert any(case["expected_values"] == {"passed": False} for case in cases)
+    fixture["campaign"]["product_facts"].append("mutated")
+    assert "mutated" not in module.build_fixture()["campaign"]["product_facts"]
+
+
+def test_single_operator_overlay_is_explicit_scoped_and_changes_only_policy():
+    overlay = yaml.safe_load((DEPLOY / "compose.single-operator.yml").read_text("utf-8"))
+    assert set(overlay["services"]) == {"api", "worker"}
+    for service in overlay["services"].values():
+        assert set(service) == {"environment"}
+        assert service["environment"] == {
+            "CONTENTFLOW_PROMPT_APPROVAL_POLICY": "single_operator_private",
+            "CONTENTFLOW_SINGLE_OPERATOR_WORKSPACE_ID": (
+                "${CONTENTFLOW_SINGLE_OPERATOR_WORKSPACE_ID:"
+                "?Set the authorized private workspace UUID}"
+            ),
+        }
 
 
 def test_private_infra_is_isolated_and_bounded() -> None:

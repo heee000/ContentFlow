@@ -2202,3 +2202,9 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 新库只读盘点为 1 个 admin 成员，Prompt release/Eval suite/Eval run/活动/内容/渠道均为 0；真实文本/Embedding 已配置，mock 禁止，production Prompt 治理开启。下一步不是直接生成，而是确认单人测试采用何种审批策略。
 - 现有规则禁止套件创建者激活自己的 Eval，禁止 Prompt 创建者审批自己的版本；不得自行造第二个账号完成形式上的双人审批。建议显式的单人内测策略，但这会减少人员分离保护，需用户确认后实现；保留企业默认、真实评测、人工确认、认证/权限/审计，不关闭治理。
 - 本轮仅更新恢复与后续验收记录，未改变应用配置、创建账号、调用模型或发布社媒。具体顺序见 `docs/ubuntu_private_test_setup.md` 的“下一阶段”；受保护未跟踪知识文件仍不读取、修改、暂存或提交。
+
+### 21.55.13 单人内测已获授权，显式策略实现完成
+
+- 用户已同意，仅指定测试工作区例外。默认双人规则不变；单人模式需 UUID、治理开启、注册关闭、确切私人 HTTPS/同源 CORS，部署另查 Serve 无 Funnel。本人确认必须填写说明并真实记录，不增加或伪装第二名审核者。
+- 后端、治理界面和审计已支持；切回双人会重新阻止单人历史审批满足门禁。所有真实 Eval、哈希/租户/权限和内容审核门禁保留；不把 production 改为 development，无迁移。
+- 定向 `83 passed, 59 subtests passed`、Ruff、前端 lint/Next.js 类型与构建/Vinext/2 项 SSR 通过。实现尚待构建部署与真实模型验收；不要把源代码测试通过写成服务器已启用。部署/回退见 `docs/private_single_operator_policy.md`，合成输入见 `deploy/private-test/acceptance_fixture.py`。

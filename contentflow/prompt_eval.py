@@ -208,6 +208,12 @@ def require_current_passed_eval(
     suite = get_active_eval_suite(session, release.workspace_id)
     if suite is None:
         raise ValueError("当前工作区没有生效的 Prompt Eval 套件")
+    verify_eval_approval_policy(suite, settings)
+    if (
+        settings.prompt_approval_policy_for(release.workspace_id) == "dual_control"
+        and release.reviewed_by_user_id == release.created_by_user_id
+    ):
+        raise ValueError("当前双人策略不接受单人审批的 Prompt；请建立独立审核的新版本")
     verify_eval_suite(suite)
     prompt_set = prompt_set_from_release(release)
     target_provider = build_text_provider(settings, provider_override)
@@ -235,6 +241,14 @@ def require_current_passed_eval(
             f"({target_provider_name}/{target_model_name})"
         )
     return suite, run
+
+
+def verify_eval_approval_policy(suite: PromptEvalSuite, settings: Settings) -> None:
+    if (
+        settings.prompt_approval_policy_for(suite.workspace_id) == "dual_control"
+        and suite.activated_by_user_id == suite.created_by_user_id
+    ):
+        raise ValueError("当前双人策略不接受单人激活的 Eval；请由另一名管理员激活新套件")
 
 
 def _resolve_path(value: Any, path: str) -> Any:
@@ -316,6 +330,7 @@ def execute_prompt_eval_run(
         raise ValueError("评测运行关联对象不存在或工作区不一致")
 
     cases = verify_eval_suite(suite)
+    verify_eval_approval_policy(suite, settings)
     prompt_set = prompt_set_from_release(release)
     if run.suite_hash != suite.suite_hash:
         raise EvalIntegrityError("评测运行绑定的套件哈希不一致")

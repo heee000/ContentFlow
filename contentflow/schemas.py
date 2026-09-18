@@ -148,6 +148,7 @@ class ActivePromptSetResponse(BaseModel):
 
 
 class PromptGovernanceResponse(BaseModel):
+    approval_policy: Literal["dual_control", "single_operator_private"] = "dual_control"
     active: ActivePromptSetResponse
     builtin: ActivePromptSetResponse
     governance_required: bool
@@ -217,6 +218,7 @@ class PromptEvalRunResponse(ORMModel):
 
 
 class PromptEvalGovernanceResponse(BaseModel):
+    approval_policy: Literal["dual_control", "single_operator_private"] = "dual_control"
     active_suite: PromptEvalSuiteResponse | None
     suites: list[PromptEvalSuiteResponse]
     runs: list[PromptEvalRunResponse]
