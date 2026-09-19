@@ -44,7 +44,7 @@ def build_fixture():
         {"name": "wechat-targeted-revision-removes-unsupported-claims", "stage": "generate",
          "input_json": {**deepcopy(common), "platform": "wechat", "phase": "targeted_revision",
                         "plan": {"selected_angle": "先核实事实，再润色表达"},
-                        "draft": {"title": "ContentFlow 使用建议", "body": "ContentFlow 保证爆款。"},
+                        "previous_draft": {"title": "ContentFlow 使用建议", "body": "ContentFlow 保证爆款。"},
                         "editorial_review": {"passed": False, "revision_instructions": [
                             "删除没有依据的效果承诺和禁用词。按照事实边界重写成完整公众号正文，保留私人内测和人工复核提醒。"
                         ]}},

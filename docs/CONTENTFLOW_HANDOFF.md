@@ -1,6 +1,6 @@
 # ContentFlow 项目交接文档
 
-> 更新日期：2026-09-17
+> 更新日期：2026-09-19（历史阶段记录按时间保留，当前断点见末节）
 > 适用仓库：ContentFlow 仓库根目录
 > GitHub：<https://github.com/heee000/ContentFlow>
 > 当前工作分支：`codex/enterprise-media-runtime`
@@ -2208,3 +2208,17 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 用户已同意，仅指定测试工作区例外。默认双人规则不变；单人模式需 UUID、治理开启、注册关闭、确切私人 HTTPS/同源 CORS，部署另查 Serve 无 Funnel。本人确认必须填写说明并真实记录，不增加或伪装第二名审核者。
 - 后端、治理界面和审计已支持；切回双人会重新阻止单人历史审批满足门禁。所有真实 Eval、哈希/租户/权限和内容审核门禁保留；不把 production 改为 development，无迁移。
 - 定向 `83 passed, 59 subtests passed`、Ruff、前端 lint/Next.js 类型与构建/Vinext/2 项 SSR 通过。实现尚待构建部署与真实模型验收；不要把源代码测试通过写成服务器已启用。部署/回退见 `docs/private_single_operator_policy.md`，合成输入见 `deploy/private-test/acceptance_fixture.py`。
+
+### 21.55.14 已部署单人策略；真实 Eval 超时后安全暂停
+
+- `6871ac9` 的 CI #35326064907 四项全绿，384 passed / 199 subtests；新 API/Worker/Web 已实际部署，旧镜像/配置和数据保留，当前源 SHA 不再是 8a5e300。运行配置须额外带 `single-operator-20260918/activation.env` 与最后的 `single-operator-20260918/compose.single-operator.yml`；不要漏掉已授权的覆盖。
+- 升级前后原对象 checksum、向量维度、文档/索引状态一致；真实 HTTPS、安全 Cookie、鉴权、Host 和治理自检通过。本轮浏览器控制仍 fetch 失败，未重新签收浏览器；没有修代理或开放公网。
+- 单人授权已完成，不再追问同一许可。当前 1 个管理员、1 个 active Eval suite、1 个 draft Prompt、1 个 error Eval run；Job 为 manual_review。实际首个模型计划调用成功，第二次 120 秒超时，供应商执行/计费未知，后续用例没跑。未审批/激活 Prompt，未创建活动/内容/素材/发布。
+- 下一步需核对该次供应商请求或取得明确风险处置授权，再走真实受控恢复；禁止填假 provider_checked、静默重复调用、删失败用例或绕过 Eval。详情和时间见内部测试记录与 CF-20260918-05。受保护知识文件仍原样。
+
+### 21.55.15 关机后连接与数据复核完成，评测断点未变化
+
+- 2026-09-19 通过原专用密钥和严格主机验证重新连接 Ubuntu；两端 Tailscale 在线，六容器运行，Serve 仍为 tailnet-only。没有重装、改代理/DNS、重启服务或开放公网。
+- 真实 TLS、readiness、Host 拒绝、登录/刷新/退出和 Secure/HttpOnly Cookie 自检通过；原合成文件 checksum、1024 维向量及 indexed 状态正确。可运行任务为 0，账本仍为 2 次 succeeded（含原 Embedding）与 1 次 outcome_unknown；未新增模型调用。
+- 昨日未提交的六个文件已逐项复核；部署测试重新取得 20 passed，Ruff 与 diff 检查通过。初次受沙箱临时目录权限限制，正常权限重跑通过，没有通过改系统权限处理。待按既有阶段同步授权普通提交/推送，不触碰受保护知识文件。
+- 当前 Prompt 仍 draft、Eval 仍 error、没有工作流运行。已询问是否接受可能重复计费并只重跑一轮（最多六次模型请求）；用户未明确同意前，不假定“继续”已经核对供应商结果，也不填假 provider_checked。

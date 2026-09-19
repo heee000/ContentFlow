@@ -1070,3 +1070,21 @@
 - 恢复双人配置后，单人激活的套件/单人批准的版本不再满足生成或激活门禁，不能悄悄沿用；Worker 也重检评测套件策略。无需数据库迁移或篡改既有审核记录。
 - 新增 opt-in Compose 覆盖、启用/回退说明及六个无凭据合成验收用例；没有创建第二个账号。定向 Python 为 `83 passed, 59 subtests passed`，Ruff/前端 ESLint/Next.js 类型与生产构建/Vinext 和 2 项 SSR 测试通过。最初误用系统 Python 缺依赖，随后用项目 `.venv` 完成签收，未污染系统环境。
 - 此条提交时尚未更新服务器或调用模型；镜像构建、Linux CI、实际开启与真实生成结果须在后续增量补记。原受保护知识文件仍不读、改、暂存或提交，Windows 代理配置未动。
+
+#### 部署与真实验收增量
+
+- 实现 `6871ac9` 已普通推送，[CI #35326064907](https://github.com/heee000/ContentFlow/actions/runs/35326064907) 四个 Job 全绿；真实 PostgreSQL/MinIO 为 `384 passed, 199 subtests passed`，覆盖率 82.78%。前端、安全依赖检查、源码/SBOM 与签名证据通过。
+- 新 API-only 后端和 HTTPS Web 使用已有锁文件/缓存构建。258495641 字节传输包 SHA-256 为 `9fd3e1031378f985f16b57afbd72da3208201f60532949f03bb084d10bd9071b`，远端全包验证通过。Docker 27→29 省略旧空/default 配置导致 ID 改变；全部 13/9 层、非空运行配置、架构逐项匹配。目标后端 ID 为 `aeab201d85bf04c3a8f8fecd123e1c560e1f00c243f9e9e2fca446030a7f1864`，Web 为 `2e82be55d5e4911669e670e2afa59010027761b26d5a0060342e8ada8cefce10`，未忽略任意非空差异。
+- 原 images.env/tailnet.env、旧镜像和所有数据保留。只新增独立 activation.env/覆盖并更新 API、Worker、Web；DB/MinIO/Caddy 未重建，没有数据库迁移。Compose 临时 run 曾消费脚本 stdin，改为显式 /dev/null；最终 ps 遇到 PowerShell 尾部 CR 换行，实际更新已经成功，随后独立只读确认，未重复重建。
+- 升级前后原合成文档 indexed、对象字节 checksum、1024 维向量、原 1 条 succeeded Provider attempt 一致，无 runnable Job。新版本实际 Settings 验证与精确工作区限制通过；HTTPS 真实证书、Host/匿名拒绝、同源 Web、登录/刷新/退出、Secure/HttpOnly/Lax Cookie 和治理门禁通过，Windows readiness 确认源码 SHA 为 `6871ac9`。
+- computer-use 浏览器控制返回 nodeRepl.fetch request failed；不重复修改 Windows 代理，不声称本轮真实浏览器界面已签收。前端 lint/类型/双构建/SSR 证据与 API 自检独立保留。
+- 实际仅创建 1 个六例 Eval 套件、按授权本人确认激活，以及 1 个内置基线 Prompt 草稿；审计含 single_operator_private/self_activation 与代理代表所有者操作的真实说明。创建真实 Eval run 后，首个计划调用成功（输入 571、输出 3147、合计 3718 服务报告 tokens）；第二次计划调用 120991 ms 后 TimeoutError，持久账本为 outcome_unknown，Job 为 manual_review。没有后台重放或把未知记为未执行；不能把 3718 当完整账单，也不能称第一例断言通过（整轮在异常前未保存完整结果）。
+- Prompt 仍 draft，ready_for_generation=false；活动、内容、发布均为 0。需核对供应商结果/计费或明确风险处置后再继续，禁止伪造 provider_checked、跳过 Eval、删掉失败用例或假称已生成。定向修订 fixture 的输入键已纠正为与真实 Agent 相同的 previous_draft，修正后部署用例 20 项通过；它不改变应用镜像来源 SHA。
+
+## CF-20260919-01：中断恢复与阶段记录收尾
+
+- **问题**：前轮完成单人策略部署及真实 Eval 后，记录与 fixture 回归修正尚未提交；两台电脑关机后需确认连接及持久化，而不是重复安装或重跑外部请求。
+- **处理**：先检查 Git，确认六个未提交文件为上轮修正/记录；保留受保护未跟踪知识文件。使用既有专用密钥、严格主机校验及 Tailscale 重新登录 Ubuntu，未改变网络配置或服务。源镜像 SHA 仍为 `6871ac9`，记录提交不能冒充新应用部署。
+- **实测**：六容器运行，Serve 只限 tailnet；TLS/readiness/Host 拒绝/同源 Web/登录刷新退出/安全 Cookie 均通过。原合成对象哈希匹配、向量为 1024 维、文档 indexed，无 runnable Job；持久账本为 2 succeeded、1 outcome_unknown。未新增 AI 调用、内容或社媒副作用。
+- **验证**：部署配置与 fixture 测试重新通过 20 项，Ruff 通过。初次测试因沙箱无法访问既有 pytest 临时目录而有 11 个 setup error；使用正常权限重跑同组用例全部通过，未修改系统目录权限或绕过测试。原 `previous_draft` 修正和回归断言一并保留。
+- **剩余断点**：Prompt 草稿与 error Eval 未变化；已请求明确的一轮重跑风险决策（最多六次模型请求、可能重复费用），无此决策不自动继续。旧调用的实际执行/账单仍未知，不能伪造供应商核对。API 自检不代表浏览器、手机异网、异常断电或完整业务验收。

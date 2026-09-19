@@ -29,6 +29,8 @@ def test_acceptance_fixture_uses_valid_synthetic_inputs_without_submission():
     assert {case["stage"] for case in cases} == {"plan", "generate", "review"}
     assert fixture["campaign"]["image_source"] == "generate"
     assert any(case["expected_values"] == {"passed": False} for case in cases)
+    revision = next(case for case in cases if "targeted-revision" in case["name"])
+    assert "previous_draft" in revision["input_json"]
     fixture["campaign"]["product_facts"].append("mutated")
     assert "mutated" not in module.build_fixture()["campaign"]["product_facts"]
 

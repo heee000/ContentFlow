@@ -1,22 +1,26 @@
 # Ubuntu 内部测试机准备记录
 
-更新：2026-09-18。范围是用户自有电脑上的私人测试；既有公网/云服务器部署仍暂停。
+更新：2026-09-19。范围是用户自有电脑上的私人测试；既有公网/云服务器部署仍暂停。
 
-**当前结论（2026-09-18 网络修复后）**：用户修复 Ubuntu 网络后，Tailscale 与原局域网 SSH 均恢复，严格主机验证通过；本任务未修改 Windows/Ubuntu 网络配置。六容器运行，Worker 最新心跳正常；Windows 和 Ubuntu 对指定已验证节点的 HTTPS readiness 均返回 database/storage ok，Windows 首页返回 200，应用来源仍为 `8a5e300`。这次保留了 TLS 校验，但显式指定节点的请求不能替代普通域名/代理下的浏览器或手机异网复测。Tailscale、Docker、SSH 均 enabled；六容器均为 unless-stopped，Worker 记录 1 次自动重启、没有 OOM，其他五容器重启计数为 0。原合成资料仍 indexed、原索引 Job 仍 succeeded；尚未重复验证对象字节/向量完整性或异常断电恢复。现在不再等待网络信息，业务断点转为单人内测与双人 Prompt 审核规则的适配选择，详见台账 `CF-20260918-04`。
+**当前结论（2026-09-18 单人策略部署后）**：用户已授权单人内测，新应用源码 `6871ac99febde6a7756a3e6414bf697aec4e8b9d` 已更新到 Ubuntu，只有指定工作区生效；原网络、密钥、数据库和对象卷未更改。六服务运行，Worker 心跳正常；HTTPS、登录/刷新/退出、Secure/HttpOnly Cookie、Host 拒绝、生产治理均通过。原合成文件 checksum、1024 维向量和已完成索引保持正确。真实六例 Eval 已启动，但第二个模型请求 120 秒超时，账本 outcome_unknown，Job 已停在 manual_review；没有自动重试、批准 Prompt、创建活动或发布内容。当前阻塞是外部模型请求结果/计费未知，不再等待单人策略授权或网络信息。浏览器控制工具仍报 fetch 失败，本轮未复验真实浏览器交互；不影响已验证的 SSH/API，亦不能把 API 成功当作浏览器签收。详见 `CF-20260918-05`。
 
 ## 现在怎样体验
 
+2026-09-19 两机关机后的恢复检查：专用 SSH 严格校验通过、Tailscale 在线、六容器运行、Serve 仍为私网；TLS/登录会话与原合成文件 checksum、1024 维索引验证正确。没有改代理/DNS或重新安装。业务断点仍为上面的真实 Eval 超时；本次连接复核没有新增模型请求，未把普通“继续”当作供应商已经核对或接受重复费用。详见 `CF-20260919-01`。
+
 现在应在已加入同一授权 Tailscale 网络的设备上打开 Serve 输出的 **HTTPS 网址**；实际地址在本机私人使用说明中，不把账号/授权地址写入公开模板。旧 localhost:3600 工作台入口已不适用，仅保留回环健康检查和可回退配置；旧 Windows localhost:3000 实例不受影响。新工作区为 `Ubuntu Private Test 20260917`，没有旧活动；登录资料保存在 `.contentflow/private-test-transfer-20260917/private-test-login.json`，已被 Git 忽略，不上传或复制到公开文档。
 
-当前可以登录、浏览资源与系统、检查知识库和任务队列、创建活动。已有一个明确标记为合成测试的知识文件，真实索引成功；不是从旧知识文件拷贝。内容生成前仍需要在管理页完成 Prompt 版本、评测、独立审核与激活；生产保护没有关闭。微信渠道未迁移，本轮没有创建微信草稿或公开发布。
+当前可以登录、浏览资源与系统、检查知识库和任务队列、创建活动。已有一个明确标记为合成测试的知识文件，真实索引成功；不是从旧知识文件拷贝。Eval v1 已按单人模式确认并激活，Prompt r1 仍是草稿，须先完成真实评测再本人确认/激活。生产保护没有关闭。微信渠道未迁移，本轮没有创建微信草稿或公开发布。
 
 ### 下一阶段：从部署可访问到真实业务验收
 
-恢复后的只读盘点：1 个管理员成员；Prompt release、Eval suite、Eval run、活动、内容、渠道均为 0。当前 `production`、`require_governed_prompts=true`、`allow_mock_providers=false`，文本/Embedding 均使用真实兼容 API。不是缺 API Key，也不是可以直接点生成的新手工作区。
+当前盘点：1 个管理员成员，1 个 draft Prompt release、1 个 active Eval suite、1 个 error Eval run；对应 Job 等待人工核对，活动、内容、渠道均为 0。`production`、`require_governed_prompts=true`、`allow_mock_providers=false` 不变，文本/Embedding 均为真实 API。
 
-代码要求 Eval 套件由非创建者激活，Prompt 由非创建者审批，并在审批/激活前通过当前真实模型评测。因此现有单管理员无法完成启动流程；这属于个人内测与企业默认治理不匹配，不能用代理控制两个账号冒充独立审核。
+默认仍要求 Eval 套件由非创建者激活、Prompt 由非创建者审批；用户已明确同意只给该私人工作区单人例外，后台和页面均标明本人确认，不伪装独立审核。评测、认证/权限/审计与内容人工审核继续强制。
 
-继续路径待用户确认，尚未实施：保留双人规则并由真实独立审核者参与；或增加**显式、可审计的单人内测审批策略**。后一方案会取消本测试环境的人员分离保护，必须明确授权；仍应保留默认企业双人策略、真实 Eval、人工审批、身份认证、Secure Cookie、权限和审计，不把环境切成不安全的开发模式，也不直接关掉 Prompt 治理。
+本机实际部署保留旧 `images.env`、`tailnet.env`；每条 Compose 命令在原参数后增加 `--env-file single-operator-20260918/activation.env`，文件列表最后增加 `-f single-operator-20260918/compose.single-operator.yml`。覆盖中含已验真新镜像、应用 SHA 和授权工作区；不带此覆盖会回到旧镜像和双人配置。原文件/镜像保留可回退，操作前确认队列及人工核对任务，不清卷。通用约束见 `docs/private_single_operator_policy.md`。
+
+真实 Eval 的首个 plan 请求成功（服务报告 3718 tokens），第二个 plan 于北京时间约 17:04:33 发起，约 121 秒后超时；后续四个用例未调用。首个请求成功不等于整个用例或套件已通过。请求目标为 api.deepseek.com / deepseek-v4-flash，供应商响应首个请求模型名为 deepseek-flash；不据别名断言确切模型版本。超时调用没有用量信息，需核对供应商记录或取得明确的重复计费风险处置授权，不能冒填 provider_checked=true。
 
 确认后的执行顺序：
 
