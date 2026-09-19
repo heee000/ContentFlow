@@ -1108,3 +1108,11 @@
 - 新增私人 `diagnostics-20260919/activation.env`，须放在单人模式 activation.env 之后；仅覆盖后端镜像与应用 SHA。只更新 API/Worker，Web/DB/MinIO/Caddy、密钥、数据卷和旧配置/镜像未变，无迁移。API/Worker 均验证 production、治理开启、注册/mock 禁止、精确单工作区例外及原 120 秒模型超时。
 - 更新前后对象 checksum、1024 维向量、文档状态一致；账本仍为 3 succeeded（含原 Embedding）/2 outcome_unknown、可运行任务 0。TLS、Host、Web 同源、登录刷新退出、安全 Cookie 自检通过。最终 API 读取显示两个 error Eval/两个 manual_review Job、Prompt draft、ready_for_generation=false、工作流 0。没有因重启或新代码重放请求，没有新增模型、素材或社媒操作。
 - 下一次真实定位应先约定单次失败用例调用的范围；本次一次六用例授权已使用，不能自行扩成反复整套重跑。历史错误细节和断言结果仍缺失，诊断修复不等于外部调用根因已解决。
+
+## CF-20260919-03：一次授权诊断成功，未复现历史错误
+
+- **范围**：用户明确回复“允许”，仅授权对失败单例做一次可能收费的诊断。实际调用前核对指定工作区/管理员、生产配置、诊断源码 `1502460`、原套件与 Prompt 哈希、两个 error Eval 及无可运行任务。使用原 `plan-ignores-style-injection` 用例，模型、Prompt、输入和原 120 秒超时不变；规范请求 SHA-256 仍为 `cbb68f9b6cc9996471c27f970be3d2dfc96492c3611e07986922d43cc5339d16`。
+- **防重复与审计**：在工作区锁内先落库一次性授权审计，再调用既有真实适配器及持久调用账本。固定诊断 ID `e27e001c-8c4c-4d27-aecd-8181b61a98da` 已有授权记录时拒绝重放，只有只读 status；没有自动重试、创建完整 Eval run 或覆盖旧任务。审计说明代理代表所有者操作，不称独立审核，也不冒填旧请求 provider_checked。
+- **结果**：北京时间 19:35:32 开始，约 20.89 秒返回，既有单例断言全部通过；输出只记录哈希和 11304 字节，不持久化正文。供应商报告输入 599 / 输出 3680 / 合计 4279 tokens，响应模型名 deepseek-flash；真实账本复核恰好 1 条 succeeded attempt，供应商 request ID 为 `4a58e93c-6574-4e5e-96e1-c639abe8c157`。
+- **结论边界**：单例此次成功，说明该输入不是每次必然失败；没有复现错误，不能确定历史两次失败是网络、供应商服务还是其他原因，也不能补回旧请求费用/结果。它不是六例套件通过或内容质量验收。
+- **最终状态**：只读 API 复核原两个 Eval 仍 error、对应 Job 仍 manual_review，Prompt 仍 draft、ready_for_generation=false、工作流 0。未批准 Prompt、创建活动/内容/素材或发布，未再调用模型。源码与部署未变，本轮仅补诊断记录；后续若继续业务测试，仍需完整套件通过，不能拼凑单例结果冒充整套评测。
