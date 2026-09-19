@@ -1098,3 +1098,13 @@
 - **部分结果**：常规异常时携带已完成用例的断言、输出哈希/字节数、套件哈希、完成/未完成计数，经 Worker 既有租约校验后落库；不保存原文，不把 partial 当 passed，不跳过余下用例。不是逐例持久化、断电恢复或自动断点续跑；旧轮结果不会被重建或改写。
 - **验证**：本地相关 110 项与 11 subtests 通过，Ruff/diff 检查通过，涵盖敏感错误脱敏、异常类型、调用账本、部分失败门禁、Job/Worker/Prompt 治理。尚待 Linux CI 和新镜像部署；当前服务器应用来源仍为 `6871ac9`。
 - **浏览器**：computer-use 入口已恢复，本次实际打开私人 HTTPS 登录页且 API 地址正确；不是新的登录后全流程验收，没有变更代理。受保护知识资料保持不读、不改、不暂存；私人运行器和回执不提交。
+
+### CI 与诊断版部署签收
+
+- 修复提交 `1502460aaf59e49ba2956f69ea7ec91b680a01eb` 以 John Wang 身份普通推送；首次 GitHub TLS EOF 后，以单命令 HTTP/1.1 普通重试成功，未强推、未改代理或证书设置。[CI #35435079201](https://github.com/heee000/ContentFlow/actions/runs/35435079201) 四个 Job 全绿，真实 PostgreSQL/MinIO 为 409 passed / 201 subtests，覆盖率 82.98%；前端、安全审计、源码/SBOM、签名来源证明通过。
+- 本地 API-only 镜像通过 `/tmp` 工作目录、禁网临时容器的安装包错误诊断 smoke。完整镜像压缩包 163475770 字节，SHA-256 `23577e43d12330ad8e892e16d3a5d66397f5fd48d34c7654552090a0743e25b6`；Tailscale 传输重置，原 LAN 直连大包也停滞。未加载残缺包，未改全局网络；本轮精确识别的 scp 已停止，远端 17874944 字节半包改名 `.partial-unused` 保留，避免误用。
+- 实际改用约 1.1 MB 的源码/wheel 增量：源码从已提交的 `1502460` 导出，wheel 从同一已验证镜像断网构建。63 个包文件逐一与提交源码比较，仅做 CRLF/LF 规范化；wheel 哈希 `6e5cb00e441d7521fb151d7d4d64a16e34ab98036e89aac247bba01a88637e73`，源码包哈希 `dbe7d95a3f3957f17cba2ed65076182d34426aedc49e306ae5233dcecb2280ea`。目标机校验哈希后，以确切旧后端 ID `aeab201d85bf04c3a8f8fecd123e1c560e1f00c243f9e9e2fca446030a7f1864` 禁网构建，只重装本项目、不解析/更新依赖。
+- 目标镜像 `146655ac40417080db59e774ac6bd841383e9e9940211154190a371df7c4944c` 保留原 13 层并增加 3 层；运行配置除声明的新源码标签外与旧镜像完全相同。镜像 ID/层结构不同于 Windows 完整构建是有意的增量构建，不冒称两者字节一致；目标源码目录与 site-packages 的 63 个文件哈希、禁网 smoke 均通过。
+- 新增私人 `diagnostics-20260919/activation.env`，须放在单人模式 activation.env 之后；仅覆盖后端镜像与应用 SHA。只更新 API/Worker，Web/DB/MinIO/Caddy、密钥、数据卷和旧配置/镜像未变，无迁移。API/Worker 均验证 production、治理开启、注册/mock 禁止、精确单工作区例外及原 120 秒模型超时。
+- 更新前后对象 checksum、1024 维向量、文档状态一致；账本仍为 3 succeeded（含原 Embedding）/2 outcome_unknown、可运行任务 0。TLS、Host、Web 同源、登录刷新退出、安全 Cookie 自检通过。最终 API 读取显示两个 error Eval/两个 manual_review Job、Prompt draft、ready_for_generation=false、工作流 0。没有因重启或新代码重放请求，没有新增模型、素材或社媒操作。
+- 下一次真实定位应先约定单次失败用例调用的范围；本次一次六用例授权已使用，不能自行扩成反复整套重跑。历史错误细节和断言结果仍缺失，诊断修复不等于外部调用根因已解决。

@@ -2,6 +2,8 @@
 
 更新：2026-09-19。范围是用户自有电脑上的私人测试；既有公网/云服务器部署仍暂停。
 
+**当前运行版（2026-09-19 诊断补强部署后）**：API/Worker 已更新到源码 `1502460aaf59e49ba2956f69ea7ec91b680a01eb`，Linux CI 四项全绿（409 passed / 201 subtests），目标安装包与生产配置/HTTPS/历史数据复核通过；Web 保留上一镜像。诊断能力已生效，但两个历史 Eval 仍失败、请求结果/完整计费未知，未生成活动/内容，未放宽门禁或新增收费调用。不能把诊断版部署当作业务调用根因已解决。
+
 **最新增量（2026-09-19 用户接受一次重跑后）**：已按授权重跑一轮相同六例 Eval，实际第一个请求成功（6173 reported tokens）、第二个约 4 秒报 RuntimeError，无响应证据，后四例未调用；新旧两个任务都保留 manual_review，Prompt 仍 draft，没有活动/内容。未重复消耗模型调用。原版丢失具体错误分类和中途断言结果，已补源码及离线回归（110 passed / 11 subtests），待 CI/部署，不称已修好历史根因。浏览器控制已恢复且私人 HTTPS 登录页已实际打开；尚非登录后全链路验收。后续以 CF-20260919-02 与交接末节为准。
 
 **当前结论（2026-09-18 单人策略部署后）**：用户已授权单人内测，新应用源码 `6871ac99febde6a7756a3e6414bf697aec4e8b9d` 已更新到 Ubuntu，只有指定工作区生效；原网络、密钥、数据库和对象卷未更改。六服务运行，Worker 心跳正常；HTTPS、登录/刷新/退出、Secure/HttpOnly Cookie、Host 拒绝、生产治理均通过。原合成文件 checksum、1024 维向量和已完成索引保持正确。真实六例 Eval 已启动，但第二个模型请求 120 秒超时，账本 outcome_unknown，Job 已停在 manual_review；没有自动重试、批准 Prompt、创建活动或发布内容。当前阻塞是外部模型请求结果/计费未知，不再等待单人策略授权或网络信息。浏览器控制工具仍报 fetch 失败，本轮未复验真实浏览器交互；不影响已验证的 SSH/API，亦不能把 API 成功当作浏览器签收。详见 `CF-20260918-05`。
@@ -21,6 +23,18 @@
 默认仍要求 Eval 套件由非创建者激活、Prompt 由非创建者审批；用户已明确同意只给该私人工作区单人例外，后台和页面均标明本人确认，不伪装独立审核。评测、认证/权限/审计与内容人工审核继续强制。
 
 本机实际部署保留旧 `images.env`、`tailnet.env`；每条 Compose 命令在原参数后增加 `--env-file single-operator-20260918/activation.env`，文件列表最后增加 `-f single-operator-20260918/compose.single-operator.yml`。覆盖中含已验真新镜像、应用 SHA 和授权工作区；不带此覆盖会回到旧镜像和双人配置。原文件/镜像保留可回退，操作前确认队列及人工核对任务，不清卷。通用约束见 `docs/private_single_operator_policy.md`。
+
+2026-09-19 起还须在单人环境文件之后增加诊断版环境文件，当前维护顺序为：
+
+```bash
+cf_compose=(docker compose --env-file .env --env-file images.env \
+  --env-file tailnet.env --env-file single-operator-20260918/activation.env \
+  --env-file diagnostics-20260919/activation.env \
+  -f compose.infra.yml -f compose.offline-pg.yml -f compose.app.yml \
+  -f compose.tailnet.yml -f single-operator-20260918/compose.single-operator.yml)
+```
+
+新增文件只覆盖后端镜像与源码 SHA，旧配置保持原样；去掉它可回退上一后端而保留单人模式。目标镜像是经源码/wheel 核对后在旧已验证镜像上禁网构建的增量版；原完整传输半包已改名 `.partial-unused`，未加载，不作为部署输入。
 
 真实 Eval 的首个 plan 请求成功（服务报告 3718 tokens），第二个 plan 于北京时间约 17:04:33 发起，约 121 秒后超时；后续四个用例未调用。首个请求成功不等于整个用例或套件已通过。请求目标为 api.deepseek.com / deepseek-v4-flash，供应商响应首个请求模型名为 deepseek-flash；不据别名断言确切模型版本。超时调用没有用量信息，需核对供应商记录或取得明确的重复计费风险处置授权，不能冒填 provider_checked=true。
 
