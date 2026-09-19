@@ -14,6 +14,7 @@ from contentflow import db
 from contentflow.api import create_app
 from contentflow.entities import Job, PromptEvalRun, PromptEvalSuite
 from contentflow.prompts import PROMPTS
+from contentflow.providers import MockProvider, ProviderNetworkError
 from contentflow.settings import Settings
 from contentflow.worker import Worker
 
@@ -26,6 +27,18 @@ class BrokenEvalProvider:
     def complete_json(self, _stage, _payload, *, system_prompt=None):
         del system_prompt
         raise RuntimeError("PRIVATE-PROVIDER-SECRET must never be persisted")
+
+
+class PartiallyBrokenEvalProvider(MockProvider):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def complete_json(self, stage, payload, *, system_prompt=None):
+        self.calls += 1
+        if self.calls == 2:
+            raise ProviderNetworkError("tls")
+        return super().complete_json(stage, payload, system_prompt=system_prompt)
 
 
 class PromptEvalGovernanceTest(unittest.TestCase):
@@ -380,10 +393,9 @@ class PromptEvalGovernanceTest(unittest.TestCase):
         )
         serialized = json.dumps(run, ensure_ascii=False)
         self.assertNotIn("PRIVATE-PROVIDER-SECRET", serialized)
-        self.assertEqual(
-            run["result_json"]["ai_provenance"]["failed_invocations"],
-            1,
-        )
+        self.assertEqual(run["result_json"]["ai_provenance"]["failed_invocations"], 1)
+        self.assertTrue(run["result_json"]["partial"])
+        self.assertEqual(run["result_json"]["completed_case_count"], 0)
         audit = self.client.get(
             "/api/v1/admin/audit-logs",
             headers=self.owner_headers,
@@ -392,6 +404,46 @@ class PromptEvalGovernanceTest(unittest.TestCase):
             "PRIVATE-PROVIDER-SECRET",
             json.dumps(audit.json(), ensure_ascii=False),
         )
+
+    def test_mid_suite_error_preserves_assertions_but_never_satisfies_gate(self):
+        for failing in (False, True):
+            with self.subTest(failing=failing):
+                suite = self.create_suite(f"Partial evidence {failing}", failing=failing)
+                self.activate_suite(suite["id"])
+                release = self.create_release(f"partial-{failing}")
+                queued = self.client.post(
+                    f"/api/v1/admin/prompt-releases/{release['id']}/evaluate",
+                    headers=self.owner_headers, json={"provider": "mock"},
+                )
+                self.assertEqual(queued.status_code, 202, queued.text)
+                provider = PartiallyBrokenEvalProvider()
+                with patch("contentflow.prompt_eval.build_text_provider", return_value=provider):
+                    self.assertTrue(self.worker.run_once())
+                self.assertEqual(provider.calls, 2)
+                state = self.client.get("/api/v1/admin/prompt-eval", headers=self.owner_headers)
+                run = next(r for r in state.json()["runs"] if r["id"] == queued.json()["id"])
+                self.assertEqual(run["status"], "error")
+                result = run["result_json"]
+                self.assertTrue(result["partial"])
+                self.assertEqual(result["case_count"], 3)
+                self.assertEqual(result["completed_case_count"], 1)
+                self.assertEqual(result["uncompleted_case_count"], 2)
+                self.assertEqual(result["passed_count"], int(not failing))
+                self.assertEqual(result["failed_count"], int(failing))
+                self.assertEqual(len(result["cases"]), 1)
+                self.assertEqual(len(result["cases"][0]["output_sha256"]), 64)
+                self.assertEqual(result["suite_hash"], suite["suite_hash"])
+                self.assertEqual(result["ai_provenance"]["invocations"][1]["error_diagnostics"],
+                                 {"category": "network", "kind": "tls"})
+                self.assertNotIn("PRIVATE-EVAL-CONTEXT-789", json.dumps(result))
+                approved = self.client.post(
+                    f"/api/v1/admin/prompt-releases/{release['id']}/approve",
+                    headers=self.reviewer_headers, json={"note": "Must not accept partial evaluation"},
+                )
+                self.assertEqual(approved.status_code, 409, approved.text)
+                with db.SessionLocal() as session:
+                    jobs = list(session.scalars(select(Job).where(Job.job_type == "prompt_eval.execute")))
+                    self.assertTrue(all(job.status == "manual_review" for job in jobs))
 
 
 if __name__ == "__main__":

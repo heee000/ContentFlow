@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
+import ssl
 import urllib.error
 import urllib.request
 from typing import Any, Protocol
@@ -38,6 +40,55 @@ PROVIDER_REQUEST_ID_HEADERS = (
     "x-amzn-requestid",
 )
 PROVIDER_REQUEST_KEY = re.compile(r"^[0-9a-f]{64}$")
+
+
+class ProviderHTTPError(RuntimeError):
+    def __init__(self, status: int):
+        self.status = status if type(status) is int and 400 <= status <= 599 else None
+        super().__init__(f"Model provider HTTP error ({self.status})")
+
+
+class ProviderNetworkError(RuntimeError):
+    def __init__(self, kind: str):
+        self.kind = kind if kind in {"timeout", "dns", "tls", "connection"} else "network"
+        super().__init__(f"Model provider network error ({self.kind})")
+
+
+class ProviderResponseError(RuntimeError):
+    def __init__(self, kind: str):
+        self.kind = kind if kind in {"json", "encoding", "structure", "not_object"} else "structure"
+        super().__init__(f"Model provider response error ({self.kind})")
+
+
+def provider_error_evidence(error: Exception) -> dict[str, Any]:
+    """Only local enums/numeric status, never an upstream message, URL or body."""
+    if isinstance(error, ProviderHTTPError):
+        return {"category": "http", "http_status": error.status}
+    if isinstance(error, ProviderNetworkError):
+        return {"category": "network", "kind": error.kind}
+    if isinstance(error, ProviderResponseError):
+        return {"category": "response", "kind": error.kind}
+    return {}
+
+
+def provider_error_type(error: Exception) -> str:
+    if isinstance(error, ProviderHTTPError):
+        return f"ProviderHTTPError:{error.status}"
+    if isinstance(error, (ProviderNetworkError, ProviderResponseError)):
+        return f"{type(error).__name__}:{error.kind}"
+    return type(error).__name__
+
+
+def _network_error_kind(error: BaseException | str) -> str:
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, socket.gaierror):
+        return "dns"
+    if isinstance(error, ssl.SSLError):
+        return "tls"
+    if isinstance(error, ConnectionError):
+        return "connection"
+    return "network"
 
 
 def _bounded_provider_identifier(value: Any, limit: int = 255) -> str | None:
@@ -404,6 +455,9 @@ class OpenAICompatibleProvider:
             with urllib.request.urlopen(
                 request, timeout=self.timeout_seconds
             ) as response:
+                self.last_call_metadata.update(
+                    _provider_request_metadata(headers=getattr(response, "headers", None))
+                )
                 raw = json.loads(response.read().decode("utf-8"))
                 self.last_call_metadata.update(
                     _provider_request_metadata(
@@ -435,17 +489,23 @@ class OpenAICompatibleProvider:
             content = raw["choices"][0]["message"]["content"]
             parsed = json.loads(content)
             if not isinstance(parsed, dict):
-                raise ValueError("模型返回的 JSON 顶层不是对象")
+                raise ProviderResponseError("not_object")
             return parsed
         except urllib.error.HTTPError as error:
             self.last_call_metadata.update(
                 _provider_request_metadata(headers=getattr(error, "headers", None))
             )
-            raise RuntimeError(f"模型调用失败 (HTTP {error.code})") from error
+            raise ProviderHTTPError(error.code) from error
         except urllib.error.URLError as error:
-            raise RuntimeError("模型调用失败 (network_error)") from error
-        except (KeyError, json.JSONDecodeError) as error:
-            raise RuntimeError("模型响应结构或 JSON 解析失败") from error
+            raise ProviderNetworkError(_network_error_kind(error.reason)) from error
+        except (TimeoutError, ConnectionError, ssl.SSLError) as error:
+            raise ProviderNetworkError(_network_error_kind(error)) from error
+        except UnicodeDecodeError as error:
+            raise ProviderResponseError("encoding") from error
+        except json.JSONDecodeError as error:
+            raise ProviderResponseError("json") from error
+        except (KeyError, IndexError, TypeError) as error:
+            raise ProviderResponseError("structure") from error
 
 
 def build_provider(name: str) -> Provider:

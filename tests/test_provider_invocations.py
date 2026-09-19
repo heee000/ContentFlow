@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -28,6 +30,7 @@ from contentflow.provider_invocations import (
     canonical_evidence,
     provider_job_context,
 )
+from contentflow.providers import OpenAICompatibleProvider, ProviderHTTPError
 
 
 class _LedgerAwareProvider:
@@ -161,6 +164,33 @@ class ProviderInvocationLedgerTest(unittest.TestCase):
             self.assertNotIn("assets.example", serialized)
             self.assertNotIn("token=secret", serialized)
             self.assertNotIn("private upstream", serialized)
+
+    def test_http_failure_records_safe_status_but_keeps_outcome_unknown(self):
+        provider = OpenAICompatibleProvider("https://provider.test/v1", "private-api-key", "test-model")
+        error = urllib.error.HTTPError(
+            "https://provider.test/private-api-key", 429, "private-error-body",
+            {"x-request-id": "request-rate-limit"}, None,
+        )
+        with self.Session() as session:
+            recorder = self._recorder(session, provider)
+            with provider_job_context(session.get(Job, self.job_id)):
+                with patch("contentflow.providers.urllib.request.urlopen", side_effect=error) as send:
+                    with self.assertRaises(ProviderHTTPError):
+                        recorder.complete_json("plan", {"private-input": "secret"})
+        self.assertEqual(send.call_count, 1)
+        with self.Session() as session:
+            attempts = list(session.scalars(select(ProviderInvocationAttempt)))
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0].error_type, "ProviderHTTPError:429")
+            self.assertEqual(attempts[0].status, "outcome_unknown")
+            self.assertEqual(attempts[0].provider_request_id, "request-rate-limit")
+            audit = list(session.scalars(select(AuditLog)))
+            serialized = json.dumps([
+                {column.name: getattr(row, column.name) for column in row.__table__.columns}
+                for row in [*attempts, *audit]
+            ], default=str)
+            for forbidden in ("private-api-key", "private-error-body", "private-input"):
+                self.assertNotIn(forbidden, serialized)
 
     def test_attempt_is_committed_before_call_and_retry_reuses_logical_request(self):
         provider = _LedgerAwareProvider(self.Session)

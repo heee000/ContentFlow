@@ -1857,6 +1857,7 @@ def mark_domain_failure(
     publish_outcome_uncertain: bool = False,
     publish_outcome_reason: str = "worker_lease_exhausted",
     ai_provenance: dict[str, Any] | None = None,
+    prompt_eval_partial_result: dict[str, Any] | None = None,
 ) -> None:
     payload = dict(job.payload_json or {})
     if job.job_type == "prompt_eval.execute" and payload.get("run_id"):
@@ -1866,6 +1867,7 @@ def mark_domain_failure(
             run.error = message[:2000]
             run.completed_at = datetime.now(timezone.utc)
             run.result_json = {
+                **(prompt_eval_partial_result or {}),
                 "schema_version": 1,
                 **({"ai_provenance": ai_provenance} if ai_provenance else {}),
             }
@@ -2278,6 +2280,9 @@ class Worker:
                             job,
                             str(persisted_error),
                             ai_provenance=ai_provenance,
+                            prompt_eval_partial_result=getattr(
+                                error, "prompt_eval_partial_result", None
+                            ),
                         )
                     session.commit()
                 if isinstance(error, JobNotReady):

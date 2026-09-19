@@ -18,7 +18,7 @@ from .provider_invocations import (
     set_provider_request_key,
     stable_provider_request_key,
 )
-from .providers import Provider
+from .providers import Provider, provider_error_evidence, provider_error_type
 
 
 logger = logging.getLogger("contentflow.ai_provenance")
@@ -170,7 +170,7 @@ class AIProvenanceRecorder:
                         ledger_handle,
                         status="outcome_unknown",
                         call_metadata=call_metadata,
-                        error_type=type(error).__name__,
+                        error_type=provider_error_type(error),
                     )
                 except Exception:
                     logger.exception(
@@ -181,9 +181,12 @@ class AIProvenanceRecorder:
                 **base,
                 "status": "failed",
                 "latency_ms": round((time.perf_counter() - started) * 1000, 3),
-                "error_type": type(error).__name__,
+                "error_type": provider_error_type(error),
                 "usage": _usage(call_metadata),
             }
+            diagnostics = provider_error_evidence(error)
+            if diagnostics:
+                invocation["error_diagnostics"] = diagnostics
             if isinstance(call_metadata, dict) and isinstance(
                 call_metadata.get("response_model"), str
             ):

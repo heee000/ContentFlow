@@ -354,12 +354,30 @@ def execute_prompt_eval_run(
         entity_id=run.id,
     )
     results = []
-    for case in cases:
-        output = recorder.complete_json(
-            case["stage"],
-            dict(case["input_json"]),
-        )
-        results.append(evaluate_case_output(case, output))
+    try:
+        for case in cases:
+            output = recorder.complete_json(
+                case["stage"],
+                dict(case["input_json"]),
+            )
+            results.append(evaluate_case_output(case, output))
+    except Exception as error:
+        # Pass hash-only assertion evidence through the worker rollback. The
+        # worker persists it only after checking its lease; no extra model call,
+        # partial pass, or resumable-output cache is implied.
+        error.prompt_eval_partial_result = {
+            "schema_version": 1,
+            "suite_version": eval_suite_version(suite.version_number),
+            "suite_hash": suite.suite_hash,
+            "case_count": len(cases),
+            "completed_case_count": len(results),
+            "uncompleted_case_count": len(cases) - len(results),
+            "passed_count": sum(item["passed"] for item in results),
+            "failed_count": sum(not item["passed"] for item in results),
+            "cases": results,
+            "partial": True,
+        }
+        raise
 
     passed_count = sum(item["passed"] for item in results)
     run.provider = recorder.provider_name
