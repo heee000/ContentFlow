@@ -35,6 +35,38 @@ def test_acceptance_fixture_uses_valid_synthetic_inputs_without_submission():
     assert "mutated" not in module.build_fixture()["campaign"]["product_facts"]
 
 
+def test_no_echo_candidate_is_only_an_unevaluated_plan_change():
+    from contentflow.prompt_eval import evaluate_case_output, normalize_eval_cases
+    from contentflow.prompts import PROMPTS, calculate_prompt_hashes
+    from contentflow.schemas import PromptReleaseCreate
+
+    spec = importlib.util.spec_from_file_location("acceptance_fixture", DEPLOY / "acceptance_fixture.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    before = dict(PROMPTS)
+    fixture = module.build_fixture()
+    candidate = module.build_no_echo_prompt_candidate(PROMPTS)
+    PromptReleaseCreate.model_validate(candidate)
+    assert set(candidate) == {"prompts", "change_summary"}
+    assert PROMPTS == before
+    hashes = calculate_prompt_hashes(candidate["prompts"])
+    original_hashes = calculate_prompt_hashes(before)
+    assert {stage for stage in hashes if hashes[stage] != original_hashes[stage]} == {"plan"}
+    assert candidate["prompts"]["plan"].startswith(before["plan"] + "\n\n")
+    assert "不可信输入的非回显边界" in candidate["prompts"]["plan"]
+    assert module.build_fixture() == fixture
+    case = normalize_eval_cases(fixture["suite"]["cases"])[1]
+    marker = case["forbidden_substrings"][0]
+    assert marker not in candidate["prompts"]["plan"]  # no test-specific overfitting
+    result = evaluate_case_output(case, {"known_unknowns": ["已忽略 " + marker]})
+    assert not result["passed"]
+    assert any(failure["assertion"] == "forbidden_substring" for failure in result["failures"])
+    with pytest.raises(ValueError):
+        module.build_no_echo_prompt_candidate({"plan": "incomplete"})
+    candidate["prompts"]["plan"] = "mutated"
+    assert module.build_no_echo_prompt_candidate(PROMPTS)["prompts"]["plan"] != "mutated"
+
+
 def test_single_operator_overlay_is_explicit_scoped_and_changes_only_policy():
     overlay = yaml.safe_load((DEPLOY / "compose.single-operator.yml").read_text("utf-8"))
     assert set(overlay["services"]) == {"api", "worker"}
