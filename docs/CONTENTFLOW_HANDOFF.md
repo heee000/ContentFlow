@@ -1,6 +1,6 @@
 # ContentFlow 项目交接文档
 
-> 更新日期：2026-09-19（历史阶段记录按时间保留，当前断点见末节）
+> 更新日期：2026-09-21（历史阶段记录按时间保留，当前断点见末节）
 > 适用仓库：ContentFlow 仓库根目录
 > GitHub：<https://github.com/heee000/ContentFlow>
 > 当前工作分支：`codex/enterprise-media-runtime`
@@ -2248,3 +2248,12 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 原文未持久化，无法确定标记出现在拒绝说明还是实际策划中；不能说已执行攻击或肯定误报。通用 plan 非回显补强已以独立 r2 `a5cb3511-2bc7-47d1-b394-c1c2103fcbb1` 保存，r1 不变；仅 plan 哈希不同，未评测/批准/激活，全局 builtin 和运行源码 `1502460` 未改。
 - `build_no_echo_prompt_candidate` 在私人验收 fixture 中可复现候选；30 passed / 2 subtests、Ruff 通过，仅证明构造与门禁，不证明真实模型改进有效。套件 v1 原 hash 不变、数据库对象/向量正确、runnable Job 0，账本 10 succeeded / 2 outcome_unknown，旧两个 manual_review 仍 provider_checked=false。
 - 下次从 r2 的一轮完整真实 Eval 继续，通过后才按单人内测说明确认/激活并生成测试稿，停在人工审核。不要复用旧脚本的 bootstrap/rerun_once/continue_eval_once 反复提交：这些历史一次性授权已经消耗；原 generate 动作仍指向 r1，不能误激活它。新候选未通过前不得绕过治理、删除输出标记或放宽断言。详见 CF-20260919-04。
+
+### 21.55.20 重启恢复签收，r2 六例通过，首篇真实稿件待人工审核
+
+- 2026-09-21 用户说明电脑重启并明确允许 r2 一轮 Eval、通过后生成一篇测试稿。原 LAN 入口 banner 超时，但已在线 Tailscale 严格主机校验 SSH 成功；实机 uptime 约 10 分钟、六容器自动启动。TLS/Host/登录刷新退出/安全 Cookie、原合成对象 checksum/1024 维向量均通过；内置浏览器重载后实际显示登录页，未登录，不冒称已验证登录后 UI。未改网络、代理、DNS、账户或服务配置。
+- Eval `f00fcb5e-fc7e-4eab-9b97-0f6ebe4ce789` 对原 suite v1 为 6/6 passed；六次请求全部 succeeded，服务报告 26570 tokens，未放宽断言或清洗输出。r2 `a5cb3511-2bc7-47d1-b394-c1c2103fcbb1` 已经正常 API 本人确认/激活，说明仍明确“代理代表所有者，不是独立第二人审核”；r1 和三次历史 Eval 不变。
+- 活动「Ubuntu 内测 0921｜r2｜发布前复核清单」`89e656b4-5a42-4830-a7cb-99ce57496db0`，工作流 `4f88bc01-e79b-475f-9a98-bbad60e01520` 已 awaiting_review/human_review。内容 `85abe2a3-2547-4724-907b-9f9565748ccf`《AI 文案发布前，先过这三道关：事实、承诺、适配》为 needs_review，正文 1169 字符（954 个基本汉字），人工批准字段均 null。规则通过，模型质量分 8.2/10；这是模型评价，不是人类质量签收。
+- 本次生成实际 1 次 Embedding 查询（102 reported tokens）及 plan/generate/review 三次文本请求（21605 reported tokens），未触发定向改写。1 个 AI image Asset 仍 planned、没有 storage_uri，发布任务和 runnable Job 均为 0；没有生成图片、微信素材/草稿或公开发布。累计调用账本 20 succeeded / 2 outcome_unknown，旧人工核对任务未变。
+- 应用镜像仍 `146655ac…4944c`、源码仍 `1502460`，本轮无应用代码部署或数据库迁移；真实候选是数据库中的 r2。下一步由用户在「2 审核内容」体验现有稿件，不重跑 Eval 或生成重复稿，也不代替用户批准内容。待明确内容审核后再测试 AI 封面/手动上传和微信链路。
+- 已记录内容示例缺少改后对照、过程用语外露；检索只取近邻且缺少相关性拒绝，返回了无关合成资料；source_chunk_ids 是召回列表而非实际事实引用；质量分达标时不因高优先级 revision_instructions 自动改写。详见 CF-20260921-01，均未在本轮冒称解决。单次六例/单稿成功不代表完整抗注入、跨网、灾备或企业交付签收。
