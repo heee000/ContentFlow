@@ -2328,3 +2328,4 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 迁移顺序 a5 → b6 审核证据 → c7 指标隔离；当前唯一 head `c7d8e9f0a1b2`，至少 34 表，恢复校验同步。迁移不自动改旧审核/原指标；生产回退不能直接删证据或抹隔离状态。API/Web/Worker 必须同版协调升级，本轮没有部署或操作真实 DB。
 - 剩余优先 A37/A08 工作区上下文/会话刷新、A05 生成幂等、A07 执行权、A09/A12 快照/预算。A33 累计指标语义、A35 索引对应、A39 图像字节、A40 最终字段规则、A41 schema readiness/生产 Worker create_schema 仍未解决。无真实模型/媒体/微信/网络/密钥操作，受保护知识文件保持未读改/未暂存；完整目标仍 active。
 - 生命周期修复后 45 项专项通过，最终本地全套 **721 passed / 34 skipped / 226 subtests，246.56 秒**；19 条浏览器、2 项 SSR、lint/类型/Ruff 均通过。待同步与本批 PG/MinIO/Chromium CI，不以本机跳过签收真实服务；具体 SHA/run 随后只追加到进度页，勿重复 dispatch。
+- 最终源码 **`d6596d5a4a5a5cbd5172b833f40387a7897abdbb`** 已普通推送。[CI 35892709913](https://github.com/heee000/ContentFlow/actions/runs/35892709913) 四项全部 success：**755 passed / 226 subtests、84.87% 覆盖率**，包括真实 PG/MinIO、审核竞争与指标 NaN/迁移；19 条 Chromium（46.2 秒）、2 项 SSR、构建及当次依赖/来源验证通过。最后只补文档签收，不重复 dispatch、不合并/部署。下一阶段预检已记在进度页：A37/A08 必须同时处理 Cookie 上下文预期、迟到响应/分页和跨页刷新，不能仅广播切换或放宽旧令牌重放。
