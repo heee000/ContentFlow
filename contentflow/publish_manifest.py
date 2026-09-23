@@ -7,9 +7,12 @@ It is an application consistency boundary, not a signature against a DB admin.
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
+import hmac
 import json
 import re
+import time
 from typing import Any
 
 from sqlalchemy import inspect, select
@@ -18,13 +21,17 @@ from sqlalchemy.orm import Session
 from .entities import Asset, ChannelConnection, ContentItem, PublishJob
 from .object_storage import ObjectStorage, is_workspace_storage_uri
 from .settings import Settings
+from .channel_config import validate_channel_config
 
 
 MANIFEST_VERSION = 1
+PREVIEW_TTL_SECONDS = 900
 
 
 class PublishManifestConflict(ValueError):
-    pass
+    def __init__(self, message: str, *, code: str = "publish_manifest_conflict"):
+        self.code = code
+        super().__init__(message)
 
 
 def _digest(value: Any) -> str:
@@ -37,6 +44,68 @@ def _digest(value: Any) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def publication_fingerprint(manifest: dict, intent: dict, mode: str) -> str:
+    return _digest({"manifest": manifest, "intent": intent, "delivery_mode": mode})
+
+
+def confirmation_request_digest(payload: dict) -> str:
+    return _digest(payload)
+
+
+def sign_publication_preview(
+    fingerprint: str, *, workspace_id: str, user_id: str, secret: str
+) -> str:
+    raw = json.dumps(
+        {
+            "v": 1,
+            "fingerprint": fingerprint,
+            "workspace": workspace_id,
+            "user": user_id,
+            "expires": int(time.time()) + PREVIEW_TTL_SECONDS,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    encoded = base64.urlsafe_b64encode(raw).rstrip(b"=")
+    signature = hmac.new(
+        secret.encode(), b"publish-preview-v1:" + encoded, hashlib.sha256
+    ).hexdigest()
+    return encoded.decode() + "." + signature
+
+
+def verify_publication_preview(
+    token: str, fingerprint: str, *, workspace_id: str, user_id: str, secret: str
+):
+    try:
+        encoded, signature = token.rsplit(".", 1)
+        expected = hmac.new(
+            secret.encode(), b"publish-preview-v1:" + encoded.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError()
+        record = json.loads(
+            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        )
+        if (
+            record.get("v") != 1
+            or record.get("workspace") != workspace_id
+            or record.get("user") != user_id
+            or type(record.get("expires")) is not int
+            or record["expires"] <= time.time()
+        ):
+            raise ValueError()
+        if record.get("fingerprint") != fingerprint:
+            raise PublishManifestConflict(
+                "预览后正文、素材、渠道或执行选项已变化，请重新预览确认"
+            )
+    except PublishManifestConflict:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError, UnicodeError):
+        raise PublishManifestConflict(
+            "发布预览已过期或不属于当前账号，请重新预览确认"
+        ) from None
 
 
 def detached_copy(entity):
@@ -76,6 +145,7 @@ def load_release_inputs(
     )
     if content is None or channel is None:
         raise PublishManifestConflict("发布内容或连接器不存在")
+    validate_channel_config(channel.platform, channel.config_json)
     if content.status != "approved":
         raise PublishManifestConflict("内容必须保持人工审核通过状态")
     if content.platform != channel.platform:

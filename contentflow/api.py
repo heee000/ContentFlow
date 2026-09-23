@@ -18,6 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
 from .asset_operations import AssetOperationConflict
+from .channel_config import ChannelConfigurationError
 from .publish_manifest import PublishManifestConflict
 from .migrate import upgrade_database
 from .object_storage import build_object_storage
@@ -180,7 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.exception_handler(PublishManifestConflict)
     async def publish_manifest_conflict(request: Request, error: PublishManifestConflict):
         return JSONResponse(status_code=409, content={"error": {
-            "code": "publish_manifest_conflict", "message": str(error),
+            "code": error.code, "message": str(error),
             "request_id": getattr(request.state, "request_id", None),
         }})
 
@@ -195,6 +196,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             }},
         )
 
+    @application.exception_handler(ChannelConfigurationError)
+    async def channel_config_error(request: Request, error: ChannelConfigurationError):
+        return JSONResponse(status_code=409, content={"error": {
+            "code": "channel_configuration_invalid", "message": str(error),
+            "request_id": getattr(request.state, "request_id", None),
+        }})
+
     @application.exception_handler(RequestValidationError)
     async def validation_error(request: Request, error: RequestValidationError):
         return JSONResponse(
@@ -203,7 +211,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "error": {
                     "code": "validation_error",
                     "message": "请求参数校验失败",
-                    "details": error.errors(),
+                    # Pydantic root validation includes the entire original
+                    # payload (passwords/channel credentials) in input/ctx.
+                    "details": [
+                        {"loc": item["loc"], "type": item["type"], "msg": "字段校验失败"}
+                        for item in error.errors()
+                    ],
                     "request_id": getattr(request.state, "request_id", None),
                 }
             },

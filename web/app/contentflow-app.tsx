@@ -18,6 +18,7 @@ import {
   runtimeApiBaseConfigurable,
   setApiBase,
 } from "@/lib/contentflow-api";
+import { PublicationPreview, PublicationPreviewData, PublishIntent, readPendingPublication } from "@/components/publication-preview";
 
 type View =
   | "dashboard"
@@ -1781,6 +1782,8 @@ export function ContentFlowApp() {
           ) : null}
           {view === "publishing" ? (
             <PublishingView
+              key={`${getApiBase()}:${session.user.id}:${session.workspace.id}`}
+              scopeKey={`${session.user.id}:${session.workspace.id}`}
               publishes={scopedPublishes}
               campaigns={data.campaigns}
               contents={scopedContents}
@@ -3523,6 +3526,7 @@ function AssetsView({
 }
 
 function PublishingView({
+  scopeKey,
   campaigns,
   publishes,
   contents,
@@ -3532,6 +3536,7 @@ function PublishingView({
   onChanged,
   flash,
 }: {
+  scopeKey: string;
   campaigns: Campaign[];
   publishes: PublishJob[];
   contents: Content[];
@@ -3543,6 +3548,9 @@ function PublishingView({
 }) {
   const approved = contents.filter((item) => item.status === "approved");
   const [creating, setCreating] = useState(false);
+  const receiptKey = `contentflow-publication:${getApiBase()}:${scopeKey}`;
+  const [pending, setPending] = useState<PublishIntent | null>(() => readPendingPublication(receiptKey));
+  const [prepared, setPrepared] = useState<{ preview: PublicationPreviewData; intent: PublishIntent } | null>(null);
   const [busy, setBusy] = useState(false);
   const [pulling, setPulling] = useState("");
   const [cancelling, setCancelling] = useState("");
@@ -3583,6 +3591,9 @@ function PublishingView({
     ? channels.filter((item) => item.platform === selectedContent.platform)
     : [];
   const selectedChannel = channelMap[selectedChannelId];
+  const invalidPublishSwitch = selectedChannel?.platform === "wechat"
+    && selectedChannel.config_json.auto_publish !== undefined
+    && typeof selectedChannel.config_json.auto_publish !== "boolean";
 
   async function createPublish(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -3591,30 +3602,42 @@ function PublishingView({
     const form = new FormData(event.currentTarget);
     const publishNow = publishTiming === "immediate";
     try {
-      await api("/publishing/jobs", {
+      const intent = {
+        content_item_id: String(form.get("content_item_id")), channel_id: String(form.get("channel_id")),
+        delivery_mode: String(form.get("delivery_mode")), publish_now: publishNow, request_id: publishRequestId,
+        ...(publishNow ? {} : { scheduled_at: new Date(String(form.get("scheduled_at"))).toISOString() }),
+      };
+      const preview = await api<PublicationPreviewData>("/publishing/preview", {
         method: "POST",
-        body: {
-          content_item_id: form.get("content_item_id"),
-          channel_id: form.get("channel_id"),
-          delivery_mode: form.get("delivery_mode"),
-          publish_now: publishNow,
-          request_id: publishRequestId,
-          ...(publishNow
-            ? {}
-            : {
-                scheduled_at: new Date(
-                  String(form.get("scheduled_at")),
-                ).toISOString(),
-              }),
-        },
+        body: intent,
       });
+      setPrepared({ preview, intent: { ...intent, preview_token: preview.preview_token } });
+    } catch (caught) {
+      setError(messageOf(caught)); setPrepared(null);
+    } finally { setBusy(false); }
+  }
+
+  async function confirmPublication(intent: PublishIntent) {
+    const hadUncertainReceipt = pending !== null;
+    setBusy(true); setError("");
+    try {
+      // Persist before sending, and retain the same intent after an uncertain
+      // response or page reload. Never automatically create a replacement.
+      sessionStorage.setItem(receiptKey, JSON.stringify(intent));
+      setPending(intent);
+      await api("/publishing/jobs", { method: "POST", body: intent });
+      sessionStorage.removeItem(receiptKey); setPending(null); setPrepared(null);
       setCreating(false);
       setSelectedContentId("");
       setSelectedChannelId("");
       setPublishRequestId(crypto.randomUUID());
-      flash(publishNow ? "发布任务已立即进入队列" : "发布任务已按时间排期");
+      flash("已取得发布任务回执；重复确认不会新建任务");
       await onChanged();
     } catch (caught) {
+      if (!hadUncertainReceipt && caught instanceof ApiError && caught.status >= 400 && caught.status < 500
+        && ![408, 429].includes(caught.status) && caught.code !== "publish_intent_conflict") {
+        sessionStorage.removeItem(receiptKey); setPending(null); setPrepared(null); setPublishRequestId(crypto.randomUUID());
+      }
       setError(messageOf(caught));
     } finally {
       setBusy(false);
@@ -3825,6 +3848,7 @@ function PublishingView({
             <Button
               onClick={() => {
                 setCreating((value) => !value);
+                setPrepared(null);
                 setPublishRequestId(crypto.randomUUID());
               }}
             >
@@ -3840,6 +3864,15 @@ function PublishingView({
         <span><b>4</b> 立即或定时执行</span>
       </section>
       {error ? <p className="inline-error" role="alert">{error}</p> : null}
+      {pending ? <section className="panel safe-notice" aria-label="待核对的发布回执">
+        <p>有一份确认已发送但尚未取得回执。请重试原请求，不要重新创建发布任务。</p>
+        <small>操作编号：{pending.request_id}</small>
+        <Button type="button" busy={busy} onClick={() => void confirmPublication(pending)}>重试获取原任务</Button>
+        <Button type="button" kind="ghost" disabled={busy} onClick={() => {
+          if (!window.confirm("这不会取消服务器任务。请先在下方发布列表核对原操作，确认没有重复发布风险后再重新开始。你已完成核对吗？")) return;
+          sessionStorage.removeItem(receiptKey); setPending(null); setPrepared(null); setPublishRequestId(crypto.randomUUID());
+        }}>已人工核对，重新开始</Button>
+      </section> : null}
       {!canSchedule ? <p className="permission-note">当前可查看发布状态与下载投放包；执行发布需要审核人员权限。</p> : null}
       {creating && canSchedule ? (
         <section className="panel form-panel publish-composer">
@@ -3848,12 +3881,13 @@ function PublishingView({
             <Button kind="ghost" type="button" onClick={() => setCreating(false)}>关闭</Button>
           </div>
           <form className="stack-form" onSubmit={createPublish}>
+            <fieldset className="publication-inputs" disabled={busy || !!pending} onChange={() => setPrepared(null)}>
             <div className="timing-switch" role="group" aria-label="发布时间选择">
               <button
                 type="button"
                 className={publishTiming === "immediate" ? "active" : ""}
                 aria-pressed={publishTiming === "immediate"}
-                onClick={() => setPublishTiming("immediate")}
+                onClick={() => { setPublishTiming("immediate"); setPrepared(null); }}
               >
                 <strong>立即执行</strong>
                 <small>保存后马上进入可靠队列</small>
@@ -3862,7 +3896,7 @@ function PublishingView({
                 type="button"
                 className={publishTiming === "scheduled" ? "active" : ""}
                 aria-pressed={publishTiming === "scheduled"}
-                onClick={() => setPublishTiming("scheduled")}
+                onClick={() => { setPublishTiming("scheduled"); setPrepared(null); }}
               >
                 <strong>定时发布</strong>
                 <small>到指定时间再进入分发</small>
@@ -3910,7 +3944,11 @@ function PublishingView({
                 ) : null}
               </label>
             </div>
-            {selectedChannel?.platform === "wechat"
+            {invalidPublishSwitch ? (
+              <p className="inline-error" role="alert">
+                该渠道的发布开关格式无效，已禁止提交。请由管理员检查配置，不会把异常值当作“只创建草稿”。
+              </p>
+            ) : selectedChannel?.platform === "wechat"
               && selectedChannel.config_json.auto_publish !== true ? (
               <p className="safe-notice">
                 当前公众号连接为安全模式：执行后只创建草稿，不会公开发布。
@@ -3941,9 +3979,12 @@ function PublishingView({
                 <small>API 结果不确定时必须先对账，系统不会静默切换发布方式。</small>
               </label>
             </details>
+            </fieldset>
+            {prepared && !pending ? <PublicationPreview key={prepared.preview.fingerprint}
+              preview={prepared.preview} busy={busy} onConfirm={() => void confirmPublication(prepared.intent)} /> : null}
             <div className="form-actions">
-              <Button type="submit" busy={busy}>
-                {publishTiming === "immediate" ? "立即执行" : "确认定时发布"}
+              <Button type="submit" busy={busy} disabled={!!pending || invalidPublishSwitch}>
+                {prepared ? "重新获取预览" : "预览发布内容"}
               </Button>
               <Button type="button" kind="ghost" onClick={() => setCreating(false)}>取消</Button>
             </div>

@@ -59,8 +59,8 @@ from contentflow.publish_manifest import PublishManifestConflict, build_release_
 from contentflow.observability import ObservabilityMetrics
 from contentflow.routers.publish_evidence import upload_publish_evidence
 from contentflow.routers.assets import change_asset_source, retry_asset, select_asset_candidate
-from contentflow.routers.publishing import schedule_publish
-from contentflow.schemas import AssetSelectionRequest, AssetSourceChangeRequest, PublishScheduleRequest
+from contentflow.routers.publishing import preview_publish, schedule_publish
+from contentflow.schemas import AssetSelectionRequest, AssetSourceChangeRequest, PublishPreviewRequest, PublishScheduleRequest
 from contentflow.security import hash_rate_limit_key
 from contentflow.settings import Settings
 from contentflow.storage_ledger import (
@@ -569,6 +569,10 @@ def test_postgres_schedule_and_cover_selection_preserve_release_boundary(postgre
         first_id, second_id = original.id, other.id
     principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
     captured, selection_requested = threading.Event(), threading.Event()
+    intent = {"content_item_id": content_id, "channel_id": channel_id, "publish_now": True}
+    with postgres_harness.sessions() as session:
+        preview = preview_publish(PublishPreviewRequest(**intent), principal, session, postgres_harness.settings)
+        session.commit()
 
     def schedule():
         with postgres_harness.sessions() as session:
@@ -580,8 +584,8 @@ def test_postgres_schedule_and_cover_selection_preserve_release_boundary(postgre
                     assert selection_requested.wait(timeout=10)
 
             event.listen(session, "after_flush", observe_capture)
-            job = schedule_publish(PublishScheduleRequest(content_item_id=content_id,
-                channel_id=channel_id, publish_now=True, request_id="postgres-manifest-race"),
+            job = schedule_publish(PublishScheduleRequest(**intent,
+                preview_token=preview["preview_token"], request_id="postgres-manifest-race"),
                 principal, session, postgres_harness.settings)
             session.commit()
             return job.id

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from .publication_payload import douyin_text, export_markdown, wechat_article
+
 import io
 import json
+import math
 import zipfile
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -12,6 +15,11 @@ from .entities import Asset, ChannelConnection, ContentItem, PublishJob
 from .object_storage import ObjectStorage
 from .security import decrypt_credentials_with_keys
 from .settings import Settings
+from .channel_config import OFFICIAL_ORIGINS, validate_channel_config
+from .connector_errors import (
+    ConnectorPublishError as ConnectorPublishError,
+    connector_request,
+)
 
 
 @dataclass(slots=True)
@@ -22,28 +30,29 @@ class ConnectorResult:
     response: dict[str, Any] = field(default_factory=dict)
 
 
-class ConnectorPublishError(RuntimeError):
-    """A connector failure with an explicit external side-effect boundary."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        stage: str,
-        retry_safe: bool,
-        invalidate_channel: bool = False,
-    ) -> None:
-        super().__init__(message)
-        self.stage = stage
-        self.retry_safe = retry_safe
-        self.invalidate_channel = invalidate_channel
+def _required_id(value, *, stage: str, retry_safe: bool = False) -> str:
+    # Preserve the existing scalar-ID compatibility without accepting bool,
+    # arbitrary objects or numeric credentials as identifiers.
+    if (
+        stage in {"submit_publish", "create_video"}
+        and type(value) is int
+        and 0 < value < 2**64
+    ):
+        return str(value)
+    if not isinstance(value, str) or not value.strip() or len(value) > 2048:
+        raise ConnectorPublishError(
+            stage=stage,
+            retry_safe=retry_safe,
+            invalidate_channel=stage == "authenticate",
+            code="invalid_response",
+        )
+    return value
 
 
 class ChannelConnector(Protocol):
     reconciliation_supported: bool
 
-    def test(self) -> ConnectorResult:
-        ...
+    def test(self) -> ConnectorResult: ...
 
     def publish(
         self,
@@ -51,14 +60,11 @@ class ChannelConnector(Protocol):
         publish_job: PublishJob,
         content: ContentItem,
         assets: list[Asset],
-    ) -> ConnectorResult:
-        ...
+    ) -> ConnectorResult: ...
 
-    def reconcile(self, publish_job: PublishJob) -> ConnectorResult:
-        ...
+    def reconcile(self, publish_job: PublishJob) -> ConnectorResult: ...
 
-    def pull_metrics(self, publish_job: PublishJob) -> dict[str, float]:
-        ...
+    def pull_metrics(self, publish_job: PublishJob) -> dict[str, float]: ...
 
 
 def _object_name(uri: str) -> str:
@@ -96,17 +102,7 @@ class XiaohongshuExportConnector:
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr(
                 "content.md",
-                "\n".join(
-                    [
-                        f"# {content.title}",
-                        "",
-                        content.body,
-                        "",
-                        " ".join(f"#{tag.lstrip('#')}" for tag in content.hashtags),
-                        "",
-                        content.call_to_action,
-                    ]
-                ),
+                export_markdown(content),
             )
             archive.writestr(
                 "manifest.json",
@@ -174,37 +170,43 @@ class DouyinConnector:
         storage: ObjectStorage,
         client: httpx.Client | None = None,
     ):
+        validate_channel_config(
+            "douyin", channel.config_json if channel.config_json is not None else {}
+        )
         self.channel = channel
         self.credentials = credentials
         self.storage = storage
         self.client = client or httpx.Client(timeout=60)
-        self.base_url = str(
-            channel.config_json.get("api_base") or "https://open.douyin.com"
-        ).rstrip("/")
+        self.base_url = OFFICIAL_ORIGINS["douyin"]
 
     def _identity(self) -> tuple[str, str]:
-        token = str(self.credentials.get("access_token") or "")
-        open_id = str(
-            self.credentials.get("open_id")
-            or self.channel.config_json.get("open_id")
-            or ""
+        config = validate_channel_config(
+            "douyin",
+            self.channel.config_json if self.channel.config_json is not None else {},
         )
+        token = str(self.credentials.get("access_token") or "")
+        open_id = str(self.credentials.get("open_id") or config.open_id or "")
         if not token or not open_id:
-            raise ValueError("抖音发布需要 access_token 和 open_id")
+            raise ConnectorPublishError(
+                stage="authenticate",
+                retry_safe=True,
+                invalidate_channel=True,
+                code="missing_credentials",
+            )
         return token, open_id
 
     def test(self) -> ConnectorResult:
         token, open_id = self._identity()
-        response = self.client.post(
+        connector_request(
+            self.client,
+            "POST",
             f"{self.base_url}/oauth/userinfo/",
+            stage="test_connection",
+            retry_safe=True,
+            invalidate_channel=True,
             params={"open_id": open_id, "access_token": token},
         )
-        response.raise_for_status()
-        body = response.json()
-        error_code = (body.get("data") or {}).get("error_code", body.get("extra", {}).get("error_code", 0))
-        if error_code:
-            raise RuntimeError(f"抖音连接测试失败: {body}")
-        return ConnectorResult(status="connected", response=body)
+        return ConnectorResult(status="connected")
 
     def publish(
         self,
@@ -225,44 +227,52 @@ class DouyinConnector:
             None,
         )
         if video is None:
-            raise ValueError("抖音发布需要已生成的视频素材")
+            raise ConnectorPublishError(
+                stage="validate_assets", retry_safe=True, code="assets_unavailable"
+            )
         filename = _object_name(video.storage_uri or "")
-        data = self.storage.read(video.storage_uri or "")
-        uploaded = self.client.post(
+        try:
+            data = self.storage.read(video.storage_uri or "")
+        except Exception:
+            raise ConnectorPublishError(
+                stage="read_assets", retry_safe=True, code="assets_unavailable"
+            ) from None
+        upload_body = connector_request(
+            self.client,
+            "POST",
             f"{self.base_url}/api/douyin/v1/video/upload/",
+            stage="upload_media",
             params={"open_id": open_id, "access_token": token},
             files={"video": (filename, data, video.mime_type)},
         )
-        uploaded.raise_for_status()
-        upload_body = uploaded.json()
-        video_id = ((upload_body.get("data") or {}).get("video") or {}).get(
-            "video_id"
+        upload_data = upload_body.get("data")
+        upload_video = (
+            upload_data.get("video") if isinstance(upload_data, dict) else None
         )
-        if not video_id:
-            raise RuntimeError(f"抖音视频上传未返回 video_id: {upload_body}")
-        created = self.client.post(
+        video_id = _required_id(
+            upload_video.get("video_id") if isinstance(upload_video, dict) else None,
+            stage="upload_media",
+        )
+        body = connector_request(
+            self.client,
+            "POST",
             f"{self.base_url}/api/douyin/v1/video/create/",
+            stage="create_video",
             params={"open_id": open_id, "access_token": token},
             json={
                 "video_id": video_id,
-                "text": "\n".join(
-                    [
-                        content.title,
-                        content.body,
-                        " ".join(f"#{tag.lstrip('#')}" for tag in content.hashtags),
-                    ]
-                )[:2200],
+                "text": douyin_text(content),
             },
         )
-        created.raise_for_status()
-        body = created.json()
-        item_id = (body.get("data") or {}).get("item_id")
-        if not item_id:
-            raise RuntimeError(f"抖音创建作品未返回 item_id: {body}")
+        created_data = body.get("data")
+        item_id = _required_id(
+            created_data.get("item_id") if isinstance(created_data, dict) else None,
+            stage="create_video",
+        )
         return ConnectorResult(
             status="published",
             external_id=str(item_id),
-            response=body,
+            response={"item_id": item_id},
         )
 
     def reconcile(self, publish_job: PublishJob) -> ConnectorResult:
@@ -272,20 +282,38 @@ class DouyinConnector:
 
     def pull_metrics(self, publish_job: PublishJob) -> dict[str, float]:
         token, open_id = self._identity()
-        response = self.client.post(
+        body = connector_request(
+            self.client,
+            "POST",
             f"{self.base_url}/api/douyin/v1/video/video_data/",
+            stage="pull_metrics",
             params={"open_id": open_id, "access_token": token},
             json={"item_ids": [publish_job.external_id]},
         )
-        response.raise_for_status()
-        rows = (response.json().get("data") or {}).get("list") or []
+        data = body.get("data")
+        rows = data.get("list", []) if isinstance(data, dict) else None
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ConnectorPublishError(
+                stage="pull_metrics", retry_safe=False, code="invalid_response"
+            )
         row = rows[0] if rows else {}
+        values = {
+            name: row.get(name, 0)
+            for name in ("play_count", "digg_count", "comment_count", "share_count")
+        }
+        if any(
+            type(value) not in {int, float} or not math.isfinite(value) or value < 0
+            for value in values.values()
+        ):
+            raise ConnectorPublishError(
+                stage="pull_metrics", retry_safe=False, code="invalid_response"
+            )
         return {
-            "impressions": float(row.get("play_count") or 0),
+            "impressions": float(values["play_count"]),
             "clicks": 0.0,
-            "likes": float(row.get("digg_count") or 0),
-            "comments": float(row.get("comment_count") or 0),
-            "shares": float(row.get("share_count") or 0),
+            "likes": float(values["digg_count"]),
+            "comments": float(values["comment_count"]),
+            "shares": float(values["share_count"]),
         }
 
 
@@ -300,44 +328,36 @@ class WechatConnector:
         storage: ObjectStorage,
         client: httpx.Client | None = None,
     ):
+        validate_channel_config(
+            "wechat", channel.config_json if channel.config_json is not None else {}
+        )
         self.channel = channel
         self.credentials = credentials
         self.storage = storage
         self.client = client or httpx.Client(timeout=60)
-        self.base_url = str(
-            channel.config_json.get("api_base") or "https://api.weixin.qq.com"
-        ).rstrip("/")
+        self.base_url = OFFICIAL_ORIGINS["wechat"]
 
     def _access_token(self) -> str:
-        try:
-            response = self.client.get(
-                f"{self.base_url}/cgi-bin/token",
-                params={
-                    "grant_type": "client_credential",
-                    "appid": self.credentials.get("app_id"),
-                    "secret": self.credentials.get("app_secret"),
-                },
-            )
-            response.raise_for_status()
-            body = response.json()
-        except (httpx.HTTPError, ValueError) as error:
-            raise ConnectorPublishError(
-                "公众号鉴权请求失败，尚未执行任何平台写入",
-                stage="authenticate",
-                retry_safe=True,
-                invalidate_channel=True,
-            ) from error
-        token = body.get("access_token")
-        if not token:
-            errcode = body.get("errcode", "unknown")
-            errmsg = body.get("errmsg", "unknown error")
-            raise ConnectorPublishError(
-                f"公众号鉴权失败（{errcode}）：{errmsg}",
-                stage="authenticate",
-                retry_safe=True,
-                invalidate_channel=True,
-            )
-        return str(token)
+        validate_channel_config(
+            "wechat",
+            self.channel.config_json if self.channel.config_json is not None else {},
+        )
+        body = connector_request(
+            self.client,
+            "GET",
+            f"{self.base_url}/cgi-bin/token",
+            stage="authenticate",
+            retry_safe=True,
+            invalidate_channel=True,
+            params={
+                "grant_type": "client_credential",
+                "appid": self.credentials.get("app_id"),
+                "secret": self.credentials.get("app_secret"),
+            },
+        )
+        return _required_id(
+            body.get("access_token"), stage="authenticate", retry_safe=True
+        )
 
     def test(self) -> ConnectorResult:
         self._access_token()
@@ -350,6 +370,10 @@ class WechatConnector:
         content: ContentItem,
         assets: list[Asset],
     ) -> ConnectorResult:
+        config = validate_channel_config(
+            "wechat",
+            self.channel.config_json if self.channel.config_json is not None else {},
+        )
         token = self._access_token()
         cover = next(
             (
@@ -370,86 +394,91 @@ class WechatConnector:
         filename = _object_name(cover.storage_uri or "")
         try:
             data = self.storage.read(cover.storage_uri or "")
-        except Exception as error:
+        except Exception:
             raise ConnectorPublishError(
                 "读取公众号封面失败，尚未执行任何平台写入",
                 stage="read_assets",
                 retry_safe=True,
-            ) from error
-        uploaded = self.client.post(
+            ) from None
+        uploaded = connector_request(
+            self.client,
+            "POST",
             f"{self.base_url}/cgi-bin/material/add_material",
+            stage="upload_media",
             params={"access_token": token, "type": "image"},
             files={"media": (filename, data, cover.mime_type)},
         )
-        uploaded.raise_for_status()
-        media_id = uploaded.json().get("media_id")
-        if not media_id:
-            raise RuntimeError(f"公众号封面上传失败: {uploaded.json()}")
-        draft = self.client.post(
+        media_id = _required_id(uploaded.get("media_id"), stage="upload_media")
+        draft_body = connector_request(
+            self.client,
+            "POST",
             f"{self.base_url}/cgi-bin/draft/add",
+            stage="create_draft",
             params={"access_token": token},
             json={
                 "articles": [
                     {
-                        "title": content.title,
-                        "author": str(self.channel.config_json.get("author") or ""),
-                        "digest": content.body[:120],
-                        "content": "<p>"
-                        + content.body.replace("\n", "</p><p>")
-                        + "</p>",
+                        **wechat_article(content, self.channel),
                         "thumb_media_id": media_id,
-                        "need_open_comment": 0,
-                        "only_fans_can_comment": 0,
                     }
                 ]
             },
         )
-        draft.raise_for_status()
-        draft_body = draft.json()
-        draft_media_id = draft_body.get("media_id")
-        if not draft_media_id:
-            raise RuntimeError(f"公众号草稿创建失败: {draft_body}")
-        if not self.channel.config_json.get("auto_publish", False):
+        draft_media_id = _required_id(draft_body.get("media_id"), stage="create_draft")
+        if config.auto_publish is not True:
             return ConnectorResult(
                 status="draft_created",
                 external_id=str(draft_media_id),
-                response=draft_body,
+                response={"media_id": draft_media_id},
             )
-        submitted = self.client.post(
+        body = connector_request(
+            self.client,
+            "POST",
             f"{self.base_url}/cgi-bin/freepublish/submit",
+            stage="submit_publish",
             params={"access_token": token},
             json={"media_id": draft_media_id},
         )
-        submitted.raise_for_status()
-        body = submitted.json()
-        publish_id = body.get("publish_id")
-        if not publish_id:
-            raise RuntimeError(f"公众号发布提交失败: {body}")
+        publish_id = _required_id(body.get("publish_id"), stage="submit_publish")
         return ConnectorResult(
             status="submitted",
             external_id=str(publish_id),
-            response=body,
+            response={"publish_id": publish_id},
         )
 
     def reconcile(self, publish_job: PublishJob) -> ConnectorResult:
         if not publish_job.external_id:
             raise ValueError("公众号自动对账需要 freepublish publish_id")
         token = self._access_token()
-        response = self.client.post(
+        body = connector_request(
+            self.client,
+            "POST",
             f"{self.base_url}/cgi-bin/freepublish/get",
+            stage="query_publish",
             params={"access_token": token},
             json={"publish_id": publish_job.external_id},
         )
-        response.raise_for_status()
-        body = response.json()
-        error_code = int(body.get("errcode") or 0)
-        if error_code:
-            raise RuntimeError(f"公众号发布状态查询失败: {body}")
-
         article_id = body.get("article_id")
+        publish_status = body.get("publish_status")
+        if publish_status is not None and type(publish_status) is not int:
+            raise ConnectorPublishError(
+                stage="query_publish", retry_safe=False, code="invalid_response"
+            )
+        safe_response = {"publish_status": publish_status}
         if article_id:
+            article_id = _required_id(article_id, stage="query_publish")
             detail = body.get("article_detail") or {}
+            if not isinstance(detail, dict):
+                raise ConnectorPublishError(
+                    stage="query_publish", retry_safe=False, code="invalid_response"
+                )
             items = detail.get("item") or []
+            if not isinstance(items, list) or any(
+                not isinstance(item, dict) for item in items
+            ):
+                raise ConnectorPublishError(
+                    stage="query_publish", retry_safe=False, code="invalid_response"
+                )
             first_item = items[0] if items else {}
             external_url = (
                 body.get("article_url")
@@ -461,12 +490,12 @@ class WechatConnector:
                 status="published",
                 external_id=str(article_id),
                 external_url=str(external_url) if external_url else None,
-                response=body,
+                response={**safe_response, "article_id": article_id},
             )
         return ConnectorResult(
             status="pending",
             external_id=publish_job.external_id,
-            response=body,
+            response=safe_response,
         )
 
     def pull_metrics(self, publish_job: PublishJob) -> dict[str, float]:
@@ -479,6 +508,9 @@ def build_connector(
     settings: Settings,
     storage: ObjectStorage,
 ) -> ChannelConnector:
+    validate_channel_config(
+        channel.platform, channel.config_json if channel.config_json is not None else {}
+    )
     credentials = (
         decrypt_credentials_with_keys(
             channel.credential_ciphertext,

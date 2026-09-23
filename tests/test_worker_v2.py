@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from publishing_helpers import confirm_publish
+
 import tempfile
 import unittest
 import zipfile
@@ -49,6 +51,9 @@ from contentflow.worker import (
 
 
 class WorkerIntegrationTest(unittest.TestCase):
+    def confirm_publish(self, **kwargs):
+        return confirm_publish(self.client, **kwargs)
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
@@ -717,8 +722,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             "request_id": "immediate-request-001",
         }
         before = datetime.now(timezone.utc)
-        response = self.client.post(
-            "/api/v1/publishing/jobs",
+        response = self.confirm_publish(
             headers=self.headers,
             json=payload,
         )
@@ -801,7 +805,7 @@ class WorkerIntegrationTest(unittest.TestCase):
                     session.add(second)
                     session.commit()
                     first_id, second_id = first.id, second.id
-                response = self.client.post("/api/v1/publishing/jobs", headers=self.headers, json={
+                response = self.confirm_publish(headers=self.headers, json={
                     "content_item_id": fixture["content_id"], "channel_id": fixture["channel_id"],
                     "delivery_mode": mode, "publish_now": True, "request_id": f"manifest-{mode}",
                 })
@@ -871,7 +875,7 @@ class WorkerIntegrationTest(unittest.TestCase):
                     else:
                         asset.storage_uri = "file:///outside-workspace/cover.png"
                     session.commit()
-                response = self.client.post("/api/v1/publishing/jobs", headers=self.headers, json={
+                response = self.confirm_publish(headers=self.headers, json={
                     "content_item_id": fixture["content_id"], "channel_id": fixture["channel_id"],
                     "publish_now": True, "request_id": f"not-ready-{changed}",
                 })
@@ -1734,8 +1738,7 @@ class WorkerIntegrationTest(unittest.TestCase):
         self.assertEqual(
             channel.json()["config_json"]["connection_mode"], "manual_export"
         )
-        cancellable = self.client.post(
-            "/api/v1/publishing/jobs",
+        cancellable = self.confirm_publish(
             headers=self.headers,
             json={
                 "content_item_id": content["id"],
@@ -1766,8 +1769,7 @@ class WorkerIntegrationTest(unittest.TestCase):
                 "cancelled",
             )
 
-        scheduled = self.client.post(
-            "/api/v1/publishing/jobs",
+        scheduled = self.confirm_publish(
             headers=self.headers,
             json={
                 "content_item_id": content["id"],
@@ -1806,8 +1808,7 @@ class WorkerIntegrationTest(unittest.TestCase):
                 any(name.startswith("assets/") for name in archive.namelist())
             )
 
-        uncertain = self.client.post(
-            "/api/v1/publishing/jobs",
+        uncertain = self.confirm_publish(
             headers=self.headers,
             json={
                 "content_item_id": content["id"],
@@ -1886,8 +1887,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             self.assertEqual(publish_job.external_id, "platform-post-001")
             self.assertEqual(queue_job.status, "succeeded")
 
-        not_published = self.client.post(
-            "/api/v1/publishing/jobs",
+        not_published = self.confirm_publish(
             headers=self.headers,
             json={
                 "content_item_id": content["id"],
@@ -1947,8 +1947,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             self.assertEqual(publish_job.attempts, 2)
             self.assertEqual(queue_job.status, "succeeded")
 
-        lease_exhausted = self.client.post(
-            "/api/v1/publishing/jobs",
+        lease_exhausted = self.confirm_publish(
             headers=self.headers,
             json={
                 "content_item_id": content["id"],

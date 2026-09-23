@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from publishing_helpers import confirm_publish
+
 import hashlib
 import io
 import tempfile
@@ -186,8 +188,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
         return {"Authorization": f"Bearer {switched.json()['access_token']}"}
 
     def _schedule(self, *, mode: str = "script", channel_id: str | None = None) -> dict:
-        response = self.client.post(
-            "/api/v1/publishing/jobs",
+        response = confirm_publish(self.client,
             headers=self.headers,
             json={
                 "content_item_id": self.content_id,

@@ -234,3 +234,10 @@ export async function download(
   anchor.click();
   URL.revokeObjectURL(url);
 }
+
+export async function apiBlob(path: string, signal?: AbortSignal): Promise<Blob> {
+  const headers = new Headers({ [COOKIE_SESSION_HEADER]: "cookie" });
+  const response = await fetchWithSession(path, { headers, signal });
+  if (!response.ok) throw await apiError(response, "预览素材加载失败");
+  return response.blob();
+}

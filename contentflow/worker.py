@@ -33,6 +33,8 @@ from . import db
 from .audit import record_audit
 from .asset_operations import lock_asset_for_mutation
 from .connectors import ConnectorPublishError, build_connector
+from .connector_errors import CONNECTOR_JOB_TYPES, safe_connector_failure, connector_diagnostic
+from .channel_config import ChannelConfigurationError
 from .entities import (
     Asset,
     ChannelConnection,
@@ -77,6 +79,7 @@ from .prompt_eval import execute_prompt_eval_run
 from .publish_evidence import PublishEvidenceError, normalize_publish_evidence
 from .publish_manifest import (
     ManifestObjectStorage,
+    PublishManifestConflict,
     detached_copy,
     load_release_inputs,
     require_publish_manifest,
@@ -1266,6 +1269,26 @@ def schedule_pending_publish_reconciliations(
     return scheduled
 
 
+def uncertain_connector_dispatch(session: Session, publish_job: PublishJob,
+                                 channel: ChannelConnection, error: Exception) -> None:
+    publish_job = session.get(PublishJob, publish_job.id)
+    if publish_job is not None:
+        publish_job.status = "reconciliation_required"
+        publish_job.error = (
+            "平台调用已开始但结果不确定，禁止自动重试：" + safe_connector_failure(error)
+        )
+        publish_job.response_json = {**dict(publish_job.response_json or {}),
+            "dispatch_diagnostic": connector_diagnostic(error)}
+        record_audit(session, action="publish.reconciliation_required",
+            entity_type="publish_job", entity_id=publish_job.id,
+            workspace_id=publish_job.workspace_id, actor_user_id=None,
+            metadata={"channel_id": channel.id, "error_type": type(error).__name__})
+        session.commit()
+    raise PublishReconciliationRequired(
+        "平台分发结果不确定，需要人工对账后再决定是否重试"
+    ) from None
+
+
 def handle_publish_dispatch(
     session: Session, payload: dict[str, Any], settings: Settings
 ) -> dict[str, Any]:
@@ -1465,7 +1488,7 @@ def handle_publish_dispatch(
         raise
     except ConnectorPublishError as error:
         if not error.retry_safe:
-            raise
+            uncertain_connector_dispatch(session, publish_job, channel, error)
         publish_job = session.get(PublishJob, publish_job.id)
         if publish_job is not None:
             response_json = dict(publish_job.response_json or {})
@@ -1478,15 +1501,16 @@ def handle_publish_dispatch(
             response_json["dispatch_failure"] = {
                 "retry_safe": True,
                 "stage": error.stage,
-                "message": str(error)[:2000],
+                "message": safe_connector_failure(error),
                 "failed_at": datetime.now(timezone.utc).isoformat(),
                 "channel_invalidated": error.invalidate_channel,
             }
+            response_json["dispatch_diagnostic"] = connector_diagnostic(error)
             publish_job.response_json = response_json
             publish_job.status = "failed"
             publish_job.error = (
                 "外部平台写入前失败，可在修复原因后安全重试："
-                f"{str(error)}"
+                f"{safe_connector_failure(error)}"
             )[:8000]
             publish_job.external_id = None
             publish_job.external_url = None
@@ -1509,31 +1533,9 @@ def handle_publish_dispatch(
             session.commit()
         raise PublishRetrySafeFailure(
             "发布在外部写入前失败，可在修复原因后安全重试"
-        ) from error
+        ) from None
     except Exception as error:
-        publish_job = session.get(PublishJob, publish_job.id)
-        if publish_job is not None:
-            publish_job.status = "reconciliation_required"
-            publish_job.error = (
-                "平台调用已开始但结果不确定，禁止自动重试："
-                f"{type(error).__name__}: {error}"
-            )[:8000]
-            record_audit(
-                session,
-                action="publish.reconciliation_required",
-                entity_type="publish_job",
-                entity_id=publish_job.id,
-                workspace_id=publish_job.workspace_id,
-                actor_user_id=None,
-                metadata={
-                    "channel_id": channel.id,
-                    "error_type": type(error).__name__,
-                },
-            )
-            session.commit()
-        raise PublishReconciliationRequired(
-            "平台分发结果不确定，需要人工对账后再决定是否重试"
-        ) from error
+        uncertain_connector_dispatch(session, publish_job, channel, error)
 
     publish_job.status = result.status
     publish_job.external_id = result.external_id
@@ -2118,6 +2120,7 @@ class Worker:
             job = session.get(Job, job_id)
             if job is None:
                 return False
+            job_type = job.job_type
             try:
                 handler = self.handlers.get(job.job_type)
                 if handler is None:
@@ -2167,6 +2170,16 @@ class Worker:
                 persisted_error: Exception | str = error
                 if database_error_kind is not None:
                     persisted_error = sanitized_database_error(error)
+                elif job_type in CONNECTOR_JOB_TYPES:
+                    persisted_error = (
+                        str(error) if type(error) in {
+                            ChannelConfigurationError, PublishManifestConflict,
+                            PublishReconciliationRequired, PublishRetrySafeFailure, JobNotReady,
+                        } else safe_connector_failure(error)
+                    )
+                    if job is not None:
+                        job.result_json = {**dict(job.result_json or {}),
+                            "connector_diagnostic": connector_diagnostic(error)}
                 elif job is not None and job.job_type == "prompt_eval.execute":
                     persisted_error = (
                         f"AI prompt evaluation failed ({type(error).__name__})"
@@ -2233,6 +2246,7 @@ class Worker:
                                     StorageLedgerInvariantError,
                                     StorageLedgerUnverified,
                                     StorageQuotaExceeded,
+                                    ChannelConfigurationError,
                                 ),
                             )
                             or database_error_kind == DatabaseErrorKind.PERMANENT
@@ -2280,7 +2294,12 @@ class Worker:
                             ),
                         )
                     session.commit()
-                if isinstance(error, JobNotReady):
+                if job_type in CONNECTOR_JOB_TYPES:
+                    # Do not attach an exception chain: even safe wrappers can
+                    # have a cause containing credential-bearing request URLs.
+                    logger.error("platform job failed id=%s type=%s diagnostic=%s",
+                        job_id, job_type, persisted_error)
+                elif isinstance(error, JobNotReady):
                     logger.info("job pending id=%s message=%s", job_id, error)
                 elif ai_provenance:
                     logger.error(

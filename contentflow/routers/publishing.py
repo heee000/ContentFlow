@@ -4,9 +4,10 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -17,13 +18,20 @@ from ..dependencies import (
     Principal,
     require_role,
 )
-from ..entities import ChannelConnection, ContentItem, Job, PublishJob
+from ..entities import Asset, ChannelConnection, ContentItem, Job, PublishJob
 from ..job_queue import enqueue_job
-from ..object_storage import build_object_storage
+from ..object_storage import build_object_storage, is_workspace_storage_uri
+from ..publication_payload import preview_document
 from ..publish_manifest import (
+    ManifestObjectStorage,
+    PublishManifestConflict,
     build_release_manifest,
+    confirmation_request_digest,
     load_release_inputs,
+    publication_fingerprint,
     require_publish_manifest,
+    sign_publication_preview,
+    verify_publication_preview,
 )
 from ..pagination import (
     DEFAULT_PAGE_LIMIT,
@@ -34,6 +42,7 @@ from ..pagination import (
 )
 from ..schemas import (
     PublishJobResponse,
+    PublishPreviewRequest,
     PublishReconcileRequest,
     PublishScheduleRequest,
 )
@@ -92,13 +101,8 @@ def list_publish_jobs(
     )
 
 
-@router.post(
-    "/jobs",
-    response_model=PublishJobResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def schedule_publish(
-    payload: PublishScheduleRequest,
+def prepare_publication(
+    payload: PublishPreviewRequest,
     principal: Reviewer,
     session: Db,
     settings: AppSettings,
@@ -150,17 +154,6 @@ def schedule_publish(
             detail="该连接器不支持官方 API，请选择脚本辅助或人工导出",
         )
 
-    raw_key = (
-        f"{principal.workspace_id}:{content.id}:{content.version}:"
-        f"{channel.id}:{delivery_mode}:"
-        f"{payload.request_id or scheduled_at.isoformat()}"
-    )
-    idempotency_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
-    existing = session.scalar(
-        select(PublishJob).where(PublishJob.idempotency_key == idempotency_key)
-    )
-    if existing:
-        return existing
     if delivery_mode == "connector" and channel.status != "connected":
         raise HTTPException(
             status_code=409,
@@ -171,6 +164,102 @@ def schedule_publish(
         channel_id=channel.id, settings=settings,
     )
     manifest = build_release_manifest(content, channel, assets, settings)
+    if delivery_mode == "connector":
+        required_type = "image/" if channel.platform == "wechat" else "video/"
+        if not any((asset.mime_type or "").startswith(required_type) for asset in assets):
+            raise PublishManifestConflict("当前渠道缺少已就绪的封面图片或视频，请先准备素材")
+    return content, channel, assets, manifest, scheduled_at, publish_timing, delivery_mode
+
+
+def publication_intent(payload: PublishPreviewRequest) -> dict:
+    return {
+        "content_item_id": payload.content_item_id, "channel_id": payload.channel_id,
+        "delivery_mode": payload.delivery_mode, "publish_now": payload.publish_now,
+        "scheduled_at": payload.scheduled_at.astimezone(timezone.utc).isoformat()
+        if payload.scheduled_at and payload.scheduled_at.tzinfo else (
+            payload.scheduled_at.isoformat() if payload.scheduled_at else None),
+    }
+
+
+@router.post("/preview")
+def preview_publish(payload: PublishPreviewRequest, principal: Reviewer, session: Db, settings: AppSettings):
+    content, channel, assets, manifest, _scheduled, timing, mode = prepare_publication(
+        payload, principal, session, settings)
+    fingerprint = publication_fingerprint(manifest, publication_intent(payload), mode)
+    used_ids = {asset.id for asset in assets}
+    if mode == "connector":
+        kind = "image/" if channel.platform == "wechat" else "video/"
+        used_ids = {next(asset.id for asset in assets if (asset.mime_type or "").startswith(kind))}
+    return {
+        "fingerprint": fingerprint,
+        "preview_token": sign_publication_preview(fingerprint, workspace_id=principal.workspace_id,
+            user_id=principal.user_id, secret=settings.secret_key),
+        "expires_in_seconds": 900,
+        "content_id": content.id, "campaign_id": content.campaign_id,
+        "content_version": content.version, "title": content.title,
+        "platform": content.platform, "layout": content.layout_json,
+        "channel_name": channel.display_name, "delivery_mode": mode, "publish_timing": timing,
+        "scheduled_at": publication_intent(payload)["scheduled_at"],
+        "document": preview_document(content, channel, mode),
+        "assets": [{"id": asset.id, "kind": asset.kind, "mime_type": asset.mime_type,
+            "size_bytes": asset.size_bytes, "checksum": asset.metadata_json["checksum"],
+            "used_in_delivery": asset.id in used_ids} for asset in assets],
+    }
+
+
+@router.get("/preview-assets/{asset_id}")
+def preview_asset_bytes(asset_id: str, principal: Reviewer, session: Db, settings: AppSettings,
+    checksum: Annotated[str, Query(pattern=r"^[0-9a-f]{64}$")]):
+    asset = session.scalar(select(Asset).where(Asset.id == asset_id, Asset.workspace_id == principal.workspace_id))
+    if asset is None:
+        raise HTTPException(status_code=404, detail="素材不存在")
+    if (asset.status != "ready" or (asset.metadata_json or {}).get("checksum") != checksum
+        or not is_workspace_storage_uri(settings, principal.workspace_id, asset.storage_uri)):
+        raise PublishManifestConflict("预览素材已变化，请重新预览")
+    storage = ManifestObjectStorage(build_object_storage(settings), {"assets": [{
+        "uri": asset.storage_uri, "size_bytes": asset.size_bytes, "sha256": checksum,
+    }]})
+    try:
+        data = storage.read(asset.storage_uri, max_bytes=settings.max_upload_bytes)
+    except (OSError, ValueError) as error:
+        raise PublishManifestConflict("预览素材无法通过文件校验，请先修复素材") from error
+    return Response(content=data, media_type=asset.mime_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{asset.id}"'})
+
+
+def existing_publication(session: Session, *, workspace_id: str, request_id: str, key: str, digest: str):
+    # Also recognize legacy request IDs: never create a second delivery just
+    # because its old key included content/version/time. Legacy intent cannot
+    # be reconstructed safely and must be inspected, not silently overwritten.
+    rows = list(session.scalars(select(PublishJob).where(
+        PublishJob.workspace_id == workspace_id,
+        ((PublishJob.idempotency_key == key) | (PublishJob.request_json["request_id"].as_string() == request_id)),
+    ).limit(2)))
+    if not rows:
+        return None
+    if len(rows) != 1 or rows[0].request_json.get("confirmation_request_sha256") != digest:
+        raise PublishManifestConflict("该发布操作编号已用于不同请求或旧任务，请先核对原任务；不要重复发布",
+            code="publish_intent_conflict")
+    return rows[0]
+
+
+@router.post("/jobs", response_model=PublishJobResponse, status_code=status.HTTP_202_ACCEPTED)
+def schedule_publish(payload: PublishScheduleRequest, principal: Reviewer, session: Db, settings: AppSettings):
+    intent = publication_intent(payload)
+    digest = confirmation_request_digest({**intent, "preview_token": payload.preview_token})
+    idempotency_key = hashlib.sha256(
+        f"publish-intent-v1:{principal.workspace_id}:{payload.request_id}".encode()).hexdigest()
+    existing = existing_publication(session, workspace_id=principal.workspace_id,
+        request_id=payload.request_id, key=idempotency_key, digest=digest)
+    if existing is not None:
+        # An exact replay returns the receipt even after the preview expires,
+        # content changes or the scheduled time passes. No new work is queued.
+        return existing
+    content, channel, assets, manifest, scheduled_at, publish_timing, delivery_mode = prepare_publication(
+        payload, principal, session, settings)
+    fingerprint = publication_fingerprint(manifest, intent, delivery_mode)
+    verify_publication_preview(payload.preview_token, fingerprint, workspace_id=principal.workspace_id,
+        user_id=principal.user_id, secret=settings.secret_key)
     publish_job = PublishJob(
         workspace_id=principal.workspace_id,
         content_item_id=content.id,
@@ -185,10 +274,21 @@ def schedule_publish(
             "request_id": payload.request_id,
             "script_requested_by": principal.user_id,
             "release_manifest": manifest,
+            "preview_fingerprint": fingerprint,
+            "preview_confirmed_by": principal.user_id,
+            "confirmation_request_sha256": digest,
         },
     )
-    session.add(publish_job)
-    session.flush()
+    try:
+        with session.begin_nested():
+            session.add(publish_job)
+            session.flush()
+    except IntegrityError:
+        existing = existing_publication(session, workspace_id=principal.workspace_id,
+            request_id=payload.request_id, key=idempotency_key, digest=digest)
+        if existing is not None:
+            return existing
+        raise
     enqueue_job(
         session,
         job_type="publish.dispatch",
@@ -214,6 +314,7 @@ def schedule_publish(
             "delivery_mode": delivery_mode,
             "scheduled_at": scheduled_at.isoformat(),
             "publish_timing": publish_timing,
+            "preview_fingerprint": fingerprint,
         },
     )
     return publish_job

@@ -155,7 +155,7 @@ class ConnectorContractTest(unittest.TestCase):
             workspace_id="workspace-1",
             platform="douyin",
             display_name="抖音官方账号",
-            config_json={"api_base": "https://douyin.test"},
+            config_json={"api_base": "https://open.douyin.com"},
         )
         connector = DouyinConnector(
             channel=channel,
@@ -204,7 +204,7 @@ class ConnectorContractTest(unittest.TestCase):
             workspace_id="workspace-1",
             platform="wechat",
             display_name="公众号",
-            config_json={"api_base": "https://wechat.test"},
+            config_json={"api_base": "https://api.weixin.qq.com"},
         )
         connector = WechatConnector(
             channel=channel,
@@ -255,7 +255,7 @@ class ConnectorContractTest(unittest.TestCase):
             workspace_id="workspace-1",
             platform="wechat",
             display_name="公众号",
-            config_json={"api_base": "https://wechat.test"},
+            config_json={"api_base": "https://api.weixin.qq.com"},
         )
         connector = WechatConnector(
             channel=channel,
@@ -322,7 +322,7 @@ class ConnectorContractTest(unittest.TestCase):
             workspace_id="workspace-1",
             platform="wechat",
             display_name="公众号自动发布",
-            config_json={"api_base": "https://wechat.test", "auto_publish": True},
+            config_json={"api_base": "https://api.weixin.qq.com", "auto_publish": True},
         )
         connector = WechatConnector(
             channel=channel,

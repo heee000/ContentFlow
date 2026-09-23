@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator, field_serializer
+
+from .channel_config import validate_channel_config
+from .connector_errors import CONNECTOR_JOB_TYPES, STAGES, public_connector_error
 
 
 Platform = Literal["xiaohongshu", "douyin", "wechat"]
@@ -427,6 +430,11 @@ class ChannelCreate(BaseModel):
     credentials: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def validate_config(self):
+        validate_channel_config(self.platform, self.config, incoming=True)
+        return self
+
 
 class ChannelResponse(ORMModel):
     id: str
@@ -439,18 +447,21 @@ class ChannelResponse(ORMModel):
     updated_at: datetime
 
 
-class PublishScheduleRequest(BaseModel):
+class PublishPreviewRequest(BaseModel):
     content_item_id: str
     channel_id: str
     scheduled_at: datetime | None = None
     publish_now: bool = False
-    request_id: str | None = Field(
-        default=None,
+    delivery_mode: Literal["connector", "script", "manual_export"] = "connector"
+
+
+class PublishScheduleRequest(PublishPreviewRequest):
+    request_id: str = Field(
         min_length=8,
         max_length=80,
         pattern=r"^[A-Za-z0-9._:-]+$",
     )
-    delivery_mode: Literal["connector", "script", "manual_export"] = "connector"
+    preview_token: str = Field(min_length=64, max_length=1200)
 
 
 class PublishReconcileRequest(BaseModel):
@@ -468,6 +479,7 @@ class PublishScriptResultRequest(BaseModel):
 
 
 class PublishJobResponse(ORMModel):
+    response_json: dict[str, Any] = Field(default_factory=dict, exclude=True)
     id: str
     content_item_id: str
     channel_id: str
@@ -492,6 +504,17 @@ class PublishJobResponse(ORMModel):
     published_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("error")
+    def safe_error(self, value):
+        # Also protects historical rows without altering forensic evidence.
+        return public_connector_error(retry_safe=self.retry_safe,
+            uncertain=self.status == "reconciliation_required",
+            diagnostic=self.response_json.get("dispatch_diagnostic")) if value else None
+
+    @field_serializer("failure_stage")
+    def safe_failure_stage(self, value):
+        return value if value in STAGES else None
 
 
 class PublishEvidenceResponse(ORMModel):
@@ -608,6 +631,13 @@ class JobResponse(ORMModel):
     manual_review: JobManualReviewResponse | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("last_error")
+    def safe_platform_error(self, value):
+        if value and self.job_type in CONNECTOR_JOB_TYPES:
+            return public_connector_error(uncertain=self.job_type == "publish.reconcile",
+                diagnostic=self.result_json.get("connector_diagnostic"))
+        return value
 
 
 class WorkerQueueHealthResponse(BaseModel):
