@@ -1,6 +1,6 @@
 # ContentFlow 项目交接文档
 
-> 更新日期：2026-09-23（历史阶段记录按时间保留，当前断点见末节与 `docs/IMPLEMENTATION_PROGRESS.md`）
+> 更新日期：2026-09-24（历史阶段记录按时间保留，当前断点见末节与 `docs/IMPLEMENTATION_PROGRESS.md`）
 > 适用仓库：ContentFlow 仓库根目录
 > GitHub：<https://github.com/heee000/ContentFlow>
 > 当前工作分支：`codex/enterprise-media-runtime`
@@ -2352,3 +2352,4 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 原源码位置断言已修正且增加正式模式行为回归；迟到响应根因为本机 Edge 的 no-store 未读响应生命周期，显式释放 body 后单项及完整浏览器通过。清理异常仍拒绝旧结果；测试等待成功/取消终态和模块 Promise 终结，不删等待刷绿。历史失败记录不改成已通过。
 - 本地 **27/27 浏览器（58.2 秒）、14/14 模块/SSR**，lint/无增量类型/构建/Ruff/diff 检查通过；会话后端 **50 passed / 4 skipped（45.47 秒）**。后端代码未改动，上一轮全套 761/38 仍是该后端本地证据。四项新 PG 竞争、本批 MinIO/Chromium 和源码 CI 待签收，不借旧绿色。同步 SHA/run 和最终结果随后追加进度页，避免重复 dispatch。
 - 旧 Cookie Web 与新 API 不透明兼容，缺头 428；API/Web 需同版升级，单一规范来源，未部署、无新迁移。无真实调用/费用/稿件/网络/密钥/受保护知识文件操作；后续仍 A05、A07/A12、A47 与事务/目标/Mock 策略、内容可信和运维门禁，完整目标未完成。只按阶段授权普通同步功能分支，不 force、不合并/PR/部署。
+- 最终源码 **`12eaf9a4bd3135da7ddea4079004d49b41225e9f`** 已普通推送；[CI 35904373071](https://github.com/heee000/ContentFlow/actions/runs/35904373071) **四项全过：799 passed / 226 subtests、84.96% 覆盖率，27 条 Chromium（1.2 分钟）、14 项模块/SSR**。包含真实 PG/MinIO、新 4 项会话行锁竞争、当次依赖/来源签名验证。只补文档签收，不重复 dispatch 或部署。下一阶段 A05 的真实调用链和设计边界已追加实施进度末节，尚未实现；接手先核对该断点，不再重复旧会话失败定位。
