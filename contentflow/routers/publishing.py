@@ -174,6 +174,7 @@ def prepare_publication(
 def publication_intent(payload: PublishPreviewRequest) -> dict:
     return {
         "content_item_id": payload.content_item_id, "channel_id": payload.channel_id,
+        "request_id": payload.request_id,
         "delivery_mode": payload.delivery_mode, "publish_now": payload.publish_now,
         "scheduled_at": payload.scheduled_at.astimezone(timezone.utc).isoformat()
         if payload.scheduled_at and payload.scheduled_at.tzinfo else (
@@ -254,6 +255,17 @@ def schedule_publish(payload: PublishScheduleRequest, principal: Reviewer, sessi
     if existing is not None:
         # An exact replay returns the receipt even after the preview expires,
         # content changes or the scheduled time passes. No new work is queued.
+        return existing
+    # Another confirmation may commit while this request waits for content.
+    # Recheck its receipt after taking that lock, before validating mutable
+    # state or expiry. A replay must not depend on a still-approved old draft.
+    session.scalar(select(ContentItem.id).where(
+        ContentItem.id == payload.content_item_id,
+        ContentItem.workspace_id == principal.workspace_id,
+    ).with_for_update())
+    existing = existing_publication(session, workspace_id=principal.workspace_id,
+        request_id=payload.request_id, key=idempotency_key, digest=digest)
+    if existing is not None:
         return existing
     content, channel, assets, manifest, scheduled_at, publish_timing, delivery_mode = prepare_publication(
         payload, principal, session, settings)

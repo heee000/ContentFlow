@@ -63,10 +63,11 @@ def main() -> None:
             "Authorization": f"Bearer {register.json()['access_token']}"
         }
         def confirm_publication(payload: dict) -> httpx.Response:
+            payload = {**payload, "request_id": str(uuid.uuid4())}
             preview = client.post(f"{api}/publishing/preview", headers=headers, json=payload)
             preview.raise_for_status()
             return client.post(f"{api}/publishing/jobs", headers=headers, json={
-                **payload, "request_id": str(uuid.uuid4()), "preview_token": preview.json()["preview_token"],
+                **payload, "preview_token": preview.json()["preview_token"],
             })
         primary_workspace_id = register.json()["workspace_id"]
 

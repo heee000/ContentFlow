@@ -453,14 +453,14 @@ class PublishPreviewRequest(BaseModel):
     scheduled_at: datetime | None = None
     publish_now: bool = False
     delivery_mode: Literal["connector", "script", "manual_export"] = "connector"
-
-
-class PublishScheduleRequest(PublishPreviewRequest):
     request_id: str = Field(
         min_length=8,
         max_length=80,
         pattern=r"^[A-Za-z0-9._:-]+$",
     )
+
+
+class PublishScheduleRequest(PublishPreviewRequest):
     preview_token: str = Field(min_length=64, max_length=1200)
 
 

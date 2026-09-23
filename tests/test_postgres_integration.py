@@ -60,6 +60,7 @@ from contentflow.observability import ObservabilityMetrics
 from contentflow.routers.publish_evidence import upload_publish_evidence
 from contentflow.routers.assets import change_asset_source, retry_asset, select_asset_candidate
 from contentflow.routers.publishing import preview_publish, schedule_publish
+from contentflow.routers import publishing as publishing_router
 from contentflow.schemas import AssetSelectionRequest, AssetSourceChangeRequest, PublishPreviewRequest, PublishScheduleRequest
 from contentflow.security import hash_rate_limit_key
 from contentflow.settings import Settings
@@ -569,7 +570,8 @@ def test_postgres_schedule_and_cover_selection_preserve_release_boundary(postgre
         first_id, second_id = original.id, other.id
     principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
     captured, selection_requested = threading.Event(), threading.Event()
-    intent = {"content_item_id": content_id, "channel_id": channel_id, "publish_now": True}
+    intent = {"content_item_id": content_id, "channel_id": channel_id, "publish_now": True,
+        "request_id": "postgres-manifest-race"}
     with postgres_harness.sessions() as session:
         preview = preview_publish(PublishPreviewRequest(**intent), principal, session, postgres_harness.settings)
         session.commit()
@@ -585,7 +587,7 @@ def test_postgres_schedule_and_cover_selection_preserve_release_boundary(postgre
 
             event.listen(session, "after_flush", observe_capture)
             job = schedule_publish(PublishScheduleRequest(**intent,
-                preview_token=preview["preview_token"], request_id="postgres-manifest-race"),
+                preview_token=preview["preview_token"]),
                 principal, session, postgres_harness.settings)
             session.commit()
             return job.id
@@ -617,6 +619,92 @@ def test_postgres_schedule_and_cover_selection_preserve_release_boundary(postgre
         with pytest.raises(PublishManifestConflict, match="已变化"):
             handle_publish_dispatch(session, {"publish_job_id": publish_id}, postgres_harness.settings)
         connector.assert_not_called()
+
+
+@pytest.mark.parametrize("variant", ["same", "different_mode", "different_content", "same_after_edit"])
+def test_postgres_confirmation_race_creates_one_receipt_and_dispatch(
+    postgres_harness: PostgresHarness, variant: str,
+):
+    fixture = _create_publish_fixture(postgres_harness, status="cancelled", external_id=None)
+    principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
+    with postgres_harness.sessions() as session:
+        seed = session.get(PublishJob, fixture["publish_job_id"])
+        intent = {"content_item_id": seed.content_item_id, "channel_id": seed.channel_id,
+            "publish_now": True, "request_id": f"race-{uuid.uuid4()}"}
+        other_intent = dict(intent)
+        if variant == "different_mode":
+            other_intent["delivery_mode"] = "script"
+        if variant == "different_content":
+            original = session.get(ContentItem, seed.content_item_id)
+            other = ContentItem(workspace_id=original.workspace_id, campaign_id=original.campaign_id,
+                run_id=original.run_id, platform="wechat", title="Another confirmed article",
+                body="A different operation must not inherit the first receipt.", status="approved",
+                version=1, approved_by=principal.user_id, approved_at=datetime.now(timezone.utc))
+            session.add(other)
+            session.flush()
+            source_asset = session.scalar(select(Asset).where(Asset.content_item_id == original.id))
+            session.add(Asset(workspace_id=other.workspace_id, content_item_id=other.id,
+                content_version=1, kind="image", provider=source_asset.provider, status="ready",
+                storage_uri=source_asset.storage_uri, size_bytes=source_asset.size_bytes,
+                mime_type=source_asset.mime_type, metadata_json=dict(source_asset.metadata_json)))
+            other_intent["content_item_id"] = other.id
+            session.flush()
+        first_proof = preview_publish(PublishPreviewRequest(**intent), principal, session,
+            postgres_harness.settings)["preview_token"]
+        second_proof = first_proof if variant.startswith("same") else preview_publish(
+            PublishPreviewRequest(**other_intent), principal, session,
+            postgres_harness.settings)["preview_token"]
+        session.commit()
+
+    barrier = Barrier(2)
+    lookup = publishing_router.existing_publication
+
+    def observe_initial_miss(session, **kwargs):
+        result = lookup(session, **kwargs)
+        if not session.info.get("initial_lookup_observed"):
+            session.info["initial_lookup_observed"] = True
+            assert result is None
+            barrier.wait(timeout=10)
+        return result
+
+    def confirm(intent_data, token):
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+            try:
+                job = schedule_publish(PublishScheduleRequest(**intent_data, preview_token=token),
+                    principal, session, postgres_harness.settings)
+                if variant == "same_after_edit":
+                    item = session.get(ContentItem, intent_data["content_item_id"])
+                    item.body = "Saved after the winning confirmation."
+                    item.version = 2
+                    item.status = "needs_review"
+                session.commit()
+                return "receipt", job.id
+            except PublishManifestConflict as error:
+                session.rollback()
+                return "conflict", error.code
+
+    with patch.object(publishing_router, "existing_publication", side_effect=observe_initial_miss):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(confirm, intent, first_proof)
+            second = pool.submit(confirm, other_intent, second_proof)
+            results = [first.result(timeout=20), second.result(timeout=20)]
+    receipts = [value for kind, value in results if kind == "receipt"]
+    if variant.startswith("same"):
+        assert len(receipts) == 2 and receipts[0] == receipts[1]
+    else:
+        assert len(receipts) == 1
+        assert ("conflict", "publish_intent_conflict") in results
+    with postgres_harness.sessions() as session:
+        publications = list(session.scalars(select(PublishJob).where(
+            PublishJob.workspace_id == fixture["workspace_id"], PublishJob.id != fixture["publish_job_id"])))
+        queued = list(session.scalars(select(Job).where(Job.workspace_id == fixture["workspace_id"])))
+        audited = list(session.scalars(select(AuditLog).where(AuditLog.workspace_id == fixture["workspace_id"],
+            AuditLog.action == "publish.immediate")))
+        assert [job.id for job in publications] == [receipts[0]]
+        assert len(queued) == 1 and queued[0].job_type == "publish.dispatch"
+        assert queued[0].payload_json == {"publish_job_id": receipts[0]}
+        assert len(audited) == 1 and audited[0].entity_id == receipts[0]
 
 
 def test_postgres_driver_sqlstate_classification(postgres_harness: PostgresHarness):

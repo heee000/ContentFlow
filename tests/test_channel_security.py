@@ -214,6 +214,7 @@ def test_legacy_configuration_blocks_preview_and_test_without_queuing(applicatio
             "content_item_id": fixture["content_id"],
             "channel_id": fixture["channel_id"],
             "publish_now": True,
+            "request_id": "invalid-legacy-config-preview",
         },
     )
     tested = application.client.post(

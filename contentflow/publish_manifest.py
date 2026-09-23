@@ -89,7 +89,8 @@ def verify_publication_preview(
             base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
         )
         if (
-            record.get("v") != 1
+            type(record.get("v")) is not int
+            or record["v"] != 1
             or record.get("workspace") != workspace_id
             or record.get("user") != user_id
             or type(record.get("expires")) is not int
