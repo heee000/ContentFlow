@@ -107,7 +107,7 @@ class AIProvenanceTest(unittest.TestCase):
         self.assertNotIn("never-persist-this", serialized)
         self.assertNotIn("sensitive-provider-error-body", serialized)
 
-    @patch("contentflow.providers.urllib.request.urlopen")
+    @patch("contentflow.providers.open_model_request")
     def test_openai_compatible_captures_reported_usage(self, urlopen):
         response = MagicMock()
         response.read.return_value = json.dumps(

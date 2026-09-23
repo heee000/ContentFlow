@@ -69,7 +69,7 @@ docker compose up -d postgres
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[test,security]"
 .\.venv\Scripts\python.exe -m contentflow.migrate
-.\.venv\Scripts\python.exe -m uvicorn contentflow.api:app --reload
+.\.venv\Scripts\python.exe -m uvicorn contentflow.api:create_app --factory --reload
 ```
 
 已有 PostgreSQL volume 的密码由首次初始化决定；修改 `.env` 不会自动修改旧 volume 中的密码。不要用 `docker compose down -v` 处理密码不一致，除非已完成备份并明确要删除全部数据。

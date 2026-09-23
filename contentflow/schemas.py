@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator, field_serializer
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, StrictBool, model_validator, field_serializer
 
 from .channel_config import validate_channel_config
 from .connector_errors import CONNECTOR_JOB_TYPES, STAGES, public_connector_error
+from .metric_values import MetricValues
 
 
 Platform = Literal["xiaohongshu", "douyin", "wechat"]
@@ -271,6 +273,12 @@ class CampaignUpdate(BaseModel):
     image_search_query: str | None = Field(default=None, max_length=500)
     status: Literal["draft", "active", "archived"] | None = None
 
+    @model_validator(mode="after")
+    def reject_explicit_null(self):
+        if any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("修改字段不能为 null；不修改的字段请省略")
+        return self
+
 
 class CampaignResponse(ORMModel):
     id: str
@@ -347,14 +355,39 @@ class ContentResponse(ORMModel):
     created_at: datetime
     updated_at: datetime
 
+    @model_validator(mode="after")
+    def label_review_binding(self):
+        from .review_evidence import review_presentation
+        self.review_json = review_presentation(self)
+        return self
+
 
 class ContentUpdate(BaseModel):
-    expected_version: int = Field(ge=1)
+    expected_version: int = Field(ge=1, strict=True)
     title: str | None = Field(default=None, max_length=500)
     body: str | None = Field(default=None, max_length=20_000)
     hashtags: list[str] | None = None
     call_to_action: str | None = Field(default=None, max_length=500)
     layout_json: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null(self):
+        if any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("修改字段不能为 null；不修改的字段请省略")
+        return self
+
+
+class ContentReviewEvidenceResponse(ORMModel):
+    id: str
+    content_item_id: str
+    content_version: int
+    content_sha256: str
+    event: str
+    model_binding: str
+    snapshot_json: dict[str, Any]
+    snapshot_sha256: str
+    actor_user_id: str | None
+    created_at: datetime
 
 
 class ContentRevisionResponse(ORMModel):
@@ -373,9 +406,10 @@ class ContentRevisionResponse(ORMModel):
 
 
 class ReviewDecision(BaseModel):
-    expected_version: int = Field(ge=1)
+    expected_version: int = Field(ge=1, strict=True)
     decision: Literal["approve", "reject"]
     reason: str = Field(default="", max_length=2000)
+    acknowledge_review_warnings: StrictBool = False
 
 
 class AssetSelectionRequest(BaseModel):
@@ -545,15 +579,18 @@ class PublishConfirmationResponse(ORMModel):
     created_at: datetime
 
 
-class MetricInput(BaseModel):
+class MetricInput(MetricValues):
+    model_config = ConfigDict(extra="forbid")
+
     publish_job_id: str
     captured_at: datetime | None = None
-    impressions: float = Field(default=0, ge=0)
-    clicks: float = Field(default=0, ge=0)
-    likes: float = Field(default=0, ge=0)
-    comments: float = Field(default=0, ge=0)
-    shares: float = Field(default=0, ge=0)
     raw: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_raw_json(self):
+        # SQLite JSON serialization otherwise accepts NaN/Infinity, unlike PG.
+        json.dumps(self.raw, allow_nan=False)
+        return self
 
 
 class JobContextResponse(BaseModel):

@@ -11,7 +11,8 @@ from ..audit import record_audit
 from ..asset_operations import require_new_asset_operation
 from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
-from ..entities import Asset, ContentItem, ContentRevision
+from ..entities import Asset, ContentItem, ContentRevision, ContentReviewEvidence
+from ..review_evidence import approval_warnings, capture_review, local_review, resolve_brief
 from ..job_queue import enqueue_job
 from ..pagination import (
     DEFAULT_PAGE_LIMIT,
@@ -24,6 +25,7 @@ from ..pagination import (
 from ..schemas import (
     ContentResponse,
     ContentRevisionResponse,
+    ContentReviewEvidenceResponse,
     ContentUpdate,
     ReviewDecision,
 )
@@ -61,7 +63,7 @@ def get_content_for_update_or_409(
     )
     if session.bind and session.bind.dialect.name == "postgresql":
         query = query.with_for_update()
-    item = session.scalar(query)
+    item = session.scalar(query.execution_options(populate_existing=True))
     if item is None:
         raise HTTPException(status_code=404, detail="内容不存在")
     if item.version != expected_version:
@@ -153,18 +155,25 @@ def update_content(
         payload.expected_version,
     )
     updates = payload.model_dump(exclude_unset=True, exclude={"expected_version"})
+    updates = {field: value for field, value in updates.items() if getattr(item, field) != value}
     if not updates:
         return item
+    try:
+        brief = resolve_brief(session, item)
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=409, detail="审核 brief 不完整，请先修复关联活动") from None
+    capture_review(session, item, "superseded", principal.user_id)
     for field, value in updates.items():
         setattr(item, field, value)
     item.version += 1
     item.status = "needs_review"
     item.approved_by = None
     item.approved_at = None
-    review = dict(item.review_json or {})
+    review = local_review(item, brief)
     review["last_human_edit_by"] = principal.user_id
     review["last_human_edit_at"] = datetime.now(timezone.utc).isoformat()
     item.review_json = review
+    capture_review(session, item, "edited", principal.user_id)
     existing_assets = list(
         session.scalars(
             select(Asset).where(
@@ -249,12 +258,27 @@ def review_content(
             status_code=409,
             detail="只有待审核或规则拦截的内容可以审核",
         )
+    try:
+        review = local_review(item, resolve_brief(session, item))
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=409, detail="审核 brief 不完整，请先修复关联活动") from None
+    warnings = approval_warnings(review)
+    if payload.decision == "approve" and warnings and (
+        not payload.acknowledge_review_warnings or len(payload.reason.strip()) < 8
+    ):
+        raise HTTPException(status_code=409, detail="；".join(warnings) + "。如确认继续，请明确勾选并填写至少 8 个字符的人工核验理由。")
     now = datetime.now(timezone.utc)
-    review = dict(item.review_json or {})
     review["human_decision"] = payload.decision
     review["human_reason"] = payload.reason
     review["human_reviewer_id"] = principal.user_id
     review["human_reviewed_at"] = now.isoformat()
+    review["human_content_version"] = item.version
+    review["human_content_sha256"] = review["content_sha256"]
+    review["human_acknowledged_warnings"] = payload.acknowledge_review_warnings
+    review["human_warnings"] = warnings
+    # Upgrade-era items have no generated evidence row. Archive before replacing
+    # raw legacy evidence, without inventing a current-version model binding.
+    capture_review(session, item, "before_human_review", principal.user_id)
     item.review_json = review
     if payload.decision == "approve":
         item.status = "approved"
@@ -342,6 +366,7 @@ def review_content(
         item.status = "rejected"
         item.approved_by = None
         item.approved_at = None
+    evidence = capture_review(session, item, f"human_{payload.decision}", principal.user_id)
     record_audit(
         session,
         action=f"content.{payload.decision}",
@@ -349,6 +374,20 @@ def review_content(
         entity_id=item.id,
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
-        metadata={"reason": payload.reason, "version": item.version},
+        metadata={"reason": payload.reason, "version": item.version,
+            "content_sha256": review["content_sha256"], "review_evidence_id": evidence.id,
+            "review_snapshot_sha256": evidence.snapshot_sha256,
+            "acknowledged_warnings": payload.acknowledge_review_warnings},
     )
     return item
+
+
+@router.get("/{content_id}/review-evidence", response_model=list[ContentReviewEvidenceResponse])
+def list_review_evidence(content_id: str, principal: CurrentPrincipal, session: Db, response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT, cursor: PageCursor = None):
+    get_content_or_404(session, principal.workspace_id, content_id)
+    return paginate(session, select(ContentReviewEvidence).where(
+        ContentReviewEvidence.workspace_id == principal.workspace_id,
+        ContentReviewEvidence.content_item_id == content_id),
+        timestamp_column=ContentReviewEvidence.created_at, id_column=ContentReviewEvidence.id,
+        limit=limit, cursor=cursor, response=response)

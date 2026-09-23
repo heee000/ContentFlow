@@ -22,6 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
+from .metric_values import COUNTER_RANGE_SQL
 
 
 def new_id() -> str:
@@ -685,6 +686,23 @@ class ContentRevision(Base):
     )
 
 
+class ContentReviewEvidence(Base):
+    __tablename__ = "content_review_evidence"
+    __table_args__ = (Index("ix_content_review_evidence_page", "workspace_id", "content_item_id", "created_at", "id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    content_item_id: Mapped[str] = mapped_column(ForeignKey("content_items.id", ondelete="CASCADE"))
+    content_version: Mapped[int] = mapped_column(Integer)
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    event: Mapped[str] = mapped_column(String(32))
+    model_binding: Mapped[str] = mapped_column(String(32))
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64))
+    actor_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Asset(TimestampMixin, Base):
     __tablename__ = "assets"
     __table_args__ = (
@@ -994,6 +1012,8 @@ class MetricSnapshot(Base):
         UniqueConstraint(
             "publish_job_id", "captured_at", name="uq_metric_snapshot_capture"
         ),
+        CheckConstraint("validation_status IN ('valid', 'quarantined')", name="validation_status"),
+        CheckConstraint("validation_status = 'quarantined' OR (" + COUNTER_RANGE_SQL + ")", name="counters_bounded"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -1011,6 +1031,9 @@ class MetricSnapshot(Base):
     likes: Mapped[float] = mapped_column(Float, default=0)
     comments: Mapped[float] = mapped_column(Float, default=0)
     shares: Mapped[float] = mapped_column(Float, default=0)
+    validation_status: Mapped[str] = mapped_column(
+        String(24), default="valid", server_default="valid", nullable=False
+    )
     raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 

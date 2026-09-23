@@ -27,9 +27,10 @@ from sqlalchemy.exc import (
     ProgrammingError,
     TimeoutError as SQLAlchemyTimeoutError,
 )
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from . import db
+from .metric_values import MetricValues
 from .audit import record_audit
 from .asset_operations import lock_asset_for_mutation
 from .connectors import ConnectorPublishError, build_connector
@@ -1786,16 +1787,12 @@ def handle_metrics_pull(
         settings=settings,
         storage=build_object_storage(settings),
     )
-    values = connector.pull_metrics(publish_job)
+    values = MetricValues.model_validate(connector.pull_metrics(publish_job)).model_dump()
     snapshot = MetricSnapshot(
         workspace_id=publish_job.workspace_id,
         publish_job_id=publish_job.id,
         captured_at=datetime.now(timezone.utc),
-        impressions=float(values.get("impressions", 0)),
-        clicks=float(values.get("clicks", 0)),
-        likes=float(values.get("likes", 0)),
-        comments=float(values.get("comments", 0)),
-        shares=float(values.get("shares", 0)),
+        **values,
         raw_json={"source": channel.platform, **values},
     )
     session.add(snapshot)
@@ -1983,7 +1980,11 @@ class Worker:
         self.worker_id = worker_id or (
             f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         )
-        self.session_factory = session_factory or db.SessionLocal
+        self._owned_engine = db.build_engine(self.settings.database_url) if session_factory is None else None
+        self.session_factory = session_factory if session_factory is not None else sessionmaker(
+            bind=self._owned_engine,
+            expire_on_commit=False, future=True,
+        )
         self.handlers = handlers or HANDLERS
         self.manual_review_job_types = manual_review_job_types(self.settings)
         self._stop_event = stop_event or threading.Event()
@@ -1994,6 +1995,19 @@ class Worker:
     @property
     def stop_requested(self) -> bool:
         return self._stop_event.is_set()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def close(self) -> None:
+        """Release owned resources after execution has stopped, never a caller's pool."""
+        self._stop_event.set()
+        if self._owned_engine is not None:
+            self._owned_engine.dispose()
+            self._owned_engine = None
 
     def request_stop(self, signum: int | None = None) -> None:
         self._shutdown_signal = signum
@@ -2414,6 +2428,7 @@ class Worker:
                 self.worker_id,
                 self._shutdown_signal,
             )
+            self.close()
 
 
 def main() -> None:
@@ -2421,6 +2436,7 @@ def main() -> None:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     settings = get_settings()
+    db.configure_database(settings.database_url)
     if not settings.production:
         from .migrate import upgrade_database
 
@@ -2430,7 +2446,7 @@ def main() -> None:
     # Alembic configures logging while migrations run. Re-apply the worker
     # logger afterwards so startup and job failures remain visible.
     configure_worker_logging()
-    worker = Worker(settings=settings)
+    worker = Worker(settings=settings, session_factory=db.SessionLocal)
 
     def stop_worker(signum, _frame) -> None:
         worker.request_stop(signum)

@@ -14,8 +14,8 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "a5b6c7d8e9f0"
-MINIMUM_PUBLIC_TABLE_COUNT = 33
+HEAD_REVISION = "c7d8e9f0a1b2"
+MINIMUM_PUBLIC_TABLE_COUNT = 34
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
 LAYOUT_REVISION = "8b6c1f3a9d21"
@@ -106,6 +106,7 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             return
 
     incrementally_added = {
+        "content_review_evidence",
         WORKER_NODE_TABLE,
         AUTH_SESSION_TABLE,
         AUTH_REFRESH_HISTORY_TABLE,
@@ -276,7 +277,19 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             "migration. Back up the database and repair the schema before continuing."
         )
 
-    if provider_invocation_exists:
+    if "content_review_evidence" in tables:
+        kind_checks = inspector.get_check_constraints(PROVIDER_INVOCATION_TABLE) if provider_invocation_exists else []
+        if not any("'media'" in entry.get("sqltext", "") and "'search'" in entry.get("sqltext", "") for entry in kind_checks):
+            raise RuntimeError("审核证据表缺少前置调用账本约束；请先备份并人工修复未版本化数据库")
+        metric_columns = {column["name"] for column in inspector.get_columns("metric_snapshots")}
+        if "validation_status" in metric_columns:
+            constraints = {item["name"] for item in inspector.get_check_constraints("metric_snapshots")}
+            if not {"ck_metric_snapshots_validation_status", "ck_metric_snapshots_counters_bounded"} <= constraints:
+                raise RuntimeError("Metric validation schema is incomplete; repair before adoption")
+            revision = HEAD_REVISION
+        else:
+            revision = "b6c7d8e9f0a1"
+    elif provider_invocation_exists:
         revision = PROVIDER_INVOCATION_REVISION
     elif job_manual_review_exists:
         revision = JOB_MANUAL_REVIEW_REVISION

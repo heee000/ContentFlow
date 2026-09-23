@@ -26,6 +26,7 @@ from .settings import Settings
 from .style_skills import resolve_style_skill
 from .text_generation import build_text_provider
 from .workflow import build_asset_tasks
+from .review_evidence import capture_review, local_review
 
 
 def campaign_to_brief(campaign: Campaign) -> dict:
@@ -241,6 +242,8 @@ def execute_workflow_run(
         )
         session.add(item)
         session.flush()
+        item.review_json = local_review(item, brief, generated_model=item.review_json)
+        capture_review(session, item, "generated")
         session.add(
             ContentRevision(
                 workspace_id=run.workspace_id,

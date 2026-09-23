@@ -132,6 +132,7 @@ class ManualMediaFlowTest(unittest.TestCase):
             json={
                 "decision": "approve",
                 "reason": "文案与事实已人工确认",
+                "acknowledge_review_warnings": True,
                 "expected_version": 1,
             },
         )
@@ -213,7 +214,8 @@ class ManualMediaFlowTest(unittest.TestCase):
             headers=self.headers,
             json={
                 "decision": "approve",
-                "reason": "文案已核验",
+                "reason": "已人工核验当前合成稿件及规则例外",
+                "acknowledge_review_warnings": True,
                 "expected_version": 1,
             },
         )
@@ -237,7 +239,8 @@ class ManualMediaFlowTest(unittest.TestCase):
             headers=self.headers,
             json={
                 "decision": "approve",
-                "reason": "文案已核验",
+                "reason": "已人工核验当前合成稿件及规则例外",
+                "acknowledge_review_warnings": True,
                 "expected_version": 1,
             },
         )
@@ -293,7 +296,8 @@ class ManualMediaFlowTest(unittest.TestCase):
         self.assertIsNotNone(old_uri)
         storage.read(old_uri)
 
-        self.assertTrue(Worker(settings=self.settings).run_once())
+        with Worker(settings=self.settings) as worker:
+            self.assertTrue(worker.run_once())
         with self.assertRaises(FileNotFoundError):
             storage.read(old_uri)
         self.assertIsNotNone(storage.read(new_uri))
@@ -307,7 +311,8 @@ class ManualMediaFlowTest(unittest.TestCase):
             headers=self.headers,
             json={
                 "decision": "approve",
-                "reason": "文案已核验",
+                "reason": "已人工核验当前合成稿件及规则例外",
+                "acknowledge_review_warnings": True,
                 "expected_version": 1,
             },
         )
@@ -353,7 +358,8 @@ class ManualMediaFlowTest(unittest.TestCase):
             headers=self.headers,
             json={
                 "decision": "approve",
-                "reason": "文案已核验",
+                "reason": "已人工核验当前合成稿件及规则例外",
+                "acknowledge_review_warnings": True,
                 "expected_version": 1,
             },
         )
@@ -405,6 +411,7 @@ class ManualMediaFlowTest(unittest.TestCase):
             json={
                 "decision": "approve",
                 "reason": "文案已核验，可以选择封面路线",
+                "acknowledge_review_warnings": True,
                 "expected_version": 1,
             },
         )
@@ -540,7 +547,8 @@ class ManualMediaFlowTest(unittest.TestCase):
             headers=self.headers, json={"body": "新的正文，旧请求仍需核对", "expected_version": 1})
         self.assertEqual(edited.status_code, 200, edited.text)
         reviewed = self.client.post(f"/api/v1/contents/{self.content_id}/review",
-            headers=self.headers, json={"decision": "approve", "expected_version": 2})
+            headers=self.headers, json={"decision": "approve", "expected_version": 2,
+                "acknowledge_review_warnings": True, "reason": "明确核验合成稿件，仍不得绕过素材未知门禁"})
         self.assertEqual(reviewed.status_code, 409, reviewed.text)
         with db.SessionLocal() as session:
             self.assertEqual(session.get(ContentItem, self.content_id).status, "needs_review")
@@ -623,7 +631,8 @@ class ManualMediaFlowTest(unittest.TestCase):
                             ))
                         session.commit()
                     result = self.client.post(f"/api/v1/contents/{self.content_id}/review",
-                        headers=self.headers, json={"decision": "approve", "expected_version": 1})
+                        headers=self.headers, json={"decision": "approve", "expected_version": 1,
+                            "acknowledge_review_warnings": True, "reason": "已人工核验本版本，测试指定素材来源"})
                     self.assertEqual(result.status_code, 200, result.text)
                     with db.SessionLocal() as session:
                         assets = list(session.scalars(select(Asset)))
@@ -653,7 +662,8 @@ class ManualMediaFlowTest(unittest.TestCase):
             json={"body": "编辑后的内容仍保留人工来源", "expected_version": 1})
         self.assertEqual(edited.status_code, 200, edited.text)
         approved = self.client.post(f"/api/v1/contents/{self.content_id}/review", headers=self.headers,
-            json={"decision": "approve", "expected_version": 2})
+            json={"decision": "approve", "expected_version": 2,
+                "acknowledge_review_warnings": True, "reason": "已核验修改版本，测试素材来源保留"})
         self.assertEqual(approved.status_code, 200, approved.text)
         with db.SessionLocal() as session:
             assets = list(session.scalars(select(Asset).where(Asset.content_version == 2)))
@@ -667,7 +677,8 @@ class ManualMediaFlowTest(unittest.TestCase):
             asset.provider = "http"
             session.commit()
         approved = self.client.post(f"/api/v1/contents/{self.content_id}/review", headers=self.headers,
-            json={"decision": "approve", "expected_version": 1})
+            json={"decision": "approve", "expected_version": 1,
+                "acknowledge_review_warnings": True, "reason": "已人工核验本版本，测试现有生成来源"})
         self.assertEqual(approved.status_code, 200, approved.text)
         with db.SessionLocal() as session:
             asset = session.get(Asset, self.asset_id)

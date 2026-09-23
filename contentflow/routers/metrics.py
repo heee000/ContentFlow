@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -13,6 +13,7 @@ from ..dependencies import CurrentPrincipal, Principal, require_role
 from ..entities import ContentItem, MetricSnapshot, PublishJob
 from ..job_queue import enqueue_job
 from ..schemas import JobResponse, MetricInput
+from ..metric_values import METRIC_FIELDS, MAX_METRIC_VALUE
 
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
@@ -61,6 +62,32 @@ def metrics_summary(
     session: Db,
     campaign_id: str | None = Query(default=None, min_length=1, max_length=36),
 ):
+    scope = [MetricSnapshot.workspace_id == principal.workspace_id]
+    if campaign_id:
+        scope.append(
+            MetricSnapshot.publish_job_id.in_(
+                select(PublishJob.id)
+                .join(ContentItem, ContentItem.id == PublishJob.content_item_id)
+                .where(
+                    PublishJob.workspace_id == principal.workspace_id,
+                    ContentItem.workspace_id == principal.workspace_id,
+                    ContentItem.campaign_id == campaign_id,
+                )
+            )
+        )
+    valid = and_(
+        MetricSnapshot.validation_status == "valid",
+        *[
+            getattr(MetricSnapshot, field).between(0, MAX_METRIC_VALUE)
+            for field in METRIC_FIELDS
+        ],
+    )
+    excluded_count = int(
+        session.scalar(
+            select(func.count(MetricSnapshot.id)).where(*scope, valid.is_not(True))
+        )
+        or 0
+    )
     statement = select(
         func.count(MetricSnapshot.id),
         func.sum(MetricSnapshot.impressions),
@@ -68,23 +95,7 @@ def metrics_summary(
         func.sum(MetricSnapshot.likes),
         func.sum(MetricSnapshot.comments),
         func.sum(MetricSnapshot.shares),
-    ).where(MetricSnapshot.workspace_id == principal.workspace_id)
-    if campaign_id:
-        statement = (
-            statement.join(
-                PublishJob,
-                PublishJob.id == MetricSnapshot.publish_job_id,
-            )
-            .join(
-                ContentItem,
-                ContentItem.id == PublishJob.content_item_id,
-            )
-            .where(
-                PublishJob.workspace_id == principal.workspace_id,
-                ContentItem.workspace_id == principal.workspace_id,
-                ContentItem.campaign_id == campaign_id,
-            )
-        )
+    ).where(*scope, valid)
     rows = session.execute(statement).one()
     sample_count = int(rows[0] or 0)
     impressions = float(rows[1] or 0)
@@ -93,7 +104,7 @@ def metrics_summary(
     click_through_rate = round(clicks / impressions, 4) if impressions else 0
     engagement_rate = round(engagement / impressions, 4) if impressions else 0
     recommendations: list[str] = []
-    if sample_count:
+    if sample_count and not excluded_count:
         if sample_count < 3:
             recommendations.append(
                 "当前样本量较少，先持续回收至少 3 条已发布内容，再比较平台与选题差异。"
@@ -111,6 +122,8 @@ def metrics_summary(
                 "当前点击与互动信号较稳定，保留核心表达，只对选题或素材做单变量迭代。"
             )
     return {
+        "excluded_snapshot_count": excluded_count,
+        "data_complete": excluded_count == 0,
         "sample_count": sample_count,
         "impressions": impressions,
         "clicks": clicks,

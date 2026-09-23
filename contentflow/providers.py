@@ -44,7 +44,7 @@ PROVIDER_REQUEST_KEY = re.compile(r"^[0-9a-f]{64}$")
 
 class ProviderHTTPError(RuntimeError):
     def __init__(self, status: int):
-        self.status = status if type(status) is int and 400 <= status <= 599 else None
+        self.status = status if type(status) is int and 300 <= status <= 599 else None
         super().__init__(f"Model provider HTTP error ({self.status})")
 
 
@@ -58,6 +58,18 @@ class ProviderResponseError(RuntimeError):
     def __init__(self, kind: str):
         self.kind = kind if kind in {"json", "encoding", "structure", "not_object"} else "structure"
         super().__init__(f"Model provider response error ({self.kind})")
+
+
+class _NoModelRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Even same-origin redirects change the reviewed endpoint/method. Never
+        # forward Authorization or a prompt to a Location supplied upstream.
+        return None
+
+
+def open_model_request(request: urllib.request.Request, *, timeout: int):
+    # Per-call opener: no mutation of the process-wide proxy/TLS/urllib policy.
+    return urllib.request.build_opener(_NoModelRedirects()).open(request, timeout=timeout)
 
 
 def provider_error_evidence(error: Exception) -> dict[str, Any]:
@@ -452,7 +464,7 @@ class OpenAICompatibleProvider:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(
+            with open_model_request(
                 request, timeout=self.timeout_seconds
             ) as response:
                 self.last_call_metadata.update(
@@ -495,17 +507,17 @@ class OpenAICompatibleProvider:
             self.last_call_metadata.update(
                 _provider_request_metadata(headers=getattr(error, "headers", None))
             )
-            raise ProviderHTTPError(error.code) from error
+            raise ProviderHTTPError(error.code) from None
         except urllib.error.URLError as error:
-            raise ProviderNetworkError(_network_error_kind(error.reason)) from error
+            raise ProviderNetworkError(_network_error_kind(error.reason)) from None
         except (TimeoutError, ConnectionError, ssl.SSLError) as error:
-            raise ProviderNetworkError(_network_error_kind(error)) from error
-        except UnicodeDecodeError as error:
-            raise ProviderResponseError("encoding") from error
-        except json.JSONDecodeError as error:
-            raise ProviderResponseError("json") from error
-        except (KeyError, IndexError, TypeError) as error:
-            raise ProviderResponseError("structure") from error
+            raise ProviderNetworkError(_network_error_kind(error)) from None
+        except UnicodeDecodeError:
+            raise ProviderResponseError("encoding") from None
+        except json.JSONDecodeError:
+            raise ProviderResponseError("json") from None
+        except (KeyError, IndexError, TypeError):
+            raise ProviderResponseError("structure") from None
 
 
 def build_provider(name: str) -> Provider:

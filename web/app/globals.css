@@ -751,6 +751,10 @@ tbody tr:last-child td { border-bottom: 0; }
   font: 12px/1.55 "IBM Plex Mono", Consolas, monospace;
 }
 .review-summary { padding: 16px; background: var(--surface); }
+.review-warning { padding: 16px; border: 1px solid currentColor; border-radius: 10px; }
+.review-warning p, .review-warning li { font-size: 13px; line-height: 1.6; }
+.review-warning .review-warning-ack { display: flex; align-items: flex-start; gap: 8px; }
+.review-warning-ack input { width: auto; margin-top: 3px; flex: 0 0 auto; }
 .review-summary pre {
   max-height: 180px;
   overflow: auto;

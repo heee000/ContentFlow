@@ -122,6 +122,15 @@ type ContentRevision = {
   created_at: string;
 };
 
+type ReviewEvidence = {
+  id: string;
+  content_version: number;
+  event: string;
+  model_binding: string;
+  snapshot_json: Record<string, unknown>;
+  created_at: string;
+};
+
 type Asset = {
   id: string;
   content_item_id: string | null;
@@ -310,6 +319,9 @@ type DashboardSummary = {
 };
 
 type MetricsSummary = {
+  load_error?: string;
+  excluded_snapshot_count?: number;
+  data_complete?: boolean;
   sample_count: number;
   impressions: number;
   clicks: number;
@@ -666,6 +678,17 @@ const EMPTY_DATA: DataState = {
     recommendations: [],
   },
 };
+
+async function loadMetrics(path: string): Promise<MetricsSummary> {
+  try {
+    return await api<MetricsSummary>(path);
+  } catch (error) {
+    // Authentication failures still invalidate the session; an unavailable
+    // analytics endpoint must not blank unrelated project/review queues.
+    if (error instanceof ApiError && [401, 403].includes(error.status)) throw error;
+    return { ...EMPTY_DATA.metrics, load_error: "指标暂时无法加载，其他工作台功能可继续使用。未加载的数据不代表零。" };
+  }
+}
 
 function mergeUpdatedRows<T extends { id: string; updated_at: string }>(
   current: T[],
@@ -1208,7 +1231,7 @@ function AuthScreen({
 
 export function ContentFlowApp() {
   const [session, setSession] = useState<Session | null>(null);
-  const [view, setView] = useState<View>("dashboard");
+  const [view, setViewState] = useState<View>("dashboard");
   const [campaignFilter, setCampaignFilter] = useState("");
   const [advancedNavOpen, setAdvancedNavOpen] = useState(false);
   const [data, setData] = useState<DataState>(EMPTY_DATA);
@@ -1219,6 +1242,15 @@ export function ContentFlowApp() {
   const [pageWarning, setPageWarning] = useState("");
   const pollInFlight = useRef(false);
   const lastOperationalRefresh = useRef<string | null>(null);
+  const reviewLeaveGuard = useRef<(() => boolean) | null>(null);
+  const registerReviewLeaveGuard = useCallback((guard: (() => boolean) | null) => {
+    reviewLeaveGuard.current = guard;
+  }, []);
+
+  function setView(next: View) {
+    if (next === view || (reviewLeaveGuard.current && !reviewLeaveGuard.current())) return;
+    setViewState(next);
+  }
 
   const loadData = useCallback(async () => {
     setRefreshing(true);
@@ -1258,7 +1290,7 @@ export function ContentFlowApp() {
         apiAllPages<PublishJob>("/publishing/jobs"),
         apiAllPages<KnowledgeDocument>("/knowledge/documents"),
         apiAllPages<QueueJob>("/jobs"),
-        api<MetricsSummary>(
+        loadMetrics(
           campaignFilter
             ? `/metrics/summary?campaign_id=${encodeURIComponent(campaignFilter)}`
             : "/metrics/summary",
@@ -1395,7 +1427,7 @@ export function ContentFlowApp() {
         apiAllPages<Asset>(`/assets?${query}`, { maxPages: 10 }),
         apiAllPages<PublishJob>(`/publishing/jobs?${query}`, { maxPages: 10 }),
         apiAllPages<QueueJob>(`/jobs?${query}`, { maxPages: 10 }),
-        api<MetricsSummary>(
+        loadMetrics(
           campaignFilter
             ? `/metrics/summary?campaign_id=${encodeURIComponent(campaignFilter)}`
             : "/metrics/summary",
@@ -1485,6 +1517,7 @@ export function ContentFlowApp() {
 
   async function activateWorkspace(workspaceId: string) {
     if (workspaceId === session?.workspace.id) return;
+    if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
     setRefreshing(true);
     try {
       await api<unknown>(
@@ -1494,7 +1527,7 @@ export function ContentFlowApp() {
       const current = await api<Session>("/auth/session");
       setData(EMPTY_DATA);
       setCampaignFilter("");
-      setView("dashboard");
+      setViewState("dashboard");
       setSession(current);
       flash(`已切换到 ${current.workspace.name}`);
     } catch (caught) {
@@ -1505,6 +1538,7 @@ export function ContentFlowApp() {
   }
 
   async function createAndActivateWorkspace(name: string) {
+    if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
     await api<unknown>("/auth/workspaces", {
       method: "POST",
       body: { name },
@@ -1512,19 +1546,20 @@ export function ContentFlowApp() {
     const current = await api<Session>("/auth/session");
     setData(EMPTY_DATA);
     setCampaignFilter("");
-    setView("dashboard");
+    setViewState("dashboard");
     setSession(current);
     flash(`工作区 ${current.workspace.name} 已创建`);
   }
 
   async function signOut() {
+    if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
     try {
       await api<void>("/auth/logout", { method: "POST" });
     } finally {
       setSession(null);
       setData(EMPTY_DATA);
       setCampaignFilter("");
-      setView("dashboard");
+      setViewState("dashboard");
     }
   }
 
@@ -1682,7 +1717,10 @@ export function ContentFlowApp() {
               className="project-switcher"
               aria-label="按项目筛选当前工作台"
               value={effectiveCampaignFilter}
-              onChange={(event) => setCampaignFilter(event.target.value)}
+              onChange={(event) => {
+                if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
+                setCampaignFilter(event.target.value);
+              }}
             >
               <option value="">全部项目</option>
               {data.campaigns.map((campaign) => (
@@ -1762,11 +1800,13 @@ export function ContentFlowApp() {
           ) : null}
           {view === "review" ? (
             <ReviewView
+              key={`${getApiBase()}:${session.user.id}:${session.workspace.id}:${effectiveCampaignFilter}`}
               campaigns={data.campaigns}
               contents={scopedContents}
               role={session.role}
               onChanged={() => loadData()}
               flash={flash}
+              registerLeaveGuard={registerReviewLeaveGuard}
             />
           ) : null}
           {view === "assets" ? (
@@ -2566,18 +2606,46 @@ function CampaignsView({
   );
 }
 
+function reviewFormValue(form: HTMLFormElement) {
+  const fields = new FormData(form);
+  const layout = JSON.parse(String(fields.get("layout_json") || "{}"));
+  if (!layout || typeof layout !== "object" || Array.isArray(layout)) {
+    throw new Error("平台排版必须是 JSON 对象");
+  }
+  return {
+    title: String(fields.get("title") ?? ""),
+    body: String(fields.get("body") ?? ""),
+    hashtags: String(fields.get("hashtags") ?? "").split(/[，,\s]/)
+      .map((item) => item.replace(/^#/, "").trim()).filter(Boolean),
+    call_to_action: String(fields.get("call_to_action") ?? ""),
+    layout_json: layout,
+  };
+}
+
+function reviewFormDirty(form: HTMLFormElement | null, item: Content | undefined): boolean {
+  if (!form || !item) return false;
+  try {
+    return Object.entries(reviewFormValue(form)).some(([key, value]) =>
+      JSON.stringify(value) !== JSON.stringify(item[key as keyof Content]));
+  } catch {
+    return true;
+  }
+}
+
 function ReviewView({
   campaigns,
   contents,
   role,
   onChanged,
   flash,
+  registerLeaveGuard,
 }: {
   campaigns: Campaign[];
   contents: Content[];
   role: string;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
+  registerLeaveGuard: (guard: (() => boolean) | null) => void;
 }) {
   const reviewable = contents.filter((item) =>
     ["needs_review", "blocked"].includes(item.status),
@@ -2588,15 +2656,29 @@ function ReviewView({
   const [showAll, setShowAll] = useState(false);
   const visibleContents = showAll ? contents : reviewable;
   const [selectedId, setSelectedId] = useState(reviewable[0]?.id || "");
-  const selected =
+  const liveSelection =
     visibleContents.find((item) => item.id === selectedId) ||
     visibleContents[0];
+  // Freeze the saved baseline as soon as the user edits. Polling must not
+  // remount an uncontrolled form underneath a draft or approve a newer version.
+  const [draftBase, setDraftBase] = useState<Content | null>(null);
+  const selected = draftBase ?? liveSelection;
+  const latest = contents.find((item) => item.id === selected?.id);
+  const remoteChanged = Boolean(selected && latest && (latest.version > selected.version
+    || (latest.version === selected.version && latest.status !== selected.status)));
+  const formRef = useRef<HTMLFormElement>(null);
+  const actionInFlight = useRef(false);
+  const [dirty, setDirty] = useState(false);
+  const [formEpoch, setFormEpoch] = useState(0);
+  const [warningAccepted, setWarningAccepted] = useState(false);
+  const [reviewReason, setReviewReason] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [revisionState, setRevisionState] = useState<{
     key: string;
     items: ContentRevision[];
-  }>({ key: "", items: [] });
+    evidence: ReviewEvidence[];
+  }>({ key: "", items: [], evidence: [] });
   const canEdit = roleAtLeast(role, "editor");
   const canReview = roleAtLeast(role, "reviewer");
   const needsDecision = Boolean(
@@ -2606,11 +2688,22 @@ function ReviewView({
   const revisionKey = selected ? `${selected.id}:${selected.version}` : "";
   const revisions =
     revisionState.key === revisionKey ? revisionState.items : [];
+  const evidence = revisionState.key === revisionKey ? revisionState.evidence : [];
   const revisionsLoading = Boolean(revisionKey && revisionState.key !== revisionKey);
-  const modelReview = selected?.review_json.model_review
+  const modelCurrent = selected?.review_json.model_review_current === true;
+  const modelReview = modelCurrent && selected?.review_json.model_review
     && typeof selected.review_json.model_review === "object"
     ? selected.review_json.model_review as Record<string, unknown>
     : {};
+  const ruleReview = selected?.review_json.rule_review as Record<string, unknown> | undefined;
+  const reviewWarnings = [
+    ruleReview?.passed !== true ? "当前版本的本地规则未全部通过。" : "",
+    !modelCurrent ? "AI 审核缺失、未绑定版本或已过期；保存不会自动调用收费模型。" : "",
+    modelCurrent && (modelReview.passed !== true || modelReview.risk_level === "high")
+      ? "当前版本 AI 审核未通过或标为高风险。" : "",
+  ].filter(Boolean);
+  const warningsConfirmed = !reviewWarnings.length
+    || (warningAccepted && Array.from(reviewReason.trim()).length >= 8);
   const qualityScores = modelReview.scores
     && typeof modelReview.scores === "object"
     ? Object.entries(modelReview.scores as Record<string, unknown>)
@@ -2623,15 +2716,18 @@ function ReviewView({
   useEffect(() => {
     if (!selected?.id) return;
     let active = true;
-    apiAllPages<ContentRevision>(`/contents/${selected.id}/revisions`)
-      .then((page) => {
+    Promise.all([
+      apiAllPages<ContentRevision>(`/contents/${selected.id}/revisions`),
+      apiAllPages<ReviewEvidence>(`/contents/${selected.id}/review-evidence`),
+    ]).then(([page, reviewPage]) => {
         if (active) {
           setRevisionState({
             key: `${selected.id}:${selected.version}`,
             items: page.items,
+            evidence: reviewPage.items,
           });
-          if (page.truncated) {
-            setError("内容修订已达到安全加载上限 2000 条，请联系管理员导出完整历史。");
+          if (page.truncated || reviewPage.truncated) {
+            setError("修订或审核记录已达到安全加载上限 2000 条，请联系管理员导出完整历史。");
           }
         }
       })
@@ -2641,65 +2737,121 @@ function ReviewView({
     return () => {
       active = false;
     };
-  }, [selected?.id, selected?.version]);
+  }, [selected?.id, selected?.version, selected?.status, formEpoch]);
+
+  const confirmLeave = useCallback(() => {
+    if (actionInFlight.current) {
+      setError("正在保存或审核，请等待回执后再切换。");
+      return false;
+    }
+    return !canEdit || !reviewFormDirty(formRef.current, selected)
+      || window.confirm("有未保存的内容修改。放弃这些修改并离开吗？");
+  }, [selected, canEdit]);
+
+  useEffect(() => {
+    registerLeaveGuard(confirmLeave);
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (actionInFlight.current || (canEdit && reviewFormDirty(formRef.current, selected))) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => {
+      registerLeaveGuard(null);
+      window.removeEventListener("beforeunload", beforeUnload);
+    };
+  }, [confirmLeave, registerLeaveGuard, selected, canEdit]);
+
+  function chooseContent(id: string, all = showAll) {
+    if (!confirmLeave()) return;
+    setShowAll(all);
+    setSelectedId(id);
+    setDraftBase(null);
+    setDirty(false);
+    setWarningAccepted(false);
+    setReviewReason("");
+    setError("");
+  }
+
+  function adoptSaved(item: Content) {
+    setDraftBase(item);
+    setSelectedId(item.id);
+    setFormEpoch((value) => value + 1);
+    setDirty(false);
+    setWarningAccepted(false);
+    setReviewReason("");
+  }
+
+  async function reloadSaved() {
+    if (!selected || !confirmLeave()) return;
+    actionInFlight.current = true;
+    setBusy("reload");
+    setError("");
+    try {
+      adoptSaved(await api<Content>(`/contents/${selected.id}`));
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      actionInFlight.current = false;
+      setBusy("");
+    }
+  }
 
   async function decide(decision: "approve" | "reject") {
-    if (!selected) return;
+    if (!selected || actionInFlight.current) return;
+    if (reviewFormDirty(formRef.current, selected) || remoteChanged) {
+      setError("请先保存当前修改，并确认没有版本冲突后再审核。");
+      return;
+    }
+    if (decision === "approve" && !warningsConfirmed) return;
+    actionInFlight.current = true;
     setBusy(decision);
     setError("");
     try {
       const reason =
         decision === "approve"
-          ? "人工确认事实、表达与平台格式"
+          ? reviewReason.trim() || "人工确认事实、表达与平台格式"
           : window.prompt("请输入驳回原因") || "";
       if (decision === "reject" && !reason) return;
-      await api(`/contents/${selected.id}/review`, {
+      const reviewed = await api<Content>(`/contents/${selected.id}/review`, {
         method: "POST",
-        body: { decision, reason, expected_version: selected.version },
+        body: { decision, reason, expected_version: selected.version,
+          acknowledge_review_warnings: warningAccepted },
       });
+      adoptSaved(reviewed);
       flash(decision === "approve" ? "内容已通过，素材已进入准备流程" : "内容已驳回");
-      setSelectedId("");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
     } finally {
+      actionInFlight.current = false;
       setBusy("");
     }
   }
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selected) return;
+    if (!selected || actionInFlight.current || remoteChanged) return;
+    actionInFlight.current = true;
     setBusy("save");
-    const form = new FormData(event.currentTarget);
+    setError("");
     try {
-      const layoutJson = JSON.parse(String(form.get("layout_json") || "{}"));
-      if (
-        !layoutJson ||
-        typeof layoutJson !== "object" ||
-        Array.isArray(layoutJson)
-      ) {
-        throw new Error("平台排版必须是 JSON 对象");
-      }
-      await api(`/contents/${selected.id}`, {
+      const saved = await api<Content>(`/contents/${selected.id}`, {
         method: "PATCH",
         body: {
           expected_version: selected.version,
-          title: form.get("title"),
-          body: form.get("body"),
-          hashtags: String(form.get("hashtags") || "")
-            .split(/[，,\s]/)
-            .map((item) => item.replace(/^#/, "").trim())
-            .filter(Boolean),
-          call_to_action: form.get("call_to_action"),
-          layout_json: layoutJson,
+          ...reviewFormValue(event.currentTarget),
         },
       });
-      flash("内容已保存为新版本，需要重新审核");
+      adoptSaved(saved);
+      flash(saved.version === selected.version ? "内容没有变化，已保留原版本" : "内容已保存为新版本，需要重新审核");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
     } finally {
+      actionInFlight.current = false;
       setBusy("");
     }
   }
@@ -2714,16 +2866,14 @@ function ReviewView({
         action={
           <Button
             kind="secondary"
-            onClick={() => {
-              setShowAll((value) => !value);
-              setSelectedId("");
-            }}
+            disabled={Boolean(busy)}
+            onClick={() => chooseContent("", !showAll)}
           >
             {showAll ? `只看待处理（${reviewable.length}）` : `查看全部内容（${contents.length}）`}
           </Button>
         }
       />
-      {error ? <p className="inline-error">{error}</p> : null}
+      {error ? <p className="inline-error" role="alert">{error}</p> : null}
       {!canEdit ? (
         <p className="permission-note">当前为只读权限，可查看内容、校验结果与版本历史。</p>
       ) : canEdit && !canReview ? (
@@ -2742,7 +2892,8 @@ function ReviewView({
               <button
                 key={item.id}
                 className={selected.id === item.id ? "active" : ""}
-                onClick={() => setSelectedId(item.id)}
+                disabled={Boolean(busy)}
+                onClick={() => { if (item.id !== selected.id) chooseContent(item.id); }}
               >
                 <span className="platform-mark">{(PLATFORM[item.platform] || item.platform).slice(0, 1)}</span>
                 <span className="review-item-copy">
@@ -2763,12 +2914,26 @@ function ReviewView({
               </div>
               <StatusBadge value={selected.status} />
             </div>
-            <form className="stack-form" onSubmit={save} key={`${selected.id}-${selected.version}`}>
-              <label>标题<input name="title" defaultValue={selected.title} disabled={!canEdit} /></label>
-              <label>正文<textarea className="content-textarea" name="body" defaultValue={selected.body} disabled={!canEdit} /></label>
+            <div aria-live="polite">
+              {dirty ? <p className="permission-note">有未保存修改，请先保存后再审核。</p> : null}
+              {remoteChanged ? <p className="inline-error">服务器上的版本或审核状态已变化。当前输入已保留，请核对后重新载入。</p> : null}
+            </div>
+            <Button type="button" kind="ghost" busy={busy === "reload"} disabled={Boolean(busy)} onClick={() => void reloadSaved()}>重新载入当前版本</Button>
+            <form className="stack-form" ref={formRef} onSubmit={save} key={`${selected.id}-${selected.version}-${formEpoch}`}
+              aria-busy={Boolean(busy)} onChange={(event) => {
+                const target = event.target;
+                if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
+                const name = target.name;
+                if (!["title", "body", "hashtags", "call_to_action", "layout_json"].includes(name)) return;
+                setDraftBase(selected);
+                setDirty(reviewFormDirty(event.currentTarget, selected));
+                setWarningAccepted(false);
+              }}>
+              <label>标题<input name="title" defaultValue={selected.title} disabled={!canEdit || Boolean(busy)} /></label>
+              <label>正文<textarea className="content-textarea" name="body" defaultValue={selected.body} disabled={!canEdit || Boolean(busy)} /></label>
               <div className="form-grid">
-                <label>话题标签<input name="hashtags" defaultValue={selected.hashtags.join("，")} disabled={!canEdit} /></label>
-                <label>行动引导<input name="call_to_action" defaultValue={selected.call_to_action} disabled={!canEdit} /></label>
+                <label>话题标签<input name="hashtags" defaultValue={selected.hashtags.join("，")} disabled={!canEdit || Boolean(busy)} /></label>
+                <label>行动引导<input name="call_to_action" defaultValue={selected.call_to_action} disabled={!canEdit || Boolean(busy)} /></label>
               </div>
               <label>
                 平台排版 / 镜头脚本
@@ -2776,7 +2941,7 @@ function ReviewView({
                   className="layout-textarea"
                   name="layout_json"
                   defaultValue={JSON.stringify(selected.layout_json, null, 2)}
-                  disabled={!canEdit}
+                  disabled={!canEdit || Boolean(busy)}
                 />
                 <small>结构会随内容版本保存，并用于短视频分镜或人工投放包。</small>
               </label>
@@ -2789,7 +2954,8 @@ function ReviewView({
                       {Number(selected.generation_json.revision_count || 0)} 次定向改写
                     </span>
                   </div>
-                  <b>{Number(selected.review_json.quality_score || 0).toFixed(1)} / 10</b>
+                  <b>{modelCurrent && typeof selected.review_json.quality_score === "number"
+                    ? `${selected.review_json.quality_score.toFixed(1)} / 10` : "当前版本尚无有效 AI 评分"}</b>
                 </div>
                 <div className="quality-score-grid">
                   {qualityScores.map(([name, value]) => (
@@ -2811,6 +2977,21 @@ function ReviewView({
                   <pre>{JSON.stringify(selected.review_json, null, 2)}</pre>
                 </details>
               </div>
+              {reviewWarnings.length ? (
+                <section className="review-warning" aria-label="本版本审核提示">
+                  <strong>通过前需要人工核验</strong>
+                  <ul>{reviewWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+                  <p>旧评审只作为历史证据，不代表当前稿件已通过。规则例外不会因勾选而变成自动校验通过。</p>
+                  {canReview && needsDecision ? <>
+                    <label>人工核验理由<textarea name="review_reason" value={reviewReason} maxLength={2000}
+                      onChange={(event) => { setReviewReason(event.target.value); setWarningAccepted(false); }}
+                      disabled={Boolean(busy) || dirty || remoteChanged} placeholder="说明已核对的事实、依据和接受例外的原因（至少 8 个字符）" /></label>
+                    <label className="review-warning-ack"><input type="checkbox" checked={warningAccepted}
+                      onChange={(event) => setWarningAccepted(event.target.checked)} disabled={Boolean(busy) || dirty || remoteChanged} />
+                      我已核验当前版本并明确接受上述审核提示</label>
+                  </> : null}
+                </section>
+              ) : null}
               <section className="revision-history" aria-label="内容版本历史">
                 <div className="revision-heading">
                   <strong>版本历史</strong>
@@ -2834,13 +3015,24 @@ function ReviewView({
                 ))}
                 {!revisionsLoading && !revisions.length ? <p>暂无历史版本。</p> : null}
               </section>
+              <section className="revision-history" aria-label="审核证据历史">
+                <div className="revision-heading"><strong>审核证据历史</strong><span>{evidence.length} 条记录</span></div>
+                <p>每条记录绑定当时的版本和内容指纹；旧版或未绑定的模型结果不可用于当前自动评分。</p>
+                {evidence.map((entry) => <details key={entry.id}>
+                  <summary>v{entry.content_version} · {({ generated: "生成评审", superseded: "编辑前原始证据", edited: "编辑后本地复查",
+                    before_human_review: "人工决定前原始证据", human_approve: "人工通过", human_reject: "人工驳回" } as Record<string, string>)[entry.event] || entry.event}
+                    <time>{formatDate(entry.created_at)}</time></summary>
+                  <p>当时的模型证据状态：{entry.model_binding}</p><pre>{JSON.stringify(entry.snapshot_json, null, 2)}</pre>
+                </details>)}
+                {!evidence.length ? <p>暂无已归档审核证据；旧稿将在下一次编辑或人工决定时保留原始记录。</p> : null}
+              </section>
               {canEdit || canReview ? (
                 <div className="form-actions split-actions">
-                  {canEdit ? <Button type="submit" kind="ghost" busy={busy === "save"}>保存修改</Button> : <span />}
+                  {canEdit ? <Button type="submit" kind="ghost" busy={busy === "save"} disabled={Boolean(busy) || remoteChanged || !dirty}>保存修改</Button> : <span />}
                   {canReview && needsDecision ? (
                     <div>
-                      <Button type="button" kind="danger" busy={busy === "reject"} onClick={() => void decide("reject")}>驳回</Button>
-                      <Button type="button" busy={busy === "approve"} onClick={() => void decide("approve")}>确认通过</Button>
+                      <Button type="button" kind="danger" busy={busy === "reject"} disabled={Boolean(busy) || dirty || remoteChanged} onClick={() => void decide("reject")}>驳回</Button>
+                      <Button type="button" busy={busy === "approve"} disabled={Boolean(busy) || dirty || remoteChanged || !warningsConfirmed} onClick={() => void decide("approve")}>确认通过</Button>
                     </div>
                   ) : null}
                 </div>
@@ -4487,6 +4679,21 @@ function MetricsView({
   }
 
 
+  if (data.load_error) {
+    return (
+      <>
+        <PageHeading eyebrow="Review" title="数据复盘" description="当前统计数据不可用。" />
+        <section className="panel form-panel" role="alert">
+          <p>{data.load_error}</p>
+          <Button busy={busy} onClick={async () => {
+            setBusy(true);
+            try { await onChanged(); } finally { setBusy(false); }
+          }}>重新加载指标</Button>
+        </section>
+      </>
+    );
+  }
+
   return (
     <>
       <PageHeading
@@ -4499,6 +4706,12 @@ function MetricsView({
           </Button>
         ) : undefined}
       />
+      {(data.excluded_snapshot_count || 0) > 0 ? (
+        <p className="inline-error" role="alert">
+          有 {data.excluded_snapshot_count} 条历史指标异常，原值已保留并从汇总中排除。
+          下方仅显示有效记录，数据不完整，暂不提供复盘建议；请联系管理员核对原始记录。
+        </p>
+      ) : null}
       {error ? <p className="inline-error">{error}</p> : null}
       {!canEdit ? <p className="permission-note">当前为只读权限，可查看统一口径的指标与复盘建议。</p> : null}
       {showManual && canEdit ? (
@@ -4561,7 +4774,9 @@ function MetricsView({
         ))}
       </section>
       <section className="panel">
-        {hasData ? (
+        {(data.excluded_snapshot_count || 0) > 0 ? (
+          <EmptyState title="暂不生成复盘建议" description="历史异常尚未核对，当前汇总不能代表完整结果。" />
+        ) : hasData ? (
           <div className="analysis-copy">
             <p className="eyebrow">当前结果</p>
             <h2>基于 {data.sample_count} 条指标快照的下一轮建议</h2>

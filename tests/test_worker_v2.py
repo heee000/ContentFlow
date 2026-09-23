@@ -1680,6 +1680,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             json={
                 "decision": "approve",
                 "reason": "事实与平台格式已确认",
+                "acknowledge_review_warnings": True,
                 "expected_version": content["version"],
             },
         )

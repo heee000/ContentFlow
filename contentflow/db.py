@@ -43,8 +43,10 @@ def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
     cursor.close()
 
 
-engine = build_engine()
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+# Importing models/tools must not read deployment settings or initialize a DB.
+# Entrypoints configure this explicitly; an unbound session fails closed.
+engine: Engine | None = None
+SessionLocal = sessionmaker(expire_on_commit=False, future=True)
 
 
 def configure_database(database_url: str) -> Engine:
@@ -57,7 +59,10 @@ def configure_database(database_url: str) -> Engine:
 def create_schema(target_engine: Engine | None = None) -> None:
     from . import entities  # noqa: F401
 
-    Base.metadata.create_all(target_engine or engine)
+    selected_engine = target_engine if target_engine is not None else engine
+    if selected_engine is None:
+        raise RuntimeError("Database must be explicitly configured before schema creation")
+    Base.metadata.create_all(selected_engine)
 
 
 @contextmanager

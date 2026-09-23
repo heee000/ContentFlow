@@ -44,7 +44,7 @@ services:
         format: raw
     environment: *app-environment
     # Migration runs once in an explicit maintenance step before API/Worker.
-    command: ["uvicorn", "contentflow.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "contentflow.api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     networks: [data, app, outbound]
     depends_on:
       postgres:

@@ -174,7 +174,7 @@ class ProviderInvocationLedgerTest(unittest.TestCase):
         with self.Session() as session:
             recorder = self._recorder(session, provider)
             with provider_job_context(session.get(Job, self.job_id)):
-                with patch("contentflow.providers.urllib.request.urlopen", side_effect=error) as send:
+                with patch("contentflow.providers.open_model_request", side_effect=error) as send:
                     with self.assertRaises(ProviderHTTPError):
                         recorder.complete_json("plan", {"private-input": "secret"})
         self.assertEqual(send.call_count, 1)

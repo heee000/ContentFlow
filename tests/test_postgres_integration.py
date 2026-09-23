@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import math
 import multiprocessing
 import os
 import re
@@ -26,7 +27,7 @@ import pytest
 from sqlalchemy import create_engine, event, inspect, select, text, update
 from PIL import Image
 from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.datastructures import UploadFile
 
@@ -41,8 +42,11 @@ from contentflow.entities import (
     Campaign,
     ChannelConnection,
     ContentItem,
+    ContentReviewEvidence,
+    ContentRevision,
     Job,
     JobManualReview,
+    MetricSnapshot,
     PublishJob,
     PublishEvidence,
     StorageObjectAllocation,
@@ -61,7 +65,10 @@ from contentflow.routers.publish_evidence import upload_publish_evidence
 from contentflow.routers.assets import change_asset_source, retry_asset, select_asset_candidate
 from contentflow.routers.publishing import preview_publish, schedule_publish
 from contentflow.routers import publishing as publishing_router
-from contentflow.schemas import AssetSelectionRequest, AssetSourceChangeRequest, PublishPreviewRequest, PublishScheduleRequest
+from contentflow.routers.contents import review_content, update_content
+from contentflow.routers.metrics import metrics_summary
+from contentflow.review_evidence import capture_review, digest, local_review, resolve_brief
+from contentflow.schemas import AssetSelectionRequest, AssetSourceChangeRequest, ContentUpdate, PublishPreviewRequest, PublishScheduleRequest, ReviewDecision
 from contentflow.security import hash_rate_limit_key
 from contentflow.settings import Settings
 from contentflow.storage_ledger import (
@@ -438,6 +445,104 @@ def _create_publish_fixture(
             "publish_job_id": publish_job.id,
             "user_id": user.id,
         }
+
+
+@pytest.mark.parametrize("first,second", [
+    ("edit", "approve"), ("approve", "edit"),
+    ("approve", "reject"), ("reject", "approve"),
+])
+def test_postgres_review_and_edit_recheck_after_lock_wait(
+    postgres_harness: PostgresHarness, first: str, second: str,
+):
+    fixture = _create_publish_fixture(postgres_harness, status="cancelled", external_id=None)
+    with postgres_harness.sessions() as session:
+        publish = session.get(PublishJob, fixture["publish_job_id"])
+        content = session.get(ContentItem, publish.content_item_id)
+        content_id = content.id
+        campaign = session.get(Campaign, content.campaign_id)
+        campaign.brief = {"call_to_action": "Read the details"}
+        content.body = "ContentFlow. Read the details."
+        content.status = "needs_review"
+        content.approved_by = content.approved_at = None
+        content.review_json = local_review(content, resolve_brief(session, content), generated_model={
+            "model_review": {"passed": True, "risk_level": "low"}, "quality_score": 9,
+        })
+        capture_review(session, content, "generated")
+        session.commit()
+    principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
+    first_locked, second_loaded, second_lock_requested = (
+        threading.Event(), threading.Event(), threading.Event(),
+    )
+
+    def mutate(session, action):
+        if action == "edit":
+            return update_content(content_id, ContentUpdate(expected_version=1,
+                body="ContentFlow. Read the details. Revised saved version."),
+                principal, session, postgres_harness.settings)
+        return review_content(content_id, ReviewDecision(expected_version=1, decision=action),
+            principal, session, postgres_harness.settings)
+
+    def winner():
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+            session.scalar(select(ContentItem).where(ContentItem.id == content_id).with_for_update())
+            first_locked.set()
+            assert second_loaded.wait(timeout=10)
+            assert second_lock_requested.wait(timeout=10)
+            item = mutate(session, first)
+            session.commit()
+            return item.version
+
+    def follower():
+        assert first_locked.wait(timeout=10)
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+            # Keep a strong reference: the ORM identity map must not hide the
+            # freshly committed state after waiting for the other transaction.
+            stale = session.get(ContentItem, content_id)
+            assert (stale.version, stale.status) == (1, "needs_review")
+            second_loaded.set()
+
+            def observe_lock(state):
+                if getattr(state.statement, "_for_update_arg", None) is not None and any(
+                    column.get("entity") is ContentItem
+                    for column in getattr(state.statement, "column_descriptions", [])
+                ):
+                    second_lock_requested.set()
+
+            event.listen(session, "do_orm_execute", observe_lock)
+            try:
+                mutate(session, second)
+                session.commit()
+                return 200
+            except HTTPException as error:
+                session.rollback()
+                assert error.status_code == 409
+                return 409
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winning, following = pool.submit(winner), pool.submit(follower)
+        assert winning.result(timeout=25) == (2 if first == "edit" else 1)
+        assert following.result(timeout=25) == (200 if second == "edit" else 409)
+    with postgres_harness.sessions() as session:
+        item = session.get(ContentItem, content_id)
+        edited = "edit" in {first, second}
+        expected_status = "needs_review" if edited else ("approved" if first == "approve" else "rejected")
+        assert (item.version, item.status) == (2 if edited else 1, expected_status)
+        assert (item.approved_by is not None) == (expected_status == "approved")
+        evidence = list(session.scalars(select(ContentReviewEvidence).where(
+            ContentReviewEvidence.content_item_id == content_id)))
+        human = [row for row in evidence if row.event.startswith("human_")]
+        assert len(human) == (0 if first == "edit" else 1)
+        for row in human:
+            assert row.content_version == 1
+            assert row.snapshot_json["human_content_version"] == 1
+            assert row.snapshot_json["human_content_sha256"] == row.content_sha256
+        assert len(evidence) == 1 + (2 if first != "edit" else 0) + (2 if edited else 0)
+        assert all(row.snapshot_sha256 == digest(row.snapshot_json) for row in evidence)
+        revisions = list(session.scalars(select(ContentRevision).where(ContentRevision.content_item_id == content_id)))
+        assert [row.version for row in revisions] == ([2] if edited else [])
+        assert list(session.scalars(select(Job).where(Job.workspace_id == fixture["workspace_id"]))) == []
 
 
 def test_postgres_serializes_asset_retry_and_source_change(postgres_harness: PostgresHarness):
@@ -819,6 +924,58 @@ def test_postgres_driver_sqlstate_classification(postgres_harness: PostgresHarne
         assert f"sqlstate={sqlstate}" in summary
         assert "contentflow_missing_sqlstate_probe" not in summary
         assert "contentflow_sqlstate_probe" not in summary
+
+
+@pytest.mark.parametrize("field", ["impressions", "clicks", "likes", "comments", "shares"])
+def test_postgres_metric_bounds_and_explicit_quarantine(postgres_harness: PostgresHarness, field):
+    fixture = _create_publish_fixture(postgres_harness, status="published", external_id="TEST-ONLY")
+    with postgres_harness.sessions() as session:
+        for value in (-1, float("inf"), float("-inf"), float("nan"), 1e100):
+            with pytest.raises(IntegrityError):
+                with session.begin_nested():
+                    session.add(MetricSnapshot(workspace_id=fixture["workspace_id"],
+                        publish_job_id=fixture["publish_job_id"], **{field: value}))
+                    session.flush()
+        captured_at = datetime.now(timezone.utc)
+        session.add(MetricSnapshot(workspace_id=fixture["workspace_id"],
+            publish_job_id=fixture["publish_job_id"], impressions=100, captured_at=captured_at))
+        session.add(MetricSnapshot(workspace_id=fixture["workspace_id"],
+            publish_job_id=fixture["publish_job_id"], impressions=float("nan"),
+            captured_at=captured_at + timedelta(seconds=1), validation_status="quarantined"))
+        session.flush()
+        summary = metrics_summary(SimpleNamespace(workspace_id=fixture["workspace_id"]), session, campaign_id=None)
+        assert summary["sample_count"] == 1
+        assert summary["impressions"] == 100
+        assert summary["excluded_snapshot_count"] == 1
+        assert summary["data_complete"] is False
+        assert summary["recommendations"] == []
+
+
+def test_postgres_legacy_metric_migration_preserves_nonfinite_values(postgres_harness: PostgresHarness):
+    fixture = _create_publish_fixture(postgres_harness, status="published", external_id="TEST-ONLY")
+    # This schema round trip is restricted to the harness-created disposable
+    # database, inside a transaction rolled back even on assertion failure.
+    with postgres_harness.engine.connect() as connection:
+        transaction = connection.begin()
+        config = Config(str(PROJECT_ROOT / "alembic.ini"))
+        config.attributes["connection"] = connection
+        try:
+            command.downgrade(config, "b6c7d8e9f0a1")
+            samples = [(str(uuid.uuid4()), value) for value in (float("inf"), float("nan"), -1, 100)]
+            for offset, (row_id, value) in enumerate(samples):
+                connection.execute(text("INSERT INTO metric_snapshots (id, workspace_id, publish_job_id, captured_at, "
+                    "impressions, clicks, likes, comments, shares, raw_json) VALUES "
+                    "(:id, :workspace, :publish, :captured, :value, 0, 0, 0, 0, '{}')"),
+                    {"id": row_id, "workspace": fixture["workspace_id"], "publish": fixture["publish_job_id"],
+                     "captured": datetime.now(timezone.utc) + timedelta(seconds=offset), "value": value})
+            command.upgrade(config, "head")
+            for row_id, original in samples:
+                row = connection.execute(text("SELECT impressions, validation_status FROM metric_snapshots WHERE id=:id"),
+                    {"id": row_id}).one()
+                assert math.isnan(row.impressions) if math.isnan(original) else row.impressions == original
+                assert row.validation_status == ("valid" if original == 100 else "quarantined")
+        finally:
+            transaction.rollback()
 
 
 def test_postgres_migrations_reach_head(postgres_harness: PostgresHarness):

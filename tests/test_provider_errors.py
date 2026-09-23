@@ -42,7 +42,7 @@ def test_http_status_is_preserved_without_upstream_body_or_url(status):
         {"x-request-id": "known-request"}, io.BytesIO(SECRET.encode()),
     )
     call_recorder = recorder()
-    with patch("contentflow.providers.urllib.request.urlopen", side_effect=error) as send:
+    with patch("contentflow.providers.open_model_request", side_effect=error) as send:
         invocation = failed_call(call_recorder, ProviderHTTPError)
     assert send.call_count == 1
     assert invocation["error_type"] == f"ProviderHTTPError:{status}"
@@ -61,7 +61,7 @@ def test_http_status_is_preserved_without_upstream_body_or_url(status):
     (urllib.error.URLError(SECRET), "network"),
 ])
 def test_network_errors_have_bounded_non_secret_categories(error, kind):
-    with patch("contentflow.providers.urllib.request.urlopen", side_effect=error) as send:
+    with patch("contentflow.providers.open_model_request", side_effect=error) as send:
         invocation = failed_call(recorder(), ProviderNetworkError)
     assert send.call_count == 1
     assert invocation["error_type"] == f"ProviderNetworkError:{kind}"
@@ -82,7 +82,7 @@ def test_invalid_response_is_classified_and_header_id_survives_parsing(body, kin
     response.read.return_value = body
     response.headers = {"x-request-id": "response-header-id"}
     call_recorder = recorder()
-    with patch("contentflow.providers.urllib.request.urlopen") as send:
+    with patch("contentflow.providers.open_model_request") as send:
         send.return_value.__enter__.return_value = response
         invocation = failed_call(call_recorder, ProviderResponseError)
     assert send.call_count == 1
@@ -98,7 +98,7 @@ def test_usage_is_preserved_when_model_content_is_not_json():
         "choices": [{"message": {"content": SECRET}}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
     }).encode()
-    with patch("contentflow.providers.urllib.request.urlopen") as send:
+    with patch("contentflow.providers.open_model_request") as send:
         send.return_value.__enter__.return_value = response
         invocation = failed_call(recorder(), ProviderResponseError)
     assert invocation["usage"]["total_tokens"] == 15

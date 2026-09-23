@@ -13,12 +13,68 @@ from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
 
 from contentflow.audit import verify_audit_chain
-from contentflow.entities import Asset, AuditLog, KnowledgeDocument, User, Workspace
+from contentflow.entities import Asset, AuditLog, Campaign, ContentItem, ContentReviewEvidence, KnowledgeDocument, User, WorkflowRun, Workspace
 from contentflow.migrate import HEAD_REVISION, upgrade_database
 from contentflow.settings import Settings
 
 
 class MigrationTest(unittest.TestCase):
+    def test_review_evidence_upgrade_preserves_legacy_content_and_downgrades(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = create_engine(f"sqlite:///{(Path(temp_dir) / 'review-upgrade.db').as_posix()}")
+            config = Config("alembic.ini")
+
+            def migrate(operation, revision):
+                with engine.begin() as connection:
+                    config.attributes["connection"] = connection
+                    operation(config, revision)
+
+            try:
+                migrate(command.upgrade, "a5b6c7d8e9f0")
+                legacy = {"model_review": {"passed": True, "risk_level": "low", "issues": ["历史原文"]},
+                    "quality_score": 9, "human_reason": "保留原有决定"}
+                with Session(engine) as session:
+                    user = User(email="review-upgrade@example.com", password_hash="test-only", display_name="Upgrade")
+                    session.add(user)
+                    session.flush()
+                    workspace = Workspace(name="Upgrade", slug="review-upgrade", created_by=user.id)
+                    session.add(workspace)
+                    session.flush()
+                    campaign = Campaign(workspace_id=workspace.id, created_by=user.id, name="Legacy",
+                        product_name="Product", objective="Preserve legacy evidence", audience="Tests", platforms=["wechat"])
+                    session.add(campaign)
+                    session.flush()
+                    run = WorkflowRun(workspace_id=workspace.id, campaign_id=campaign.id, trace_id="legacy-review-upgrade")
+                    session.add(run)
+                    session.flush()
+                    item = ContentItem(workspace_id=workspace.id, campaign_id=campaign.id, run_id=run.id,
+                        platform="wechat", title="旧稿", body="原文不应因迁移改变", status="approved", version=3,
+                        approved_by=user.id, approved_at=datetime.now(timezone.utc), review_json=legacy)
+                    session.add(item)
+                    session.commit()
+                    content_id = item.id
+                    before = {key: getattr(item, key) for key in (
+                        "title", "body", "version", "status", "approved_by", "review_json")}
+                migrate(command.upgrade, "head")
+                self.assertIn("content_review_evidence", inspect(engine).get_table_names())
+                index = next(entry for entry in inspect(engine).get_indexes("content_review_evidence")
+                    if entry["name"] == "ix_content_review_evidence_page")
+                self.assertEqual(index["column_names"], ["workspace_id", "content_item_id", "created_at", "id"])
+                with Session(engine) as session:
+                    self.assertEqual(list(session.scalars(select(ContentReviewEvidence))), [])
+                    item = session.get(ContentItem, content_id)
+                    self.assertEqual({key: getattr(item, key) for key in before}, before)
+                    self.assertNotIn("model_content_version", item.review_json)
+                # Downgrade is exercised only in this disposable database. In
+                # production it drops archived evidence and needs a backup plan.
+                migrate(command.downgrade, "a5b6c7d8e9f0")
+                self.assertNotIn("content_review_evidence", inspect(engine).get_table_names())
+                with Session(engine) as session:
+                    item = session.get(ContentItem, content_id)
+                    self.assertEqual({key: getattr(item, key) for key in before}, before)
+            finally:
+                engine.dispose()
+
     def test_asset_content_version_migration_backfills_and_downgrades(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             database = Path(temp_dir) / "asset-version.db"
