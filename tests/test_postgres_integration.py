@@ -446,6 +446,7 @@ def test_postgres_serializes_asset_retry_and_source_change(postgres_harness: Pos
         asset.status = "failed"
         asset.provider = "mock"
         asset_id = asset.id
+        original_uri = asset.storage_uri
         session.commit()
     principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
     barrier = Barrier(2)
@@ -472,8 +473,20 @@ def test_postgres_serializes_asset_retry_and_source_change(postgres_harness: Pos
     assert sorted(results) == ["conflict", "queued"]
     with postgres_harness.sessions() as session:
         jobs = list(session.scalars(select(Job).where(Job.workspace_id == fixture["workspace_id"])))
-        assert len(jobs) == 1
-        assert jobs[0].job_type == "asset.generate"
+        generation_jobs = [job for job in jobs if job.job_type == "asset.generate"]
+        cleanup_jobs = [job for job in jobs if job.job_type == "storage.delete"]
+        assert len(generation_jobs) == 1
+        assert generation_jobs[0].status == "queued"
+        assert generation_jobs[0].payload_json["asset_id"] == asset_id
+        # A real managed object is now part of the fixture. If source-change
+        # wins, its old-object cleanup is expected, not a second generation.
+        assert len(cleanup_jobs) == int(results[1] == "queued")
+        assert len(jobs) == len(generation_jobs) + len(cleanup_jobs)
+        for cleanup in cleanup_jobs:
+            allocation = session.get(StorageObjectAllocation, cleanup.payload_json["allocation_id"])
+            assert allocation.storage_uri == original_uri
+            assert allocation.owner_type == "asset"
+            assert allocation.owner_id == asset_id
         assert session.get(Asset, asset_id).status == "queued"
 
 
