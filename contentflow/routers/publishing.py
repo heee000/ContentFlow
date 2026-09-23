@@ -4,12 +4,12 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import Response
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..atomic_insert import insert_on_unique_key
 from ..audit import record_audit
 from ..db import get_db
 from ..dependencies import (
@@ -241,6 +241,43 @@ def existing_publication(session: Session, *, workspace_id: str, request_id: str
     if len(rows) != 1 or rows[0].request_json.get("confirmation_request_sha256") != digest:
         raise PublishManifestConflict("该发布操作编号已用于不同请求或旧任务，请先核对原任务；不要重复发布",
             code="publish_intent_conflict")
+    require_dispatch_receipt(session, rows[0])
+    return rows[0]
+
+
+def require_dispatch_receipt(session: Session, publication: PublishJob) -> None:
+    # Older SQLite acceptances may have committed a publication without its
+    # queue row. Never silently return success or repair/replay external work.
+    if publication.status not in {"queued", "scheduled"}:
+        return
+    job = session.scalar(select(Job).where(
+        Job.idempotency_key == f"publish.dispatch:{publication.id}"))
+    if (job is None or job.workspace_id != publication.workspace_id
+        or job.job_type != "publish.dispatch"
+        or not isinstance(job.payload_json, dict)
+        or job.payload_json.get("publish_job_id") != publication.id):
+        raise PublishManifestConflict(
+            "原发布接受记录不完整，已停止重试；请保留操作编号并联系管理员核对，系统不会自动补发",
+            code="publish_receipt_incomplete")
+
+
+@router.get("/intents/{request_id}", response_model=PublishJobResponse)
+def lookup_publication(
+    request_id: Annotated[str, Path(pattern=r"^[A-Za-z0-9._:-]{8,80}$")],
+    principal: CurrentPrincipal,
+    session: Db,
+):
+    # Read-only recovery must never require a fresh preview or enqueue work.
+    rows = list(session.scalars(select(PublishJob).where(
+        PublishJob.workspace_id == principal.workspace_id,
+        PublishJob.request_json["request_id"].as_string() == request_id,
+    ).limit(2)))
+    if not rows:
+        raise HTTPException(status_code=404, detail="尚未找到该操作回执；原请求仍可能处理中，请保留编号，不要新建重复发布")
+    if len(rows) != 1:
+        raise PublishManifestConflict("该编号存在多个历史任务，请联系管理员核对，不要重复发布",
+            code="publish_intent_conflict")
+    require_dispatch_receipt(session, rows[0])
     return rows[0]
 
 
@@ -272,7 +309,7 @@ def schedule_publish(payload: PublishScheduleRequest, principal: Reviewer, sessi
     fingerprint = publication_fingerprint(manifest, intent, delivery_mode)
     verify_publication_preview(payload.preview_token, fingerprint, workspace_id=principal.workspace_id,
         user_id=principal.user_id, secret=settings.secret_key)
-    publish_job = PublishJob(
+    publication_values = dict(
         workspace_id=principal.workspace_id,
         content_item_id=content.id,
         channel_id=channel.id,
@@ -291,16 +328,17 @@ def schedule_publish(payload: PublishScheduleRequest, principal: Reviewer, sessi
             "confirmation_request_sha256": digest,
         },
     )
-    try:
-        with session.begin_nested():
-            session.add(publish_job)
-            session.flush()
-    except IntegrityError:
+    publication_id = insert_on_unique_key(
+        session, PublishJob.__table__, values=publication_values,
+        key="idempotency_key")
+    if publication_id is None:
         existing = existing_publication(session, workspace_id=principal.workspace_id,
             request_id=payload.request_id, key=idempotency_key, digest=digest)
         if existing is not None:
             return existing
-        raise
+        raise PublishManifestConflict("发布接受冲突但找不到原回执，请保留编号并联系管理员核对",
+            code="publish_receipt_incomplete")
+    publish_job = session.get(PublishJob, publication_id)
     enqueue_job(
         session,
         job_type="publish.dispatch",

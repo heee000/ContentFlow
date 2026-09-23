@@ -4,16 +4,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiBlob } from "@/lib/contentflow-api";
 
-export type PublishIntent = {
-  content_item_id: string;
-  channel_id: string;
-  delivery_mode: string;
-  publish_now: boolean;
-  scheduled_at?: string;
-  request_id: string;
-  preview_token: string;
-};
-
 export type PublicationPreviewData = {
   fingerprint: string; preview_token: string; content_version: number;
   content_id: string; campaign_id: string; title: string; platform: string;
@@ -22,16 +12,6 @@ export type PublicationPreviewData = {
   document: { format: string; text: string; behavior: string; fields: Record<string, unknown> };
   assets: { id: string; kind: string; mime_type: string; size_bytes: number; checksum: string; used_in_delivery: boolean }[];
 };
-
-export function readPendingPublication(key: string): PublishIntent | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const value = JSON.parse(sessionStorage.getItem(key) || "null");
-    if (value && typeof value.request_id === "string" && typeof value.preview_token === "string"
-      && typeof value.content_item_id === "string" && typeof value.channel_id === "string") return value;
-  } catch { /* No usable saved receipt; normal submission persists before sending. */ }
-  return null;
-}
 
 function VerifiedAsset({ asset, onState }: {
   asset: PublicationPreviewData["assets"][number];

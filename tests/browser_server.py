@@ -31,6 +31,18 @@ def main():
             "storage-denied",
             "asset-failure",
             "scope",
+            "corrupt-receipt",
+            "denied-read",
+            "silent-write",
+            "mismatch-receipt",
+            "incomplete-receipt",
+            "late-receipt",
+            "late-original",
+            "late-new",
+            "clock-utc",
+            "clock-shanghai",
+            "clock-newyork-summer",
+            "clock-newyork-winter",
         ]:
             identifiers = fixture._create_publish_fixture(status="cancelled")
             image = BytesIO()

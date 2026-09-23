@@ -10,6 +10,7 @@ import urllib.request
 from typing import Any, Protocol
 
 from .prompts import PROMPTS
+from .execution_fence import assert_execution_active
 
 
 class Provider(Protocol):
@@ -68,6 +69,7 @@ class _NoModelRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def open_model_request(request: urllib.request.Request, *, timeout: int):
+    assert_execution_active()
     # Per-call opener: no mutation of the process-wide proxy/TLS/urllib policy.
     return urllib.request.build_opener(_NoModelRedirects()).open(request, timeout=timeout)
 

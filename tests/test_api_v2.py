@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from generation_helpers import request_run
+
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -98,7 +100,7 @@ class ApiV2Test(unittest.TestCase):
             updated.json()["brief"]["product_facts"],
             ["支持多地点路线规划"],
         )
-        archived_run = self.client.post(
+        archived_run = request_run(self.client,
             f"/api/v1/campaigns/{campaign_id}/runs",
             headers=self.headers,
             json={},
@@ -112,7 +114,7 @@ class ApiV2Test(unittest.TestCase):
         )
         self.assertEqual(restored.status_code, 200, restored.text)
 
-        run = self.client.post(
+        run = request_run(self.client,
             f"/api/v1/campaigns/{campaign_id}/runs",
             headers=self.headers,
             json={},
@@ -120,7 +122,7 @@ class ApiV2Test(unittest.TestCase):
         self.assertEqual(run.status_code, 202, run.text)
         self.assertEqual(run.json()["status"], "queued")
 
-        second_run = self.client.post(
+        second_run = request_run(self.client,
             f"/api/v1/campaigns/{campaign_id}/runs",
             headers=self.headers,
             json={},

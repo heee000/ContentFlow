@@ -49,6 +49,7 @@ from .entities import (
     WorkerNode,
 )
 from .embeddings import build_embedding_provider
+from .execution_fence import ExecutionFence, execution_scope
 from .image_search import build_image_search_provider
 from .job_recovery import (
     JOB_RECOVERY_POLICIES,
@@ -287,11 +288,14 @@ class LeaseHeartbeat:
         worker_id: str,
         attempt: int,
         lease_seconds: int,
+        lease_token: str,
     ):
         self.session_factory = session_factory
         self.job_id = job_id
         self.worker_id = worker_id
         self.attempt = attempt
+        self.lease_seconds = lease_seconds
+        self.lease_token = lease_token
         self.interval_seconds = max(0.25, min(30.0, lease_seconds / 3))
         self._stop = threading.Event()
         self._lost = threading.Event()
@@ -322,6 +326,8 @@ class LeaseHeartbeat:
                         job_id=self.job_id,
                         worker_id=self.worker_id,
                         attempt=self.attempt,
+                        lease_seconds=self.lease_seconds,
+                        lease_token=self.lease_token,
                     )
                     if not renewed:
                         session.rollback()
@@ -2108,9 +2114,8 @@ class Worker:
                 if self.stop_requested:
                     session.rollback()
                     return False
+                job_id, attempt, lease_token = job.id, job.attempts, job.lease_token
                 session.commit()
-                job_id = job.id
-                attempt = job.attempts
 
         if expired_job_refs:
             for expired_job_id, job_type, recovery_policy in expired_job_refs:
@@ -2135,6 +2140,7 @@ class Worker:
             if job is None:
                 return False
             job_type = job.job_type
+            fence = None
             try:
                 handler = self.handlers.get(job.job_type)
                 if handler is None:
@@ -2145,13 +2151,24 @@ class Worker:
                     worker_id=self.worker_id,
                     attempt=attempt,
                     lease_seconds=self.settings.worker_lease_seconds,
+                    lease_token=lease_token,
                 ) as heartbeat:
-                    with provider_job_context(job):
+                    fence = ExecutionFence(
+                        bind=session.get_bind(), job_id=job_id,
+                        workspace_id=job.workspace_id, worker_id=self.worker_id,
+                        attempt=attempt, lease_seconds=self.settings.worker_lease_seconds,
+                        lease_token=lease_token,
+                        heartbeat_lost=lambda: heartbeat.lost,
+                    )
+                    with execution_scope(fence), provider_job_context(job):
                         result = handler(
                             session,
                             dict(job.payload_json),
                             self.settings,
                         )
+                        fence.fence_write(session)
+                        session.flush()
+                        fence.check()
                 if heartbeat.lost:
                     raise JobLeaseLost(
                         f"Job lease heartbeat was lost: id={job_id} "
@@ -2163,6 +2180,8 @@ class Worker:
                     result,
                     worker_id=self.worker_id,
                     attempt=attempt,
+                    lease_token=lease_token,
+                    lease_seconds=self.settings.worker_lease_seconds,
                 )
                 session.commit()
                 logger.info("job succeeded id=%s type=%s", job.id, job.job_type)
@@ -2179,6 +2198,15 @@ class Worker:
                 if isinstance(error, JobLeaseLost):
                     logger.error("stale worker stopped id=%s error=%s", job_id, error)
                     return True
+                if fence is not None:
+                    try:
+                        # Failure is a domain write too. Serialize before any
+                        # failure propagation, including errors wrapping a lost lease.
+                        fence.fence_write(session)
+                    except JobLeaseLost:
+                        session.rollback()
+                        logger.error("stale worker failure ignored id=%s", job_id)
+                        return True
                 job = session.get(Job, job_id)
                 ai_provenance = getattr(error, "ai_provenance", None)
                 persisted_error: Exception | str = error
@@ -2252,6 +2280,8 @@ class Worker:
                             persisted_error,
                             worker_id=self.worker_id,
                             attempt=attempt,
+                            lease_token=lease_token,
+                            lease_seconds=self.settings.worker_lease_seconds,
                             force_terminal=isinstance(
                                 error,
                                 (

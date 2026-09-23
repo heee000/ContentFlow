@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from generation_helpers import request_run
+
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -93,7 +95,7 @@ class ObservabilityTest(unittest.TestCase):
         )
         self.assertEqual(campaign.status_code, 201, campaign.text)
         campaign_id = campaign.json()["id"]
-        run = self.client.post(
+        run = request_run(self.client,
             f"/api/v1/campaigns/{campaign_id}/runs",
             headers=self.headers,
             json={},

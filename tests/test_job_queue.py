@@ -85,6 +85,7 @@ class JobQueueLeaseTest(unittest.TestCase):
             )
             self.assertIsNotNone(job)
             attempt = job.attempts
+            self.claim_token = job.lease_token
             session.commit()
         return job_id, attempt
 
@@ -118,6 +119,7 @@ class JobQueueLeaseTest(unittest.TestCase):
                 job_id=job_id,
                 worker_id="worker-a",
                 attempt=attempt,
+                lease_token=self.claim_token, lease_seconds=30,
             )
             self.assertTrue(renewed)
             session.commit()
@@ -136,6 +138,7 @@ class JobQueueLeaseTest(unittest.TestCase):
                     job_id=job_id,
                     worker_id="worker-b",
                     attempt=attempt,
+                    lease_token=self.claim_token, lease_seconds=30,
                 )
             )
             session.rollback()
@@ -295,6 +298,7 @@ class JobQueueLeaseTest(unittest.TestCase):
             worker_id="worker-a",
             attempt=attempt,
             lease_seconds=3,
+            lease_token=self.claim_token,
         ) as heartbeat:
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
@@ -891,6 +895,7 @@ class JobQueueLeaseTest(unittest.TestCase):
                     {"unsafe": True},
                     worker_id="worker-a",
                     attempt=attempt,
+                    lease_token=self.claim_token, lease_seconds=30,
                 )
             session.rollback()
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from generation_helpers import request_run
+
 import json
 import tempfile
 import unittest
@@ -477,13 +479,13 @@ class PromptGovernanceTest(unittest.TestCase):
             },
         )
         self.assertEqual(campaign.status_code, 201, campaign.text)
-        invalid_provider = self.client.post(
+        invalid_provider = request_run(self.client,
             f"/api/v1/campaigns/{campaign.json()['id']}/runs",
             headers=self.owner_headers,
             json={"provider": "x" * 81},
         )
         self.assertEqual(invalid_provider.status_code, 422, invalid_provider.text)
-        blocked = self.client.post(
+        blocked = request_run(self.client,
             f"/api/v1/campaigns/{campaign.json()['id']}/runs",
             headers=self.owner_headers,
             json={"provider": "mock"},

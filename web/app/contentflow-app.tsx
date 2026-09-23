@@ -24,7 +24,11 @@ import {
   createBrowserWorkspace, logoutBrowserSession, restoreBrowserSession,
   SESSION_CONTEXT_EVENT, switchBrowserWorkspace, type BrowserSession,
 } from "@/lib/browser-session";
-import { PublicationPreview, PublicationPreviewData, PublishIntent, readPendingPublication } from "@/components/publication-preview";
+import { PublicationPreview, PublicationPreviewData } from "@/components/publication-preview";
+import { PublicationRequestNotice, usePublicationRequest } from "@/components/publication-request";
+import type { PublishIntent } from "@/lib/publication-intents";
+import { GenerationRequestNotice, useGenerationRequest } from "@/components/generation-request";
+import { generationScope } from "@/lib/generation-intents";
 
 type View =
   | "dashboard"
@@ -86,6 +90,7 @@ type WorkflowRun = {
   current_stage: string;
   provider: string;
   trace_id: string;
+  request_json?: { generation_request_id?: string };
   result_json: { ai_provenance?: AIProvenance };
   error: string | null;
   completed_at: string | null;
@@ -188,6 +193,7 @@ type Channel = {
 };
 
 type PublishJob = {
+  request_id: string | null;
   id: string;
   content_item_id: string;
   channel_id: string;
@@ -1825,6 +1831,8 @@ export function ContentFlowApp() {
           ) : null}
           {view === "campaigns" ? (
             <CampaignsView
+              key={generationScope(getApiBase(), session.user.id, session.workspace.id)}
+              generationScopeKey={generationScope(getApiBase(), session.user.id, session.workspace.id)}
               campaigns={scopedCampaigns}
               runs={scopedRuns}
               styleSkills={data.styleSkills}
@@ -2156,11 +2164,16 @@ function RunEvidence({ run }: { run: WorkflowRun }) {
         <span><small>Token 记录</small><b>{usageLabel}</b></span>
       </div>
       {run.error ? <p className="run-error" role="alert">最近错误：{run.error}</p> : null}
+      <details><summary>任务与操作编号</summary>
+        <p>任务编号：<code>{run.id}</code></p>
+        <p>操作编号：<code>{run.request_json?.generation_request_id || "旧批次，无生成意图回执"}</code></p>
+      </details>
     </article>
   );
 }
 
 function CampaignsView({
+  generationScopeKey,
   campaigns,
   runs,
   styleSkills,
@@ -2169,6 +2182,7 @@ function CampaignsView({
   onChanged,
   flash,
 }: {
+  generationScopeKey: string;
   campaigns: Campaign[];
   runs: WorkflowRun[];
   styleSkills: StyleSkill[];
@@ -2186,6 +2200,12 @@ function CampaignsView({
   const [imageSource, setImageSource] = useState<MediaSource | "">("");
 
   const canEdit = roleAtLeast(role, "editor");
+
+  const generation = useGenerationRequest(generationScopeKey, async (runId, campaignId) => {
+    flash(`生成任务已确认：${runId}；原编号核对不会创建重复任务`);
+    setExpandedCampaignId(campaignId);
+    await onChanged();
+  });
 
   function closeForm() {
     setShowForm(false);
@@ -2317,21 +2337,7 @@ function CampaignsView({
   }
 
   async function run(campaign: Campaign) {
-    setBusyId(`run-${campaign.id}`);
-    setError("");
-    try {
-      await api<WorkflowRun>(`/campaigns/${campaign.id}/runs`, {
-        method: "POST",
-        body: {},
-      });
-      flash("内容任务已入队；页面会持续显示真实生成阶段");
-      setExpandedCampaignId(campaign.id);
-      await onChanged();
-    } catch (caught) {
-      setError(messageOf(caught));
-    } finally {
-      setBusyId("");
-    }
+    await generation.start(campaign);
   }
 
 
@@ -2356,6 +2362,7 @@ function CampaignsView({
           </div>
         ) : undefined}
       />
+      <GenerationRequestNotice request={generation} />
       {error ? <p className="inline-error">{error}</p> : null}
       {!canEdit ? (
         <p className="permission-note">当前为只读权限，可查看活动与生成状态。</p>
@@ -2603,9 +2610,9 @@ function CampaignsView({
                     <>
                       <Button
                         kind="secondary"
-                        busy={busyId === `run-${campaign.id}` || Boolean(activeCampaignRun(campaign.id))}
+                        busy={(generation.busy && generation.pending?.campaignId === campaign.id) || Boolean(activeCampaignRun(campaign.id))}
                         onClick={() => void run(campaign)}
-                        disabled={campaign.status === "archived" || Boolean(activeCampaignRun(campaign.id))}
+                        disabled={generation.blocked || campaign.status === "archived" || Boolean(activeCampaignRun(campaign.id))}
                       >
                         {activeCampaignRun(campaign.id) ? "生成进行中…" : "生成内容"}
                       </Button>
@@ -3777,9 +3784,8 @@ function PublishingView({
   const approved = contents.filter((item) => item.status === "approved");
   const [creating, setCreating] = useState(false);
   const receiptKey = `contentflow-publication:${getApiBase()}:${scopeKey}`;
-  const [pending, setPending] = useState<PublishIntent | null>(() => readPendingPublication(receiptKey));
   const [prepared, setPrepared] = useState<{ preview: PublicationPreviewData; intent: PublishIntent } | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [previewBusy, setPreviewBusy] = useState(false);
   const [pulling, setPulling] = useState("");
   const [cancelling, setCancelling] = useState("");
   const [reconciling, setReconciling] = useState("");
@@ -3794,6 +3800,13 @@ function PublishingView({
     crypto.randomUUID(),
   );
   const [error, setError] = useState("");
+  const publication = usePublicationRequest(receiptKey, async (id) => {
+    setPrepared(null); setCreating(false); setSelectedContentId(""); setSelectedChannelId("");
+    setPublishRequestId(crypto.randomUUID());
+    flash(`已取得发布任务回执 ${id}；不要重复新建任务`);
+    await onChanged();
+  }, () => { setPrepared(null); setPublishRequestId(crypto.randomUUID()); });
+  const busy = previewBusy || publication.busy;
   const [evidenceJobId, setEvidenceJobId] = useState("");
   const [evidence, setEvidence] = useState<PublishEvidence[]>([]);
   const [confirmations, setConfirmations] = useState<PublishConfirmation[]>([]);
@@ -3825,51 +3838,26 @@ function PublishingView({
 
   async function createPublish(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusy(true);
+    if (publication.blocked || previewBusy) return;
+    setPreviewBusy(true);
     setError("");
     const form = new FormData(event.currentTarget);
     const publishNow = publishTiming === "immediate";
     try {
       const intent = {
         content_item_id: String(form.get("content_item_id")), channel_id: String(form.get("channel_id")),
-        delivery_mode: String(form.get("delivery_mode")), publish_now: publishNow, request_id: publishRequestId,
+        delivery_mode: String(form.get("delivery_mode")) as PublishIntent["delivery_mode"], publish_now: publishNow, request_id: publishRequestId,
         ...(publishNow ? {} : { scheduled_at: new Date(String(form.get("scheduled_at"))).toISOString() }),
       };
       const preview = await api<PublicationPreviewData>("/publishing/preview", {
         method: "POST",
         body: intent,
+        signal: AbortSignal.timeout(30_000),
       });
       setPrepared({ preview, intent: { ...intent, preview_token: preview.preview_token } });
     } catch (caught) {
       setError(messageOf(caught)); setPrepared(null);
-    } finally { setBusy(false); }
-  }
-
-  async function confirmPublication(intent: PublishIntent) {
-    const hadUncertainReceipt = pending !== null;
-    setBusy(true); setError("");
-    try {
-      // Persist before sending, and retain the same intent after an uncertain
-      // response or page reload. Never automatically create a replacement.
-      sessionStorage.setItem(receiptKey, JSON.stringify(intent));
-      setPending(intent);
-      await api("/publishing/jobs", { method: "POST", body: intent });
-      sessionStorage.removeItem(receiptKey); setPending(null); setPrepared(null);
-      setCreating(false);
-      setSelectedContentId("");
-      setSelectedChannelId("");
-      setPublishRequestId(crypto.randomUUID());
-      flash("已取得发布任务回执；重复确认不会新建任务");
-      await onChanged();
-    } catch (caught) {
-      if (!hadUncertainReceipt && caught instanceof ApiError && caught.status >= 400 && caught.status < 500
-        && ![408, 429].includes(caught.status) && caught.code !== "publish_intent_conflict") {
-        sessionStorage.removeItem(receiptKey); setPending(null); setPrepared(null); setPublishRequestId(crypto.randomUUID());
-      }
-      setError(messageOf(caught));
-    } finally {
-      setBusy(false);
-    }
+    } finally { setPreviewBusy(false); }
   }
 
   async function retrySafely(job: PublishJob) {
@@ -4092,15 +4080,7 @@ function PublishingView({
         <span><b>4</b> 立即或定时执行</span>
       </section>
       {error ? <p className="inline-error" role="alert">{error}</p> : null}
-      {pending ? <section className="panel safe-notice" aria-label="待核对的发布回执">
-        <p>有一份确认已发送但尚未取得回执。请重试原请求，不要重新创建发布任务。</p>
-        <small>操作编号：{pending.request_id}</small>
-        <Button type="button" busy={busy} onClick={() => void confirmPublication(pending)}>重试获取原任务</Button>
-        <Button type="button" kind="ghost" disabled={busy} onClick={() => {
-          if (!window.confirm("这不会取消服务器任务。请先在下方发布列表核对原操作，确认没有重复发布风险后再重新开始。你已完成核对吗？")) return;
-          sessionStorage.removeItem(receiptKey); setPending(null); setPrepared(null); setPublishRequestId(crypto.randomUUID());
-        }}>已人工核对，重新开始</Button>
-      </section> : null}
+      <PublicationRequestNotice request={publication} />
       {!canSchedule ? <p className="permission-note">当前可查看发布状态与下载投放包；执行发布需要审核人员权限。</p> : null}
       {creating && canSchedule ? (
         <section className="panel form-panel publish-composer">
@@ -4109,7 +4089,7 @@ function PublishingView({
             <Button kind="ghost" type="button" onClick={() => setCreating(false)}>关闭</Button>
           </div>
           <form className="stack-form" onSubmit={createPublish}>
-            <fieldset className="publication-inputs" disabled={busy || !!pending} onChange={() => setPrepared(null)}>
+            <fieldset className="publication-inputs" disabled={busy || publication.blocked} onChange={() => setPrepared(null)}>
             <div className="timing-switch" role="group" aria-label="发布时间选择">
               <button
                 type="button"
@@ -4208,10 +4188,10 @@ function PublishingView({
               </label>
             </details>
             </fieldset>
-            {prepared && !pending ? <PublicationPreview key={prepared.preview.fingerprint}
-              preview={prepared.preview} busy={busy} onConfirm={() => void confirmPublication(prepared.intent)} /> : null}
+            {prepared && !publication.blocked ? <PublicationPreview key={prepared.preview.fingerprint}
+              preview={prepared.preview} busy={busy} onConfirm={() => void publication.send(prepared.intent)} /> : null}
             <div className="form-actions">
-              <Button type="submit" busy={busy} disabled={!!pending || invalidPublishSwitch}>
+              <Button type="submit" busy={busy} disabled={publication.blocked || invalidPublishSwitch}>
                 {prepared ? "重新获取预览" : "预览发布内容"}
               </Button>
               <Button type="button" kind="ghost" onClick={() => setCreating(false)}>取消</Button>
@@ -4308,6 +4288,8 @@ function PublishingView({
             <div className="timing-cell" key="timing">
               <strong>{job.publish_timing === "immediate" ? "立即" : "定时"}</strong>
               <small>{formatDateTime(job.scheduled_at)}</small>
+              <small>任务：{job.id}</small>
+              {job.request_id ? <small>操作：{job.request_id}</small> : null}
             </div>,
             job.attempts,
             <div className="status-stack" key="status">

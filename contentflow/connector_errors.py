@@ -4,6 +4,7 @@ from contextvars import ContextVar
 import logging
 
 import httpx
+from .execution_fence import assert_execution_active
 
 
 CONNECTOR_JOB_TYPES = frozenset(
@@ -118,6 +119,7 @@ def connector_request(
 
     guard = _sensitive_http.set(True)
     try:
+        assert_execution_active()
         try:
             response = client.request(method, url, follow_redirects=False, **kwargs)
         except httpx.HTTPError:

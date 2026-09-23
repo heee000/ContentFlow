@@ -157,7 +157,7 @@ def search_workspace_knowledge(
                 ORDER BY kv.embedding <=> CAST(:embedding AS vector)
                 LIMIT :limit
                 """
-            ),
+            ).execution_options(contentflow_readonly=True),
             {
                 "workspace_id": workspace_id,
                 "embedding": vector_literal,

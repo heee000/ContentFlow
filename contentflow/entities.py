@@ -591,6 +591,24 @@ class WorkflowRun(TimestampMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class GenerationIntent(TimestampMixin, Base):
+    """Durable workspace-scoped acceptance receipt; never silently expire keys."""
+
+    __tablename__ = "generation_intents"
+
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    request_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="RESTRICT"), unique=True
+    )
+    requested_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+
 class ContentItem(TimestampMixin, Base):
     __tablename__ = "content_items"
     __table_args__ = (
@@ -805,6 +823,11 @@ class PublishJob(TimestampMixin, Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    @property
+    def request_id(self) -> str | None:
+        value = (self.request_json or {}).get("request_id")
+        return value if isinstance(value, str) else None
 
     @property
     def delivery_mode(self) -> str:
@@ -1121,6 +1144,7 @@ class Job(TimestampMixin, Base):
     )
     locked_by: Mapped[str | None] = mapped_column(String(120), index=True)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[str | None] = mapped_column(String(32), default=lambda: uuid.uuid4().hex)
     last_error: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
 

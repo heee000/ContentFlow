@@ -12,6 +12,7 @@ from typing import BinaryIO, Protocol
 
 from .filenames import safe_filename
 from .settings import Settings
+from .execution_fence import assert_execution_active, guarded_operation
 
 
 @dataclass(slots=True)
@@ -155,6 +156,7 @@ class LocalObjectStorage:
         self.max_upload_bytes = max_upload_bytes
         self.root.mkdir(parents=True, exist_ok=True)
 
+    @guarded_operation
     def put(
         self,
         *,
@@ -195,7 +197,12 @@ class LocalObjectStorage:
             checksum_prefix=digest.hexdigest()[:16],
             allocation_id=allocation_id,
         )
-        temporary.replace(final)
+        try:
+            assert_execution_active()
+            temporary.replace(final)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         mime = (
             content_type
             or mimetypes.guess_type(clean_name)[0]
@@ -208,6 +215,7 @@ class LocalObjectStorage:
             mime_type=mime,
         )
 
+    @guarded_operation
     def read(self, uri: str, *, max_bytes: int = 100 * 1024 * 1024) -> bytes:
         from .knowledge_service import local_path_from_uri
 
@@ -220,6 +228,7 @@ class LocalObjectStorage:
             raise ValueError("对象超过读取大小限制")
         return path.read_bytes()
 
+    @guarded_operation
     def delete(self, uri: str) -> None:
         from .knowledge_service import local_path_from_uri
 
@@ -228,6 +237,7 @@ class LocalObjectStorage:
             raise ValueError("对象路径不属于当前存储根目录")
         path.unlink(missing_ok=True)
 
+    @guarded_operation
     def list_workspace_objects(
         self,
         workspace_id: str,
@@ -287,6 +297,7 @@ class LocalObjectStorage:
             raise ValueError("工作区存储路径越界")
         return f"{workspace_root.as_uri().rstrip('/')}/"
 
+    @guarded_operation
     def check(self) -> None:
         if not self.root.is_dir():
             raise RuntimeError(f"Local storage directory is unavailable: {self.root}")
@@ -308,6 +319,7 @@ class S3ObjectStorage:
             aws_secret_access_key=settings.s3_secret_key,
         )
 
+    @guarded_operation
     def put(
         self,
         *,
@@ -345,6 +357,7 @@ class S3ObjectStorage:
                 or "application/octet-stream"
             )
             staging.seek(0)
+            assert_execution_active()
             self.client.upload_fileobj(
                 staging,
                 self.bucket,
@@ -361,6 +374,7 @@ class S3ObjectStorage:
             mime_type=mime,
         )
 
+    @guarded_operation
     def read(self, uri: str, *, max_bytes: int = 100 * 1024 * 1024) -> bytes:
         prefix = f"s3://{self.bucket}/"
         if not uri.startswith(prefix):
@@ -403,6 +417,7 @@ class S3ObjectStorage:
             raise ValueError("S3 对象完整性校验失败")
         return data
 
+    @guarded_operation
     def delete(self, uri: str) -> None:
         prefix = f"s3://{self.bucket}/"
         if not uri.startswith(prefix):
@@ -412,6 +427,7 @@ class S3ObjectStorage:
             raise ValueError("S3 对象键不能为空")
         self.client.delete_object(Bucket=self.bucket, Key=key)
 
+    @guarded_operation
     def list_workspace_objects(
         self,
         workspace_id: str,
@@ -459,6 +475,7 @@ class S3ObjectStorage:
             raise ValueError("工作区存储前缀无效")
         return f"s3://{self.bucket}/{workspace_id}/"
 
+    @guarded_operation
     def check(self) -> None:
         self.client.head_bucket(Bucket=self.bucket)
 

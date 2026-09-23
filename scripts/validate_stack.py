@@ -187,8 +187,8 @@ def main() -> None:
         archived_campaign.raise_for_status()
         archived_run = client.post(
             f"{api}/campaigns/{campaign_id}/runs",
-            headers=headers,
-            json={},
+            headers={**headers, "Idempotency-Key": str(uuid.uuid4())},
+            json={"expected_campaign_updated_at": archived_campaign.json()["updated_at"]},
         )
         if archived_run.status_code != 409:
             raise RuntimeError("Archived campaign unexpectedly accepted a run.")
@@ -201,8 +201,8 @@ def main() -> None:
 
         workflow_run = client.post(
             f"{api}/campaigns/{campaign_id}/runs",
-            headers=headers,
-            json={},
+            headers={**headers, "Idempotency-Key": str(uuid.uuid4())},
+            json={"expected_campaign_updated_at": restored_campaign.json()["updated_at"]},
         )
         workflow_run.raise_for_status()
         run_id = workflow_run.json()["id"]

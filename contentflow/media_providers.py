@@ -14,6 +14,7 @@ import httpx
 from .filenames import safe_filename
 from .network_validation import normalize_exact_host
 from .settings import Settings
+from .execution_fence import assert_execution_active
 
 MEDIA_CONTRACT_VERSION = "1"
 MEDIA_CONTRACT_VERSION_HEADER = "ContentFlow-Media-Version"
@@ -395,6 +396,7 @@ class HTTPMediaProvider:
                 headers=headers,
                 json=payload,
             )
+            assert_execution_active()
             response = client.send(
                 request,
                 stream=True,
@@ -1130,6 +1132,7 @@ def download_generated_media(
                 require_https=require_https,
             )
             try:
+                assert_execution_active()
                 response_context = http.stream(
                     "GET",
                     current_url,

@@ -10,6 +10,7 @@ import httpx
 from .media_providers import MediaProviderError
 from .network_validation import normalize_exact_host
 from .settings import Settings
+from .execution_fence import assert_execution_active
 
 
 _OPEN_LICENSES = {"cc0", "pdm", "by", "by-sa"}
@@ -84,6 +85,7 @@ class OpenverseImageSearchProvider:
         client = self.client or httpx.Client(timeout=30, follow_redirects=False)
         try:
             try:
+                assert_execution_active()
                 with client.stream(
                     "GET",
                     f"{self.base_url}/images/",

@@ -27,6 +27,7 @@ from .style_skills import resolve_style_skill
 from .text_generation import build_text_provider
 from .workflow import build_asset_tasks
 from .review_evidence import capture_review, local_review
+from .generation_intents import generation_targets
 
 
 def campaign_to_brief(campaign: Campaign) -> dict:
@@ -75,6 +76,14 @@ def execute_workflow_run(
     if campaign is None or campaign.workspace_id != run.workspace_id:
         raise ValueError("工作流关联的活动不存在")
 
+    brief_raw = dict(
+        run.request_json.get("campaign_brief_snapshot") or campaign_to_brief(campaign)
+    )
+    brief = CampaignBrief.from_dict(brief_raw)
+    platforms_to_generate = generation_targets(
+        brief.platforms, run.request_json.get("regenerate_platforms") or []
+    )
+
     prompt_set = resolve_active_prompt_set(session, run.workspace_id)
     if not prompt_set.release_id and settings.require_governed_prompts:
         raise ValueError(
@@ -111,9 +120,6 @@ def execute_workflow_run(
             )
             progress_session.commit()
 
-    brief_raw = dict(
-        run.request_json.get("campaign_brief_snapshot") or campaign_to_brief(campaign)
-    )
     preferences = dict(
         run.request_json.get("generation_preferences")
         or campaign_generation_preferences(campaign)
@@ -125,7 +131,6 @@ def execute_workflow_run(
             run.workspace_id,
             preferences.get("style_skill_id"),
         )
-    brief = CampaignBrief.from_dict(brief_raw)
     query = " ".join(
         [
             brief.product_name,
@@ -183,12 +188,6 @@ def execute_workflow_run(
         },
     )
 
-    requested_platforms = set(
-        run.request_json.get("regenerate_platforms") or brief.platforms
-    )
-    platforms_to_generate = [
-        platform for platform in brief.platforms if platform in requested_platforms
-    ]
     platform_count = len(platforms_to_generate)
     generated_platforms = []
     for platform_index, platform in enumerate(platforms_to_generate, start=1):

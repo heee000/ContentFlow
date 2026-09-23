@@ -21,6 +21,7 @@ from .asset_operations import AssetOperationConflict
 from .channel_config import ChannelConfigurationError
 from .publish_manifest import PublishManifestConflict
 from .session_context import SessionContextError
+from .generation_intents import GenerationIntentError
 from .migrate import upgrade_database
 from .object_storage import build_object_storage
 from .observability import ObservabilityMetrics
@@ -172,7 +173,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers=error.headers,
             content={
                 "error": {
-                    "code": error.code if isinstance(error, SessionContextError) else f"http_{error.status_code}",
+                    "code": error.code if isinstance(error, (SessionContextError, GenerationIntentError)) else f"http_{error.status_code}",
                     "message": error.detail,
                     "request_id": getattr(request.state, "request_id", None),
                 }

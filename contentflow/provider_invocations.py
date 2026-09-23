@@ -17,6 +17,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .audit import record_audit
 from .entities import Job, ProviderInvocation, ProviderInvocationAttempt
+from .execution_fence import (
+    PROVIDER_EVIDENCE_SESSION, assert_execution_active, execution_is_stale,
+    fence_domain_write,
+)
 
 
 logger = logging.getLogger("contentflow.provider_invocations")
@@ -184,6 +188,7 @@ class ProviderInvocationLedger:
             bind=bind,
             expire_on_commit=False,
             future=True,
+            info={PROVIDER_EVIDENCE_SESSION: True},
         )
 
     def start(
@@ -231,6 +236,7 @@ class ProviderInvocationLedger:
         for retry in range(2):
             try:
                 with self._session_factory() as session:
+                    fence_domain_write(session)
                     query = select(ProviderInvocation).where(
                         ProviderInvocation.request_key == request_key
                     )
@@ -418,7 +424,7 @@ class ProviderInvocationLedger:
                 return attempt.status
 
             final_status = status
-            if attempt.status == "outcome_unknown":
+            if attempt.status == "outcome_unknown" or execution_is_stale():
                 final_status = (
                     "late_succeeded" if status == "succeeded" else "outcome_unknown"
                 )
@@ -577,6 +583,7 @@ class LedgeredEmbeddingProvider:
         return self.encode_many([text])[0]
 
     def encode_many(self, texts: list[str]) -> list[list[float]]:
+        assert_execution_active()
         if not texts:
             return []
         self.ordinal += 1
@@ -619,6 +626,7 @@ class LedgeredEmbeddingProvider:
             idempotency_key_sent=idempotency_key_sent,
         )
         try:
+            assert_execution_active()
             vectors = self.provider.encode_many(texts)
         except Exception as error:
             try:
@@ -647,6 +655,7 @@ class LedgeredEmbeddingProvider:
             raise ProviderInvocationLedgerError(
                 "Provider response was received but its ledger could not be finalized"
             ) from error
+        assert_execution_active()
         return vectors
 
 
@@ -766,6 +775,7 @@ class LedgeredMediaProvider:
         idempotency_key_sent: bool,
         invoke: Any,
     ) -> Any:
+        assert_execution_active()
         self.ordinal += 1
         request_sha256, request_bytes = canonical_evidence(request)
         job_id = current_provider_job_id(self.workspace_id)
@@ -784,6 +794,7 @@ class LedgeredMediaProvider:
             idempotency_key_sent=idempotency_key_sent,
         )
         try:
+            assert_execution_active()
             generation = invoke()
         except Exception as error:
             try:
@@ -822,6 +833,7 @@ class LedgeredMediaProvider:
             raise ProviderInvocationLedgerError(
                 "Media provider response was received but its ledger could not be finalized"
             ) from error
+        assert_execution_active()
         return generation
 
 
@@ -846,6 +858,7 @@ class LedgeredSearchProvider:
         self.ordinal = 0
 
     def search(self, *, query: str, limit: int | None = None) -> list[dict[str, Any]]:
+        assert_execution_active()
         self.ordinal += 1
         request_sha256, request_bytes = canonical_evidence(
             {"query": query, "limit": limit}
@@ -866,6 +879,7 @@ class LedgeredSearchProvider:
             idempotency_key_sent=False,
         )
         try:
+            assert_execution_active()
             results = self.provider.search(query=query, limit=limit)
         except Exception as error:
             try:
@@ -894,6 +908,7 @@ class LedgeredSearchProvider:
             raise ProviderInvocationLedgerError(
                 "Search provider response was received but its ledger could not be finalized"
             ) from error
+        assert_execution_active()
         return results
 
 
@@ -925,6 +940,7 @@ class LedgeredMediaDownloader:
         invoke: Callable[[], bytes],
         call_metadata: dict[str, Any] | None = None,
     ) -> bytes:
+        assert_execution_active()
         self.ordinal += 1
         request_sha256, request_bytes = canonical_evidence(request)
         job_id = current_provider_job_id(self.workspace_id)
@@ -943,6 +959,7 @@ class LedgeredMediaDownloader:
             idempotency_key_sent=False,
         )
         try:
+            assert_execution_active()
             content = invoke()
             if not isinstance(content, bytes):
                 raise TypeError("Media download did not return bytes")
@@ -983,4 +1000,5 @@ class LedgeredMediaDownloader:
             raise ProviderInvocationLedgerError(
                 "Media download completed but its ledger could not be finalized"
             ) from error
+        assert_execution_active()
         return content

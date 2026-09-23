@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from generation_helpers import request_run
+
 from publishing_helpers import confirm_publish
 
 import tempfile
@@ -146,7 +148,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             "objective": "Contract validation", "audience": "Test users", "platforms": ["wechat"],
         })
         self.assertEqual(campaign.status_code, 201, campaign.text)
-        response = self.client.post(f"/api/v1/campaigns/{campaign.json()['id']}/runs", headers=self.headers, json={})
+        response = request_run(self.client,f"/api/v1/campaigns/{campaign.json()['id']}/runs", headers=self.headers, json={})
         self.assertEqual(response.status_code, 202, response.text)
         provider = MalformedReviewProvider()
         with patch("contentflow.workflow_service.build_text_provider", return_value=provider):
@@ -201,7 +203,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(campaign.status_code, 201, campaign.text)
-        run = self.client.post(
+        run = request_run(self.client,
             f"/api/v1/campaigns/{campaign.json()['id']}/runs",
             headers=self.headers,
             json={},
@@ -1434,7 +1436,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(campaign.status_code, 201, campaign.text)
-        run = self.client.post(
+        run = request_run(self.client,
             f"/api/v1/campaigns/{campaign.json()['id']}/runs",
             headers=self.headers,
             json={},
@@ -1485,7 +1487,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(campaign.status_code, 201, campaign.text)
-        run = self.client.post(
+        run = request_run(self.client,
             f"/api/v1/campaigns/{campaign.json()['id']}/runs",
             headers=self.headers,
             json={},
@@ -1591,7 +1593,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(campaign.status_code, 201, campaign.text)
-        run = self.client.post(
+        run = request_run(self.client,
             f"/api/v1/campaigns/{campaign.json()['id']}/runs",
             headers=self.headers,
             json={},

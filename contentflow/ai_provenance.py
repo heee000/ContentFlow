@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from .prompts import BUILTIN_PROMPT_SET, PromptSet
+from .execution_fence import assert_execution_active
 from .provider_invocations import (
     ProviderInvocationLedger,
     ProviderInvocationLedgerError,
@@ -96,6 +97,7 @@ class AIProvenanceRecorder:
         *,
         platform: str | None = None,
     ) -> dict[str, Any]:
+        assert_execution_active()
         input_sha256, input_bytes = _json_evidence(payload)
         started_at = datetime.now(timezone.utc)
         started = time.perf_counter()
@@ -157,6 +159,7 @@ class AIProvenanceRecorder:
                 }
             )
         try:
+            assert_execution_active()
             result = self.provider.complete_json(
                 stage,
                 payload,
@@ -238,6 +241,7 @@ class AIProvenanceRecorder:
         ):
             invocation["response_model"] = call_metadata["response_model"][:160]
         self.invocations.append(invocation)
+        assert_execution_active()
         return result
 
     def snapshot(self) -> dict[str, Any]:

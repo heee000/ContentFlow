@@ -2,21 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 from collections.abc import Collection
 from typing import Any
 
 from sqlalchemy import or_, select, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .atomic_insert import insert_on_unique_key
 from .audit import record_audit
 from .entities import Job, JobManualReview
+from .execution_fence import JobLeaseLost as JobLeaseLost
 from .provider_invocations import mark_job_provider_attempts_outcome_unknown
-
-
-class JobLeaseLost(RuntimeError):
-    """Raised when a worker no longer owns the job attempt it is finishing."""
 
 
 def utcnow() -> datetime:
@@ -41,27 +39,22 @@ def enqueue_job(
 ) -> Job:
     key = idempotency_key or make_idempotency_key(job_type, payload)
     existing = session.scalar(select(Job).where(Job.idempotency_key == key))
-    if existing:
-        return existing
-
-    job = Job(
-        job_type=job_type,
-        payload_json=payload,
-        workspace_id=workspace_id,
-        idempotency_key=key,
-        run_at=run_at or utcnow(),
-        max_attempts=max_attempts,
-    )
-    session.add(job)
-    try:
-        session.flush()
-    except IntegrityError:
-        session.rollback()
+    if existing is None:
+        inserted_id = insert_on_unique_key(
+            session, Job.__table__, key="idempotency_key",
+            values={"job_type": job_type, "payload_json": payload,
+                "workspace_id": workspace_id, "idempotency_key": key,
+                "run_at": run_at or utcnow(), "max_attempts": max_attempts},
+        )
+        if inserted_id is not None:
+            return session.get(Job, inserted_id)
         existing = session.scalar(select(Job).where(Job.idempotency_key == key))
-        if existing:
-            return existing
-        raise
-    return job
+    if (existing is None or existing.workspace_id != workspace_id
+        or existing.job_type != job_type
+        or make_idempotency_key(existing.job_type, existing.payload_json)
+        != make_idempotency_key(job_type, payload)):
+        raise RuntimeError("Queue operation identity conflicts with its existing receipt")
+    return existing
 
 
 def claim_next_job(
@@ -94,12 +87,17 @@ def claim_next_job(
     job = session.scalar(query)
     if job is None:
         return None
-    job.status = "running"
-    job.locked_by = worker_id
-    job.locked_at = now
-    job.attempts += 1
-    session.flush()
-    return job
+    # SQLite has no SELECT FOR UPDATE: two readers can select the same queued
+    # row. Only the unchanged candidate may be claimed, with a fresh identity.
+    claimed_id = session.execute(update(Job).where(
+        Job.id == job.id, Job.status == job.status, Job.attempts == job.attempts,
+        Job.lease_token == job.lease_token, Job.locked_at == job.locked_at,
+    ).values(status="running", locked_by=worker_id, locked_at=now,
+        lease_token=uuid.uuid4().hex, attempts=Job.attempts + 1)
+        .returning(Job.id).execution_options(synchronize_session=False)).scalar_one_or_none()
+    if claimed_id is None:
+        return None
+    return session.get(Job, claimed_id, populate_existing=True)
 
 
 def request_job_manual_review(
@@ -230,19 +228,35 @@ def renew_job_lease(
     job_id: str,
     worker_id: str,
     attempt: int,
+    lease_seconds: int,
+    lease_token: str,
 ) -> bool:
-    outcome = session.execute(
+    if not lease_token:
+        return False
+    statement = (
         update(Job)
         .where(
             Job.id == job_id,
             Job.status == "running",
             Job.locked_by == worker_id,
             Job.attempts == attempt,
+            Job.lease_token == lease_token,
         )
-        .values(locked_at=utcnow())
+        .values(locked_at=Job.locked_at, updated_at=Job.updated_at)
+        .returning(Job.locked_at)
         .execution_options(synchronize_session=False)
     )
-    return outcome.rowcount == 1
+    locked_at = session.execute(statement).scalar_one_or_none()
+    if locked_at is None:
+        return False
+    if locked_at.tzinfo is None:
+        locked_at = locked_at.replace(tzinfo=timezone.utc)
+    # Lock waits must not revive a lease which expired while waiting.
+    if locked_at < utcnow() - timedelta(seconds=lease_seconds):
+        return False
+    session.execute(update(Job).where(Job.id == job_id).values(locked_at=utcnow())
+        .execution_options(synchronize_session=False))
+    return True
 
 
 def _get_claimed_job(
@@ -251,17 +265,36 @@ def _get_claimed_job(
     job_id: str,
     worker_id: str,
     attempt: int,
+    lease_token: str,
+    lease_seconds: int,
 ) -> Job:
+    if not lease_token:
+        raise JobLeaseLost("Missing execution identity")
+    # Also lock on SQLite, including a handler which produced no ORM changes.
+    # no_autoflush prevents caller state being written before ownership checks.
+    with session.no_autoflush:
+        found = session.execute(update(Job).where(
+            Job.id == job_id, Job.status == "running", Job.locked_by == worker_id,
+            Job.attempts == attempt, Job.lease_token == lease_token,
+        ).values(locked_at=Job.locked_at, updated_at=Job.updated_at)
+            .returning(Job.id).execution_options(synchronize_session=False)).scalar_one_or_none()
+    if found is None:
+        raise JobLeaseLost(f"Job lease ownership lost: id={job_id}")
     query = select(Job).where(
         Job.id == job_id,
         Job.status == "running",
         Job.locked_by == worker_id,
         Job.attempts == attempt,
+        Job.lease_token == lease_token,
     )
     if session.bind and session.bind.dialect.name == "postgresql":
         query = query.with_for_update()
     job = session.scalar(query.execution_options(populate_existing=True))
-    if job is None:
+    locked_at = job.locked_at if job else None
+    if locked_at is not None and locked_at.tzinfo is None:
+        locked_at = locked_at.replace(tzinfo=timezone.utc)
+    if (not lease_token or job is None or locked_at is None
+        or locked_at < utcnow() - timedelta(seconds=lease_seconds)):
         raise JobLeaseLost(
             f"Job lease ownership lost: id={job_id} "
             f"worker={worker_id} attempt={attempt}"
@@ -310,12 +343,16 @@ def complete_job(
     *,
     worker_id: str,
     attempt: int,
+    lease_token: str,
+    lease_seconds: int,
 ) -> None:
     job = _get_claimed_job(
         session,
         job_id=job.id,
         worker_id=worker_id,
         attempt=attempt,
+        lease_token=lease_token,
+        lease_seconds=lease_seconds,
     )
     job.status = "succeeded"
     job.result_json = result
@@ -332,6 +369,8 @@ def fail_job(
     *,
     worker_id: str,
     attempt: int,
+    lease_token: str,
+    lease_seconds: int,
     force_terminal: bool = False,
     manual_review_reason_code: str | None = None,
     retry_after_seconds: int | None = None,
@@ -341,6 +380,8 @@ def fail_job(
         job_id=job.id,
         worker_id=worker_id,
         attempt=attempt,
+        lease_token=lease_token,
+        lease_seconds=lease_seconds,
     )
     message = str(error)
     job.last_error = message[:8000]

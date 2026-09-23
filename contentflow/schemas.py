@@ -4,11 +4,12 @@ from datetime import datetime
 import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, StrictBool, model_validator, field_serializer
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, StrictBool, model_validator, field_serializer, field_validator
 
 from .channel_config import validate_channel_config
 from .connector_errors import CONNECTOR_JOB_TYPES, STAGES, public_connector_error
 from .metric_values import MetricValues
+from .generation_intents import utc_timestamp
 
 
 Platform = Literal["xiaohongshu", "douyin", "wechat"]
@@ -21,7 +22,16 @@ ManualReviewNote = Annotated[
 ]
 
 
-class ORMModel(BaseModel):
+class UTCResponseModel(BaseModel):
+    @field_validator("*", mode="after", check_fields=False)
+    @classmethod
+    def normalize_response_timestamp(cls, value):
+        # Persisted application timestamps are UTC. SQLite drops tzinfo on
+        # read; restore that contract without changing storage or request rules.
+        return utc_timestamp(value) if isinstance(value, datetime) else value
+
+
+class ORMModel(UTCResponseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -80,7 +90,7 @@ class MemberUpdate(BaseModel):
     role: WorkspaceRole
 
 
-class MemberResponse(BaseModel):
+class MemberResponse(UTCResponseModel):
     id: str
     user_id: str
     email: EmailStr
@@ -89,7 +99,7 @@ class MemberResponse(BaseModel):
     created_at: datetime
 
 
-class AuditLogResponse(BaseModel):
+class AuditLogResponse(UTCResponseModel):
     id: str
     action: str
     entity_type: str
@@ -104,7 +114,7 @@ class AuditLogResponse(BaseModel):
     created_at: datetime
 
 
-class AuditIntegrityResponse(BaseModel):
+class AuditIntegrityResponse(UTCResponseModel):
     valid: bool
     checked_entries: int
     head_sequence: int
@@ -305,7 +315,7 @@ class StyleSkillStatusUpdate(BaseModel):
     status: Literal["enabled", "disabled"]
 
 
-class StyleSkillResponse(BaseModel):
+class StyleSkillResponse(UTCResponseModel):
     id: str
     source: Literal["builtin", "workspace"]
     status: Literal["enabled", "disabled"]
@@ -316,8 +326,22 @@ class StyleSkillResponse(BaseModel):
 
 
 class WorkflowRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_campaign_updated_at: datetime
     provider: str | None = Field(default=None, max_length=80)
-    regenerate_platforms: list[Platform] = Field(default_factory=list)
+    regenerate_platforms: list[Platform] = Field(default_factory=list, max_length=3)
+
+    @field_validator("expected_campaign_updated_at")
+    @classmethod
+    def normalize_expected_time(cls, value):
+        return utc_timestamp(value)
+
+    @field_validator("regenerate_platforms")
+    @classmethod
+    def unique_targets(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("重新生成的平台不能重复")
+        return value
 
 
 class WorkflowRunResponse(ORMModel):
@@ -519,6 +543,7 @@ class PublishJobResponse(ORMModel):
     id: str
     content_item_id: str
     channel_id: str
+    request_id: str | None = None
     status: str
     scheduled_at: datetime
     delivery_mode: str
@@ -622,7 +647,7 @@ class JobManualReviewResponse(ORMModel):
     note: str | None
 
 
-class ProviderInvocationAttemptResponse(BaseModel):
+class ProviderInvocationAttemptResponse(UTCResponseModel):
     id: str
     invocation_id: str
     request_key: str
@@ -690,7 +715,7 @@ class WorkerQueueHealthResponse(BaseModel):
     oldest_manual_review_age_seconds: float | None
 
 
-class WorkerHealthResponse(BaseModel):
+class WorkerHealthResponse(UTCResponseModel):
     status: Literal["healthy", "degraded", "unavailable"]
     checked_at: datetime
     active_workers: int
@@ -701,7 +726,7 @@ class WorkerHealthResponse(BaseModel):
     queue: WorkerQueueHealthResponse
 
 
-class StorageUsageResponse(BaseModel):
+class StorageUsageResponse(UTCResponseModel):
     used_bytes: int
     used_objects: int
     reserved_bytes: int

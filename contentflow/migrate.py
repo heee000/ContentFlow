@@ -14,8 +14,8 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "c7d8e9f0a1b2"
-MINIMUM_PUBLIC_TABLE_COUNT = 34
+HEAD_REVISION = "e9f0a1b2c3d4"
+MINIMUM_PUBLIC_TABLE_COUNT = 35
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
 LAYOUT_REVISION = "8b6c1f3a9d21"
@@ -106,6 +106,7 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             return
 
     incrementally_added = {
+        "generation_intents",
         "content_review_evidence",
         WORKER_NODE_TABLE,
         AUTH_SESSION_TABLE,
@@ -286,7 +287,7 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
             constraints = {item["name"] for item in inspector.get_check_constraints("metric_snapshots")}
             if not {"ck_metric_snapshots_validation_status", "ck_metric_snapshots_counters_bounded"} <= constraints:
                 raise RuntimeError("Metric validation schema is incomplete; repair before adoption")
-            revision = HEAD_REVISION
+            revision = "c7d8e9f0a1b2"
         else:
             revision = "b6c7d8e9f0a1"
     elif provider_invocation_exists:
@@ -319,6 +320,31 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         raise RuntimeError(
             "数据库的结构化排版字段处于不一致状态，请先备份数据库再人工处理。"
         )
+
+    if "generation_intents" in tables:
+        primary = inspector.get_pk_constraint("generation_intents")["constrained_columns"]
+        unique = inspector.get_unique_constraints("generation_intents")
+        foreign = {
+            (tuple(item["constrained_columns"]), item["referred_table"], item.get("options", {}).get("ondelete"))
+            for item in inspector.get_foreign_keys("generation_intents")
+        }
+        if revision != "c7d8e9f0a1b2" or primary != ["workspace_id", "request_id"] or not any(
+            item["column_names"] == ["run_id"] for item in unique
+        ) or not {
+            (("workspace_id",), "workspaces", "CASCADE"),
+            (("run_id",), "workflow_runs", "RESTRICT"),
+            (("requested_by",), "users", "SET NULL"),
+        } <= foreign:
+            raise RuntimeError("Generation receipt schema is incomplete; back up and repair before adoption")
+        revision = "d8e9f0a1b2c3"
+
+    lease_column = next((item for item in inspector.get_columns("jobs")
+        if item["name"] == "lease_token"), None)
+    if lease_column is not None:
+        if (revision != "d8e9f0a1b2c3" or not lease_column["nullable"]
+            or getattr(lease_column["type"], "length", None) != 32):
+            raise RuntimeError("Job lease identity schema is incomplete; back up before adoption")
+        revision = HEAD_REVISION
 
     _run_alembic(engine, command.stamp, revision)
 

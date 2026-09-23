@@ -1,5 +1,9 @@
 # ContentFlow 当前全项目审计与整改优先级（2026-09-24）
 
+> 后续实施又补入 A07 执行权候选，新增 head e9f0a1b2c3d4；本地执行权/迁移 40 项、当前 API 下 Edge 43 项通过，PG 竞争、同版 CI、部署仍待签收。旧审计中的 A07 失败是修复前证据，不再代表完全无保护；最终状态与确切验证见 [实施进度](IMPLEMENTATION_PROGRESS.md)。A12/A47 等余项不因此关闭。
+
+> 最新审计入口为 [发布事务候选与当前交付缺口](project_audit_20260924_acceptance_review.md)。后续 A49 回执恢复、A50 UTC 响应已完成本地修复：完整后端 **806 passed / 46 skipped**、Edge **43 passed**、默认模块/SSR **40 passed**；最后补充检查 **10 passed / 3 skipped**。HEAD 仍为 `16c26bf` 加未提交 A05/A45、A44/A48/A49/A50；真实 PG/MinIO、同版 CI、Ubuntu 部署未签收。以下及各审计正文保留历史失败证据，当前实施状态以 [实施进度](IMPLEMENTATION_PROGRESS.md) 末节为准，不把旧失败、旧绿色或本地通过混为当前交付事实。
+
 审计对象：`codex/enterprise-media-runtime`，HEAD `3444609`，加本轮开始时已有的未提交会话/工作区隔离实现和测试。本文是当前汇总入口；此前报告保留为历史证据，不将旧测试绿色或旧问题状态直接沿用到当前候选。
 
 > 后续实施更新：本报告以下保留审计时点的原始失败证据。持续目标随后恢复，A37/A08 已在源码 **12eaf9a / CI 35904373071** 签收：799 项后端（含真实 PG/MinIO）、27 条 Chromium、14 项模块/SSR，四项 CI 全过；本地 Edge 27/27。详见 [实施进度](IMPLEMENTATION_PROGRESS.md) 末节。其余开放问题不因此关闭；未部署，不把历史“只审计”范围扩展为后续实施轮也没有源码变化。

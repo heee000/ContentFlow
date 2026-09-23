@@ -11,6 +11,7 @@ import httpx
 from .providers import PROVIDER_REQUEST_KEY, _provider_request_metadata
 from .rag import HashEmbedding
 from .settings import Settings
+from .execution_fence import assert_execution_active
 
 
 class EmbeddingProvider(Protocol):
@@ -199,6 +200,7 @@ class OpenAICompatibleEmbeddingProvider:
         if self.send_dimensions:
             payload["dimensions"] = self.dimensions
         try:
+            assert_execution_active()
             response = self.client.post(
                 self.endpoint,
                 headers=headers,
