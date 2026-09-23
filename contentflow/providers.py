@@ -332,7 +332,7 @@ class MockProvider:
                         },
                         {
                             "heading": "出发前完成确认",
-                            "summary": product_facts or must_include,
+                            "summary": product_facts or must_include or "出发前人工确认相关信息",
                         },
                     ],
                     "closing": cta,

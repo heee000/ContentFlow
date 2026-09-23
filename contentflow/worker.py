@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from . import db
 from .audit import record_audit
+from .asset_operations import lock_asset_for_mutation
 from .connectors import ConnectorPublishError, build_connector
 from .entities import (
     Asset,
@@ -717,15 +718,13 @@ def handle_asset_download(
             retryable=False,
         ) from None
 
-    asset_query = select(Asset).where(Asset.id == asset_id)
     content_query = select(ContentItem).where(
         ContentItem.id == asset.content_item_id,
         ContentItem.workspace_id == asset.workspace_id,
     )
-    if session.bind and session.bind.dialect.name == "postgresql":
-        asset_query = asset_query.with_for_update()
-        content_query = content_query.with_for_update()
-    asset = session.scalar(asset_query.execution_options(populate_existing=True))
+    # Match all user mutations: parent content first, then the asset. Inverting
+    # this order after a slow download can deadlock an edit or candidate change.
+    asset = lock_asset_for_mutation(session, asset.workspace_id, asset_id)
     content = session.scalar(content_query.execution_options(populate_existing=True))
     if asset is None or content is None:
         raise MediaProviderError("素材或关联内容已不存在", retryable=False)
@@ -995,7 +994,7 @@ def handle_asset_generate(
     configured_provider = (
         settings.image_provider if asset.kind == "image" else settings.video_provider
     )
-    if asset.provider in {"manual", "manual-upload"} or configured_provider == "manual":
+    if asset.provider in {"manual", "manual-upload"}:
         asset.provider = "manual"
         asset.status = "awaiting_upload"
         asset.error = None
@@ -1012,6 +1011,13 @@ def handle_asset_generate(
             actor_user_id=None,
         )
         return {"asset_id": asset.id, "status": asset.status}
+    if configured_provider == "manual" or (
+        asset.provider in {"http", "mock"} and asset.provider != configured_provider
+    ):
+        raise MediaProviderError(
+            "素材生成配置与已批准的来源不一致；请恢复对应配置，不能静默改用人工或其他 Provider",
+            retryable=False,
+        )
     asset.status = "generating"
     provider = build_media_provider(settings, asset.kind)
     if configured_provider == "http":

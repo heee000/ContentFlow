@@ -789,7 +789,14 @@ def reconcile_workspace_storage(
                     f"expected={previous_size}, actual={item.size_bytes}"
                 )
                 integrity_mismatches += 1
-            allocation.updated_at = datetime.now(timezone.utc)
+            # This timestamp is also the scan's seen-object watermark. It must
+            # be strictly beyond the scan boundary even on a coarse/backward
+            # wall clock; otherwise the final <= predicate marks a seen file
+            # missing, including one seen on an earlier pagination batch.
+            allocation.updated_at = max(
+                datetime.now(timezone.utc),
+                scan_started_at + timedelta(microseconds=1),
+            )
             continue
         if now - item.modified_at < timedelta(
             seconds=settings.storage_orphan_grace_seconds

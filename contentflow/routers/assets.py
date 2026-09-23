@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..asset_operations import lock_asset_for_mutation, require_new_asset_operation
 from ..audit import record_audit
 from ..dependencies import (
     AppSettings,
@@ -105,9 +106,10 @@ def get_asset(
         Asset.id == asset_id,
         Asset.workspace_id == workspace_id,
     )
-    if for_update:
-        query = query.with_for_update()
-    asset = session.scalar(query)
+    asset = (
+        lock_asset_for_mutation(session, workspace_id, asset_id)
+        if for_update else session.scalar(query)
+    )
     if asset is None:
         raise HTTPException(status_code=404, detail="素材不存在")
     return asset
@@ -286,6 +288,7 @@ def change_asset_source(
             status_code=409,
             detail="混合候选已经分别生成，请直接选择候选素材",
         )
+    require_new_asset_operation(session, asset)
     previous_source = str(metadata.get("media_source") or asset.provider)
     if payload.source == "generate" and settings.image_provider not in {
         "http",
@@ -407,6 +410,7 @@ def select_asset_candidate(
     cleanup_job_id = None
 
     if asset.provider == "openverse" and asset.status == "awaiting_selection":
+        require_new_asset_operation(session, asset)
         if not payload.candidate_id:
             raise HTTPException(status_code=422, detail="请选择搜索结果")
         if not payload.acknowledge_license_check:
@@ -537,6 +541,7 @@ def retry_asset(
     asset = get_asset(session, principal.workspace_id, asset_id, for_update=True)
     if asset.status not in {"failed", "planned", "stale"}:
         raise HTTPException(status_code=409, detail="当前素材状态不能重新执行")
+    require_new_asset_operation(session, asset)
     metadata = dict(asset.metadata_json or {})
     job_payload: dict[str, object] = {"asset_id": asset.id}
     if asset.provider == "openverse":
@@ -692,6 +697,8 @@ async def upload_asset(
             raise HTTPException(status_code=409, detail="素材任务属于旧内容版本")
 
     filled_existing_task = asset is not None
+    if asset is not None:
+        require_new_asset_operation(session, asset)
     if asset is None:
         current_asset_count = session.scalar(
             select(func.count(Asset.id)).where(

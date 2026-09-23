@@ -7,6 +7,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
+from ..asset_operations import lock_asset_for_mutation, require_new_asset_operation
 from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
 from ..entities import (
@@ -20,7 +21,7 @@ from ..entities import (
     PublishJob,
     WorkflowRun,
 )
-from ..job_queue import utcnow
+from ..job_queue import request_job_manual_review, utcnow
 from ..job_recovery import manual_review_job_types
 from ..pagination import (
     DEFAULT_PAGE_LIMIT,
@@ -285,6 +286,48 @@ def list_job_provider_invocations(
     ]
 
 
+def lock_job_for_user_action(session: Session, workspace_id: str, job_id: str) -> Job:
+    query = select(Job).where(Job.id == job_id, Job.workspace_id == workspace_id)
+    observed = session.scalar(query)
+    if observed is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if observed.job_type.startswith("asset."):
+        asset_id = (observed.payload_json or {}).get("asset_id")
+        if not isinstance(asset_id, str) or lock_asset_for_mutation(
+            session, workspace_id, asset_id
+        ) is None:
+            raise HTTPException(status_code=409, detail="素材任务缺少有效的关联素材")
+    return session.scalar(
+        query.with_for_update().execution_options(populate_existing=True)
+    )
+
+
+@router.post("/{job_id}/request-manual-review", response_model=JobResponse)
+def request_asset_manual_review(
+    job_id: str, principal: Reviewer, session: Db,
+):
+    """Escalate a terminal generation/poll failure; never authorizes a retry."""
+    job = lock_job_for_user_action(session, principal.workspace_id, job_id)
+    if job.job_type not in {"asset.generate", "asset.poll"}:
+        raise HTTPException(status_code=409, detail="仅素材生成或轮询失败可从此入口发起核对")
+    if job.status == "manual_review":
+        return job_response(job, manual_review=latest_manual_reviews(session, [job]).get(job.id))
+    if job.status != "failed":
+        raise HTTPException(status_code=409, detail="任务尚未终止，不能并发发起人工核对")
+    review = request_job_manual_review(
+        session, job,
+        reason_code="asset_outcome_verification_requested",
+        error="素材失败后主动核对供应商结果；尚未授权重新执行",
+        source="reviewer_request",
+    )
+    record_audit(
+        session, action="asset.manual_review_requested", entity_type="job",
+        entity_id=job.id, workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+    )
+    return job_response(job, manual_review=review)
+
+
 @router.post("/{job_id}/retry", response_model=JobResponse)
 def retry_job(
     job_id: str,
@@ -292,14 +335,7 @@ def retry_job(
     session: Db,
     settings: AppSettings,
 ):
-    job = session.scalar(
-        select(Job).where(
-            Job.id == job_id,
-            Job.workspace_id == principal.workspace_id,
-        )
-    )
-    if job is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    job = lock_job_for_user_action(session, principal.workspace_id, job_id)
     if job.status == "manual_review":
         raise HTTPException(
             status_code=409,
@@ -331,6 +367,9 @@ def retry_job(
                 detail="请在发布管理中复测渠道并使用安全重试",
             )
 
+    if job.job_type.startswith("asset."):
+        asset = session.get(Asset, job.payload_json["asset_id"])
+        require_new_asset_operation(session, asset)
     job.status = "retry"
     job.attempts = 0
     job.last_error = None
@@ -347,15 +386,7 @@ def resolve_manual_review(
     principal: Reviewer,
     session: Db,
 ):
-    job_query = select(Job).where(
-        Job.id == job_id,
-        Job.workspace_id == principal.workspace_id,
-    )
-    if session.bind and session.bind.dialect.name == "postgresql":
-        job_query = job_query.with_for_update()
-    job = session.scalar(job_query)
-    if job is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    job = lock_job_for_user_action(session, principal.workspace_id, job_id)
     if job.status != "manual_review":
         raise HTTPException(status_code=409, detail="该任务当前不在人工核对状态")
 
@@ -378,6 +409,12 @@ def resolve_manual_review(
     job.locked_by = None
     job.locked_at = None
     if payload.decision == "retry":
+        if job.job_type.startswith("asset."):
+            session.flush()
+            require_new_asset_operation(
+                session, session.get(Asset, job.payload_json["asset_id"]),
+                resolving_job_id=job.id,
+            )
         job.status = "retry"
         job.attempts = 0
         job.run_at = utcnow()

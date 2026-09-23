@@ -23,13 +23,15 @@ from alembic import command
 from alembic.config import Config
 from fastapi import HTTPException
 import pytest
-from sqlalchemy import create_engine, inspect, select, text, update
+from sqlalchemy import create_engine, event, inspect, select, text, update
+from PIL import Image
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.datastructures import UploadFile
 
 from contentflow.auth_rate_limit import RateLimitKey, consume_rate_limits
+from contentflow.asset_operations import AssetOperationConflict
 from contentflow.audit import record_audit, verify_audit_chain
 from contentflow.connectors import ConnectorResult
 from contentflow.entities import (
@@ -55,6 +57,8 @@ from contentflow.migrate import HEAD_REVISION, PROJECT_ROOT
 from contentflow.object_storage import LocalObjectStorage
 from contentflow.observability import ObservabilityMetrics
 from contentflow.routers.publish_evidence import upload_publish_evidence
+from contentflow.routers.assets import change_asset_source, retry_asset
+from contentflow.schemas import AssetSourceChangeRequest
 from contentflow.security import hash_rate_limit_key
 from contentflow.settings import Settings
 from contentflow.storage_ledger import (
@@ -69,6 +73,7 @@ from contentflow.worker import (
     classify_database_error,
     database_error_sqlstate,
     handle_publish_reconcile,
+    handle_asset_download,
     logger as worker_logger,
     sanitized_database_error,
     schedule_pending_publish_reconciliations,
@@ -421,6 +426,106 @@ def _create_publish_fixture(
             "publish_job_id": publish_job.id,
             "user_id": user.id,
         }
+
+
+def test_postgres_serializes_asset_retry_and_source_change(postgres_harness: PostgresHarness):
+    fixture = _create_publish_fixture(postgres_harness, status="scheduled", external_id=None)
+    with postgres_harness.sessions() as session:
+        asset = session.scalar(select(Asset).where(Asset.workspace_id == fixture["workspace_id"]))
+        asset.status = "failed"
+        asset.provider = "mock"
+        asset_id = asset.id
+        session.commit()
+    principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
+    barrier = Barrier(2)
+
+    def mutate(source_change):
+        with postgres_harness.sessions() as session:
+            barrier.wait(timeout=10)
+            try:
+                if source_change:
+                    change_asset_source(asset_id, AssetSourceChangeRequest(source="generate"),
+                        principal, session, postgres_harness.settings)
+                else:
+                    retry_asset(asset_id, principal, session, postgres_harness.settings)
+                session.commit()
+                return "queued"
+            except (HTTPException, AssetOperationConflict) as error:
+                session.rollback()
+                if isinstance(error, HTTPException):
+                    assert error.status_code == 409
+                return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(mutate, [False, True]))
+    assert sorted(results) == ["conflict", "queued"]
+    with postgres_harness.sessions() as session:
+        jobs = list(session.scalars(select(Job).where(Job.workspace_id == fixture["workspace_id"])))
+        assert len(jobs) == 1
+        assert jobs[0].job_type == "asset.generate"
+        assert session.get(Asset, asset_id).status == "queued"
+
+
+def test_postgres_download_and_content_edit_share_lock_order(postgres_harness: PostgresHarness):
+    fixture = _create_publish_fixture(postgres_harness, status="scheduled", external_id=None)
+    with postgres_harness.sessions() as session:
+        asset = session.scalar(select(Asset).where(Asset.workspace_id == fixture["workspace_id"]))
+        asset.status = "queued"
+        asset.provider = "openverse"
+        asset.storage_uri = None
+        asset.metadata_json = {
+            "pending_candidate_selection": {"candidate_id": "cover-1"},
+            "search_candidates": [{"id": "cover-1", "download_url": "https://image.test/cover.png"}],
+        }
+        asset_id, content_id = asset.id, asset.content_item_id
+        create_workspace_storage_usage(session, fixture["workspace_id"])
+        session.commit()
+    settings = postgres_harness.settings.model_copy(update={"image_search_download_allowed_hosts": ["image.test"]})
+    data = io.BytesIO()
+    Image.new("RGB", (10, 10)).save(data, format="PNG")
+    parent_held, worker_lock_requested = threading.Event(), threading.Event()
+
+    def edit_content():
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+            content = session.scalar(select(ContentItem).where(ContentItem.id == content_id).with_for_update())
+            parent_held.set()
+            assert worker_lock_requested.wait(timeout=10)
+            asset = session.scalar(select(Asset).where(Asset.id == asset_id).with_for_update())
+            content.version += 1
+            content.status = "needs_review"
+            asset.status = "stale"
+            session.commit()
+
+    def download():
+        assert parent_held.wait(timeout=10)
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+
+            def observe_lock(state):
+                if getattr(state.statement, "_for_update_arg", None) is not None and any(
+                    column.get("entity") is ContentItem
+                    for column in getattr(state.statement, "column_descriptions", [])
+                ):
+                    worker_lock_requested.set()
+
+            event.listen(session, "do_orm_execute", observe_lock)
+            with patch("contentflow.worker.download_generated_media", return_value=data.getvalue()):
+                result = handle_asset_download(session, {
+                    "asset_id": asset_id, "candidate_id": "cover-1", "content_version": 1,
+                }, settings)
+            session.commit()
+            return result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        edited, downloaded = pool.submit(edit_content), pool.submit(download)
+        edited.result(timeout=20)
+        assert downloaded.result(timeout=20)["status"] == "stale"
+    with postgres_harness.sessions() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset.status == "stale"
+        assert asset.storage_uri is None
+        assert session.get(ContentItem, content_id).version == 2
 
 
 def test_postgres_driver_sqlstate_classification(postgres_harness: PostgresHarness):

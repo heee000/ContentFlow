@@ -123,6 +123,37 @@ class WorkerIntegrationTest(unittest.TestCase):
         self.assertEqual(observed, [job_id])
         self.assertIsNone(current_provider_job_id(self.workspace_id))
 
+    def test_malformed_review_cannot_create_content_or_assets(self):
+        class MalformedReviewProvider(MockProvider):
+            calls = 0
+
+            def complete_json(self, stage, payload, *, system_prompt=None):
+                self.calls += 1
+                output = super().complete_json(stage, payload, system_prompt=system_prompt)
+                if stage == "review":
+                    output["passed"] = "false"
+                return output
+
+        campaign = self.client.post("/api/v1/campaigns", headers=self.headers, json={
+            "name": "Malformed review", "product_name": "ContentFlow",
+            "objective": "Contract validation", "audience": "Test users", "platforms": ["wechat"],
+        })
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        response = self.client.post(f"/api/v1/campaigns/{campaign.json()['id']}/runs", headers=self.headers, json={})
+        self.assertEqual(response.status_code, 202, response.text)
+        provider = MalformedReviewProvider()
+        with patch("contentflow.workflow_service.build_text_provider", return_value=provider):
+            self.assertTrue(self.worker.run_once())
+            self.assertFalse(self.worker.run_once())
+        self.assertEqual(provider.calls, 3)
+        with db.SessionLocal() as session:
+            run = session.get(WorkflowRun, response.json()["id"])
+            self.assertEqual(run.status, "failed")
+            self.assertEqual(run.result_json["ai_provenance"]["output_validation"]["stage"], "review")
+            self.assertEqual(session.scalar(select(func.count(ContentItem.id))), 0)
+            self.assertEqual(session.scalar(select(func.count(Asset.id))), 0)
+            self.assertEqual(session.scalar(select(Job.status).where(Job.job_type == "workflow.execute")), "manual_review")
+
     def test_workflow_commits_provider_ledger_without_partial_content_writes(self):
         class LedgeredMockProvider(MockProvider):
             provider_name = "openai-compatible"
@@ -1409,6 +1440,7 @@ class WorkerIntegrationTest(unittest.TestCase):
                 "objective": "帮助年轻用户整理夜游路线",
                 "audience": "北京年轻用户",
                 "platforms": ["xiaohongshu"],
+                "image_source": "generate",
                 "must_include": ["候选地点", "路线确认"],
                 "call_to_action": "打开地图产品确认路线",
             },

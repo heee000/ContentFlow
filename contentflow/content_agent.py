@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from .ai_provenance import AIProvenanceRecorder
 from .models import CampaignBrief, ReviewResult
+from .model_output import complete_model_json, validate_model_output
 from .review import RuleReviewer
 
 
@@ -32,44 +33,8 @@ class ContentAgentResult:
     generation_json: dict[str, Any]
 
 
-def _score(value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0.0
-    return round(max(0.0, min(10.0, float(value))), 2)
-
-
 def normalize_editorial_review(raw: Any) -> dict[str, Any]:
-    review = dict(raw) if isinstance(raw, dict) else {}
-    raw_scores = review.get("scores")
-    scores = {
-        dimension: _score(
-            raw_scores.get(dimension) if isinstance(raw_scores, dict) else None
-        )
-        for dimension in QUALITY_DIMENSIONS
-    }
-    reported = _score(review.get("quality_score"))
-    quality_score = reported or round(sum(scores.values()) / len(scores), 2)
-    risk_level = str(review.get("risk_level") or "medium").strip().lower()
-    if risk_level not in {"low", "medium", "high"}:
-        risk_level = "medium"
-
-    def strings(value: Any, *, limit: int) -> list[str]:
-        if not isinstance(value, list):
-            return []
-        return [str(item).strip()[:1000] for item in value[:limit] if str(item).strip()]
-
-    return {
-        **review,
-        "passed": bool(review.get("passed", False)),
-        "risk_level": risk_level,
-        "quality_score": quality_score,
-        "scores": scores,
-        "issues": strings(review.get("issues"), limit=20),
-        "fact_checks": strings(review.get("fact_checks"), limit=20),
-        "strengths": strings(review.get("strengths"), limit=12),
-        "revision_instructions": strings(review.get("revision_instructions"), limit=12),
-        "suggestion": str(review.get("suggestion") or "").strip()[:2000],
-    }
+    return validate_model_output("review", raw)
 
 
 def run_content_agent(
@@ -109,7 +74,8 @@ def run_content_agent(
         },
     }
     emit_stage(f"drafting_{platform}")
-    draft = provenance.complete_json(
+    draft = complete_model_json(
+        provenance,
         "generate",
         {**common, "phase": "initial_draft"},
         platform=platform,
@@ -121,7 +87,8 @@ def run_content_agent(
 
     emit_stage(f"reviewing_{platform}")
     model_review = normalize_editorial_review(
-        provenance.complete_json(
+        complete_model_json(
+            provenance,
             "review",
             {
                 **common,
@@ -144,7 +111,8 @@ def run_content_agent(
         revision_attempt_status = "failed"
         try:
             emit_stage(f"revising_{platform}")
-            revised = provenance.complete_json(
+            revised = complete_model_json(
+                provenance,
                 "generate",
                 {
                     **common,
@@ -163,7 +131,8 @@ def run_content_agent(
                 revised_rule_review = reviewer.review(platform, revised, brief)
             emit_stage(f"final_review_{platform}")
             final_review = normalize_editorial_review(
-                provenance.complete_json(
+                complete_model_json(
+                    provenance,
                     "review",
                     {
                         **common,

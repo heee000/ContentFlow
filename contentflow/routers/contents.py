@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
+from ..asset_operations import require_new_asset_operation
 from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
 from ..entities import Asset, ContentItem, ContentRevision
@@ -266,7 +267,9 @@ def review_content(
                     Asset.content_item_id == item.id,
                     Asset.content_version == item.version,
                     Asset.status.in_(["planned", "failed"]),
-                ).limit(settings.asset_max_items_per_content_version + 1)
+                ).order_by(Asset.id).limit(
+                    settings.asset_max_items_per_content_version + 1
+                ).with_for_update()
             )
         )
         if len(assets) > settings.asset_max_items_per_content_version:
@@ -275,6 +278,7 @@ def review_content(
                 detail="当前内容版本素材数量超过配置上限，请先由管理员处理异常数据",
             )
         for asset in assets:
+            require_new_asset_operation(session, asset)
             requested_provider = asset.provider
             if requested_provider == "openverse":
                 asset.status = "queued"
@@ -289,7 +293,9 @@ def review_content(
                     ),
                 )
                 continue
-            if requested_provider == "configured-image-generation":
+            if requested_provider in {"manual", "manual-upload"}:
+                provider = "manual"
+            elif requested_provider == "configured-image-generation":
                 provider = settings.image_provider
             elif requested_provider == "configured-video-generation":
                 provider = settings.video_provider
@@ -305,6 +311,8 @@ def review_content(
                 if requested_provider in {
                     "configured-image-generation",
                     "configured-video-generation",
+                    "http",
+                    "mock",
                 }:
                     asset.provider = requested_provider
                     asset.status = "failed"

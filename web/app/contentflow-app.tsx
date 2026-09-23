@@ -5495,6 +5495,7 @@ function JobsView({
 }) {
   const [error, setError] = useState("");
   const [reviewJobId, setReviewJobId] = useState("");
+  const [requestingReviewId, setRequestingReviewId] = useState("");
   const [providerChecked, setProviderChecked] = useState(false);
   const [reviewNote, setReviewNote] = useState("");
   const [reviewBusy, setReviewBusy] = useState<"retry" | "abandon" | "">("");
@@ -5514,6 +5515,24 @@ function JobsView({
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
+    }
+  }
+
+  async function requestReview(job: QueueJob) {
+    if (requestingReviewId) return;
+    setRequestingReviewId(job.id);
+    setError("");
+    try {
+      const reviewedJob = await api<QueueJob>(`/jobs/${job.id}/request-manual-review`, {
+        method: "POST",
+      });
+      await onChanged();
+      await openReview(reviewedJob);
+      flash("已进入人工核对；没有重试或新增供应商调用");
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setRequestingReviewId("");
     }
   }
 
@@ -5714,6 +5733,18 @@ function JobsView({
                 <button className="table-link" key="publish" onClick={() => onNavigate("publishing")}>
                   到发布页处理
                 </button>
+              ) : ["asset.generate", "asset.poll"].includes(job.job_type) ? (
+                canReview ? (
+                  <button
+                    type="button"
+                    className="table-link"
+                    key="request-review"
+                    disabled={Boolean(requestingReviewId)}
+                    onClick={() => void requestReview(job)}
+                  >
+                    {requestingReviewId === job.id ? "正在发起核对…" : "发起人工核对"}
+                  </button>
+                ) : <span key="reviewer-needed">生成结果需审核者核对</span>
               ) : (
                 <button className="table-link" key="retry" onClick={() => void retry(job)}>重试</button>
               )

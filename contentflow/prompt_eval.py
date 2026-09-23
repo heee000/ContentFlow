@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .ai_provenance import AIProvenanceRecorder
+from .model_output import MODEL_OUTPUT_SCHEMA_VERSION, complete_model_json
 from .audit import record_audit
 from .entities import PromptEvalRun, PromptEvalSuite, PromptRelease
 from .prompt_governance import prompt_set_from_release
@@ -231,6 +232,8 @@ def require_current_passed_eval(
             PromptEvalRun.suite_hash == suite.suite_hash,
             PromptEvalRun.provider == target_provider_name,
             PromptEvalRun.model == target_model_name,
+            PromptEvalRun.result_json["model_output_schema_version"].as_integer()
+            == MODEL_OUTPUT_SCHEMA_VERSION,
         )
         .order_by(PromptEvalRun.completed_at.desc())
     )
@@ -238,7 +241,8 @@ def require_current_passed_eval(
         raise ValueError(
             "Prompt 版本尚未通过当前评测套件 "
             f"{eval_suite_version(suite.version_number)} 的目标模型门禁 "
-            f"({target_provider_name}/{target_model_name})"
+            f"({target_provider_name}/{target_model_name})；"
+            f"评测必须覆盖当前输出契约 v{MODEL_OUTPUT_SCHEMA_VERSION}"
         )
     return suite, run
 
@@ -356,7 +360,8 @@ def execute_prompt_eval_run(
     results = []
     try:
         for case in cases:
-            output = recorder.complete_json(
+            output = complete_model_json(
+                recorder,
                 case["stage"],
                 dict(case["input_json"]),
             )
@@ -367,6 +372,7 @@ def execute_prompt_eval_run(
         # partial pass, or resumable-output cache is implied.
         error.prompt_eval_partial_result = {
             "schema_version": 1,
+            "model_output_schema_version": MODEL_OUTPUT_SCHEMA_VERSION,
             "suite_version": eval_suite_version(suite.version_number),
             "suite_hash": suite.suite_hash,
             "case_count": len(cases),
@@ -387,6 +393,7 @@ def execute_prompt_eval_run(
     run.error = None
     run.result_json = {
         "schema_version": 1,
+        "model_output_schema_version": MODEL_OUTPUT_SCHEMA_VERSION,
         "suite_version": eval_suite_version(suite.version_number),
         "suite_hash": suite.suite_hash,
         "case_count": len(results),

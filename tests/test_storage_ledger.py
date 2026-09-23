@@ -678,6 +678,58 @@ def test_reconciliation_repairs_legacy_sizes_marks_missing_and_deletes_orphans(
         ledger_harness.storage.read(orphan.uri)
 
 
+@pytest.mark.parametrize("batch_size", [1, 10])
+@pytest.mark.parametrize("clock_backwards", [False, True])
+def test_seen_objects_cannot_become_missing_when_scan_clock_does_not_advance(
+    ledger_harness: LedgerHarness, batch_size: int, clock_backwards: bool,
+):
+    settings = ledger_harness.settings
+    settings.workspace_storage_max_objects = 3
+    settings.workspace_storage_max_bytes = 24
+    settings.storage_cleanup_batch_size = batch_size
+    with ledger_harness.sessions() as session:
+        objects = [
+            _ledger(ledger_harness, session, f"clock-{index}").put(
+                workspace_id=ledger_harness.workspace_id, category="tests",
+                filename=f"clock-{index}.bin", stream=BytesIO(b"12345678"),
+            ) for index in range(3)
+        ]
+        session.commit()
+    ledger_harness.storage.delete(objects[-1].uri)
+    scan_start = datetime.now(timezone.utc) + timedelta(seconds=2)
+
+    class ScanClock(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            value = scan_start - timedelta(seconds=int(clock_backwards and cls.calls > 1))
+            return value if tz else value.replace(tzinfo=None)
+
+    payload = {"workspace_id": ledger_harness.workspace_id, "run_id": "clock-scan"}
+    with patch("contentflow.storage_ledger.datetime", ScanClock), patch(
+        "contentflow.storage_ledger.build_object_storage", return_value=ledger_harness.storage,
+    ):
+        for _ in range(5):
+            with ledger_harness.sessions() as session:
+                result = reconcile_workspace_storage(session, payload, settings)
+                if result["has_next_page"]:
+                    continuation = session.scalar(select(Job).where(Job.job_type == "storage.reconcile", Job.status == "queued"))
+                    assert continuation is not None
+                    payload = dict(continuation.payload_json)
+                    continuation.status = "succeeded"
+                session.commit()
+            if not result["has_next_page"]:
+                break
+        else:
+            pytest.fail("scan did not finish")
+    assert result["missing_detected"] == 1
+    with ledger_harness.sessions() as session:
+        allocations = list(session.scalars(select(StorageObjectAllocation)))
+        assert sorted(row.status for row in allocations) == ["active", "active", "missing"]
+
+
 def test_reconciliation_detects_verified_missing_and_size_integrity_errors(
     ledger_harness: LedgerHarness,
 ):

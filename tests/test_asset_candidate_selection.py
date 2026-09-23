@@ -117,7 +117,7 @@ class AssetCandidateSelectionTest(unittest.TestCase):
                 metadata_json={
                     "content_version": 1,
                     "candidate_group": "cover",
-                    "optional_candidate": True,
+                    "candidate_optional": True,
                     "selected": False,
                     "search_candidates": [
                         {
@@ -153,7 +153,7 @@ class AssetCandidateSelectionTest(unittest.TestCase):
                 metadata_json={
                     "content_version": 1,
                     "candidate_group": "cover",
-                    "optional_candidate": True,
+                    "candidate_optional": True,
                     "selected": True,
                 },
             )

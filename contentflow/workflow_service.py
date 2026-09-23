@@ -18,6 +18,7 @@ from .entities import (
 from .embeddings import build_embedding_provider
 from .knowledge_service import search_workspace_knowledge
 from .models import CampaignBrief
+from .model_output import MODEL_OUTPUT_SCHEMA_VERSION, complete_model_json
 from .prompt_eval import require_current_passed_eval
 from .prompt_governance import resolve_active_prompt_set
 from .provider_invocations import LedgeredEmbeddingProvider, ProviderInvocationLedger
@@ -169,7 +170,8 @@ def execute_workflow_run(
     run.provider = provenance.provider_name
     session.commit()
     publish_stage("planning")
-    plan = provenance.complete_json(
+    plan = complete_model_json(
+        provenance,
         "plan",
         {
             "brief": brief.to_dict(),
@@ -304,6 +306,7 @@ def execute_workflow_run(
     run.completed_at = datetime.now(timezone.utc)
     run.result_json = {
         "agent_schema_version": 1,
+        "model_output_schema_version": MODEL_OUTPUT_SCHEMA_VERSION,
         "agent_mode": "bounded_content_agent",
         "plan": plan,
         "style_skill": {

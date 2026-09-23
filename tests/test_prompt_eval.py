@@ -405,6 +405,33 @@ class PromptEvalGovernanceTest(unittest.TestCase):
             json.dumps(audit.json(), ensure_ascii=False),
         )
 
+    def test_old_output_contract_evidence_cannot_approve_release(self):
+        suite = self.create_suite("Output schema gate")
+        self.activate_suite(suite["id"])
+        release = self.create_release("output-schema-gate")
+        run = self.evaluate(release["id"])
+        self.assertEqual(run["status"], "passed", run)
+        self.assertEqual(run["result_json"]["model_output_schema_version"], 1)
+        with db.SessionLocal() as session:
+            stored = session.get(PromptEvalRun, run["id"])
+            result = dict(stored.result_json)
+            result.pop("model_output_schema_version")
+            stored.result_json = result
+            session.commit()
+        blocked = self.client.post(
+            f"/api/v1/admin/prompt-releases/{release['id']}/approve",
+            headers=self.reviewer_headers, json={"note": "Legacy evidence is insufficient"},
+        )
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertIn("输出契约", blocked.text)
+        rerun = self.evaluate(release["id"])
+        self.assertEqual(rerun["status"], "passed", rerun)
+        approved = self.client.post(
+            f"/api/v1/admin/prompt-releases/{release['id']}/approve",
+            headers=self.reviewer_headers, json={"note": "Current contract verified"},
+        )
+        self.assertEqual(approved.status_code, 200, approved.text)
+
     def test_mid_suite_error_preserves_assertions_but_never_satisfies_gate(self):
         for failing in (False, True):
             with self.subTest(failing=failing):
