@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { currentCookieHeaders } from "./session-helpers";
 
 const API = "http://127.0.0.1:18765/api/v1";
 const headers = { "X-ContentFlow-Session-Mode": "cookie", Origin: "http://127.0.0.1:18766" };
@@ -19,7 +20,7 @@ async function openReview(page: Page, name: string) {
   await page.getByRole("navigation", { name: "工作台导航" }).getByRole("button", { name: /^2 审核内容(?: \d+)?$/ }).click();
   await page.locator(".review-queue").getByRole("button").filter({ hasText: `TEST-ONLY review-${name} project` }).click();
   await expect(editor(page).getByLabel("标题", { exact: true })).toHaveValue(`TEST-ONLY review-${name}`);
-  const response = await page.request.get(`${API}/contents`, { headers });
+  const response = await page.request.get(`${API}/contents`, { headers: await currentCookieHeaders(page) });
   const contents: { id: string; title: string; campaign_id: string }[] = await response.json();
   const item = contents.find((item) => item.title === `TEST-ONLY review-${name}`);
   if (!item) throw new Error("Missing isolated review fixture");
@@ -32,7 +33,7 @@ test("unsaved text cannot approve the previously saved version", async ({ page }
   await editor(page).getByRole("textbox", { name: "正文", exact: true }).fill("本地尚未保存的替换稿");
   await expect(approval(page)).toBeDisabled();
   await expect(editor(page).getByText("有未保存修改，请先保存后再审核。", { exact: true })).toBeVisible();
-  const saved = await (await page.request.get(`${API}/contents/${item.id}`, { headers })).json();
+  const saved = await (await page.request.get(`${API}/contents/${item.id}`, { headers: await currentCookieHeaders(page) })).json();
   expect(saved.version).toBe(1);
   expect(saved.status).toBe("needs_review");
 });
@@ -62,18 +63,18 @@ test("saved new version requires explicit warning acknowledgement and preserves 
   const response = await reviewResponse;
   expect(response.status()).toBe(200);
   expect(response.request().postDataJSON().expected_version).toBe(2);
-  const saved = await (await page.request.get(`${API}/contents/${item.id}`, { headers })).json();
+  const saved = await (await page.request.get(`${API}/contents/${item.id}`, { headers: await currentCookieHeaders(page) })).json();
   expect(saved.version).toBe(2);
   expect(saved.status).toBe("approved");
   expect(saved.review_json.human_content_version).toBe(2);
-  const history = await (await page.request.get(`${API}/contents/${item.id}/review-evidence`, { headers })).json();
+  const history = await (await page.request.get(`${API}/contents/${item.id}/review-evidence`, { headers: await currentCookieHeaders(page) })).json();
   expect(history.some((row: { event: string; content_version: number }) => row.event === "superseded" && row.content_version === 1)).toBeTruthy();
 });
 
 test("remote edit never silently overwrites a dirty draft", async ({ page }) => {
   const item = await openReview(page, "conflict");
   await editor(page).getByRole("textbox", { name: "正文", exact: true }).fill("尚未保存的本地版本，需要保留");
-  const edited = await page.request.patch(`${API}/contents/${item.id}`, { headers, data: { expected_version: 1, body: "另一页面保存的新版本" } });
+  const edited = await page.request.patch(`${API}/contents/${item.id}`, { headers: await currentCookieHeaders(page), data: { expected_version: 1, body: "另一页面保存的新版本" } });
   expect(edited.status()).toBe(200);
   await page.getByRole("button", { name: "刷新数据", exact: true }).click();
   await expect(editor(page).getByText("服务器上的版本或审核状态已变化。当前输入已保留，请核对后重新载入。", { exact: true })).toBeVisible();
@@ -153,7 +154,7 @@ test("lost committed save receipt retains draft until explicit reload of the sav
   await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toBeVisible();
   await expect(editor(page).getByRole("textbox", { name: "正文", exact: true })).toHaveValue(savedText);
   await expect(approval(page)).toBeDisabled();
-  const saved = await (await page.request.get(`${API}/contents/${item.id}`, { headers })).json();
+  const saved = await (await page.request.get(`${API}/contents/${item.id}`, { headers: await currentCookieHeaders(page) })).json();
   expect(saved.version).toBe(2);
   expect(saved.status).toBe("needs_review");
   page.once("dialog", (dialog) => dialog.dismiss());
@@ -206,7 +207,7 @@ test("unchanged current model evidence can be approved without an exception", as
   const response = await reviewed;
   expect(response.status()).toBe(200);
   expect(response.request().postDataJSON()).toMatchObject({ expected_version: 1, acknowledge_review_warnings: false });
-  const saved = await (await page.request.get(`${API}/contents/${item.id}`, { headers })).json();
+  const saved = await (await page.request.get(`${API}/contents/${item.id}`, { headers: await currentCookieHeaders(page) })).json();
   expect(saved.status).toBe("approved");
   expect(saved.review_json.human_warnings).toEqual([]);
 });

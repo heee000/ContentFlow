@@ -44,6 +44,7 @@ class TokenResponse(BaseModel):
     expires_in: int
     workspace_id: str
     role: str
+    context: str
 
 
 class UserResponse(ORMModel):
@@ -233,6 +234,7 @@ class SessionResponse(BaseModel):
     user: UserResponse
     workspace: WorkspaceResponse
     role: str
+    context: str
 
 
 class CampaignCreate(BaseModel):

@@ -62,7 +62,8 @@ def main():
                 }
                 session.commit()
         for name in ["dirty", "save", "failed-save", "conflict", "navigation", "legacy",
-            "busy", "lost-save-receipt", "workspace", "clean-approval", "invalid-layout"]:
+            "busy", "lost-save-receipt", "workspace", "clean-approval", "invalid-layout",
+            "context-draft", "refresh-lost", "refresh-unsupported"]:
             identifiers = fixture._create_publish_fixture(status="cancelled")
             with db.SessionLocal() as session:
                 content = session.get(ContentItem, identifiers["content_id"])

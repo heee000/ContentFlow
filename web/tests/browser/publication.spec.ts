@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { currentCookieHeaders } from "./session-helpers";
 
 const API = "http://127.0.0.1:18765/api/v1";
 const cookieHeaders = { "X-ContentFlow-Session-Mode": "cookie", Origin: "http://127.0.0.1:18766" };
@@ -44,7 +45,7 @@ async function acknowledge(page: Page) {
 }
 
 async function publicationsFor(page: Page, contentId: string) {
-  const response = await page.request.get(`${API}/publishing/jobs`, { headers: cookieHeaders });
+  const response = await page.request.get(`${API}/publishing/jobs`, { headers: await currentCookieHeaders(page) });
   expect(response.ok()).toBeTruthy();
   const jobs: { id: string; content_item_id: string; status: string }[] = await response.json();
   return jobs.filter((job) => job.content_item_id === contentId && job.status !== "cancelled");
@@ -108,7 +109,7 @@ test("a saved edit invalidates the old preview without creating work", async ({ 
   const contentId = await startPreview(page, "stale");
   await acknowledge(page);
   const edited = await page.request.patch(`${API}/contents/${contentId}`, {
-    headers: cookieHeaders, data: { body: "Edited in another tab after preview.", expected_version: 1 },
+    headers: await currentCookieHeaders(page), data: { body: "Edited in another tab after preview.", expected_version: 1 },
   });
   expect(edited.status()).toBe(200);
   const receipt = page.waitForResponse((response) => response.url() === `${API}/publishing/jobs` && response.request().method() === "POST");

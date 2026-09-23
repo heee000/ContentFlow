@@ -13,7 +13,7 @@
     "start:local": "next start -p 3001",
     "dev:sites": "vinext dev",
     "build:sites": "vinext build",
-    "test": "npm run build:sites && node --test tests/rendered-html.test.mjs",
+    "test": "npm run build:sites && node --test tests/rendered-html.test.mjs tests/browser-session.test.mjs",
     "test:e2e": "playwright test",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },

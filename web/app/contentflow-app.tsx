@@ -11,6 +11,7 @@ import {
 } from "react";
 import {
   ApiError,
+  StaleResponseError,
   api,
   apiAllPages,
   download,
@@ -18,6 +19,11 @@ import {
   runtimeApiBaseConfigurable,
   setApiBase,
 } from "@/lib/contentflow-api";
+import {
+  activateBrowserSession, authenticateBrowserSession, captureContext, assertContext,
+  createBrowserWorkspace, logoutBrowserSession, restoreBrowserSession,
+  SESSION_CONTEXT_EVENT, switchBrowserWorkspace, type BrowserSession,
+} from "@/lib/browser-session";
 import { PublicationPreview, PublicationPreviewData, PublishIntent, readPendingPublication } from "@/components/publication-preview";
 
 type View =
@@ -32,11 +38,7 @@ type View =
   | "jobs"
   | "admin";
 
-type Session = {
-  user: { id: string; email: string; display_name: string };
-  workspace: { id: string; name: string };
-  role: string;
-};
+type Session = BrowserSession;
 
 type Campaign = {
   id: string;
@@ -685,7 +687,8 @@ async function loadMetrics(path: string): Promise<MetricsSummary> {
   } catch (error) {
     // Authentication failures still invalidate the session; an unavailable
     // analytics endpoint must not blank unrelated project/review queues.
-    if (error instanceof ApiError && [401, 403].includes(error.status)) throw error;
+    if (error instanceof StaleResponseError || (error instanceof ApiError
+      && ([401, 403].includes(error.status) || error.code.startsWith("session_context_")))) throw error;
     return { ...EMPTY_DATA.metrics, load_error: "指标暂时无法加载，其他工作台功能可继续使用。未加载的数据不代表零。" };
   }
 }
@@ -1119,11 +1122,7 @@ function AuthScreen({
               display_name: String(form.get("display_name") || ""),
               workspace_name: String(form.get("workspace_name") || ""),
             };
-      await api<unknown>(
-        mode === "login" ? "/auth/login" : "/auth/register",
-        { method: "POST", body: payload },
-      );
-      const current = await api<Session>("/auth/session");
+      const current = await authenticateBrowserSession(mode, payload);
       onAuthenticated(current);
     } catch (caught) {
       setError(messageOf(caught));
@@ -1240,11 +1239,31 @@ export function ContentFlowApp() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [pageWarning, setPageWarning] = useState("");
+  const [contextBlocked, setContextBlocked] = useState(false);
+  const dataGeneration = useRef(0);
   const pollInFlight = useRef(false);
   const lastOperationalRefresh = useRef<string | null>(null);
   const reviewLeaveGuard = useRef<(() => boolean) | null>(null);
   const registerReviewLeaveGuard = useCallback((guard: (() => boolean) | null) => {
     reviewLeaveGuard.current = guard;
+  }, []);
+
+  const acceptSession = useCallback((current: Session) => {
+    activateBrowserSession(current);
+    dataGeneration.current += 1;
+    lastOperationalRefresh.current = null;
+    setContextBlocked(false);
+    setSession(current);
+  }, []);
+
+  useEffect(() => {
+    const block = () => {
+      dataGeneration.current += 1;
+      setContextBlocked(true);
+      setRefreshing(false);
+    };
+    window.addEventListener(SESSION_CONTEXT_EVENT, block);
+    return () => window.removeEventListener(SESSION_CONTEXT_EVENT, block);
   }, []);
 
   function setView(next: View) {
@@ -1253,8 +1272,11 @@ export function ContentFlowApp() {
   }
 
   const loadData = useCallback(async () => {
+    if (contextBlocked) return;
+    const generation = ++dataGeneration.current;
     setRefreshing(true);
     try {
+      const context = captureContext();
       const [
         dashboard,
         campaignPage,
@@ -1326,6 +1348,8 @@ export function ContentFlowApp() {
             )
           : Promise.resolve({ items: [], truncated: false, syncTime: null }),
       ]);
+      assertContext(context);
+      if (generation !== dataGeneration.current) return;
       const limitedCollections = [
         ["活动", campaignPage.truncated],
         ["运行记录", runPage.truncated],
@@ -1388,19 +1412,21 @@ export function ContentFlowApp() {
       );
       setError("");
     } catch (caught) {
+      if (caught instanceof StaleResponseError || generation !== dataGeneration.current) return;
       if (caught instanceof ApiError && caught.status === 401) {
-        setSession(null);
+        setContextBlocked(true);
       } else {
         setError(messageOf(caught));
       }
     } finally {
-      setRefreshing(false);
+      if (generation === dataGeneration.current) setRefreshing(false);
     }
-  }, [session, campaignFilter]);
+  }, [session, campaignFilter, contextBlocked]);
 
   const pollOperationalData = useCallback(async () => {
     if (
       !session
+      || contextBlocked
       || pollInFlight.current
       || typeof document === "undefined"
       || document.visibilityState === "hidden"
@@ -1409,7 +1435,9 @@ export function ContentFlowApp() {
     if (!updatedAfter) return;
     const query = `updated_after=${encodeURIComponent(updatedAfter)}`;
     pollInFlight.current = true;
+    const generation = dataGeneration.current;
     try {
+      const context = captureContext();
       const [
         dashboard,
         campaignPage,
@@ -1433,6 +1461,8 @@ export function ContentFlowApp() {
             : "/metrics/summary",
         ),
       ]);
+      assertContext(context);
+      if (generation !== dataGeneration.current) return;
       setData((current) => ({
         ...current,
         dashboard,
@@ -1466,29 +1496,32 @@ export function ContentFlowApp() {
       }
       setError("");
     } catch (caught) {
+      if (caught instanceof StaleResponseError || generation !== dataGeneration.current) return;
       if (caught instanceof ApiError && caught.status === 401) {
-        setSession(null);
+        setContextBlocked(true);
       } else {
         setError(messageOf(caught));
       }
     } finally {
       pollInFlight.current = false;
     }
-  }, [session, campaignFilter]);
+  }, [session, campaignFilter, contextBlocked]);
 
   useEffect(() => {
+    let active = true;
     async function restore() {
       try {
-        const current = await api<Session>("/auth/session");
-        setSession(current);
+        const current = await restoreBrowserSession();
+        if (active) acceptSession(current);
       } catch {
-        setSession(null);
+        if (active) setSession(null);
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     }
     void restore();
-  }, []);
+    return () => { active = false; };
+  }, [acceptSession]);
 
   const hasActiveWork = data.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status))
     || data.assets.some((asset) => ["queued", "generating", "processing"].includes(asset.status));
@@ -1520,15 +1553,11 @@ export function ContentFlowApp() {
     if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
     setRefreshing(true);
     try {
-      await api<unknown>(
-        `/auth/switch/${workspaceId}`,
-        { method: "POST" },
-      );
-      const current = await api<Session>("/auth/session");
+      const current = await switchBrowserWorkspace(workspaceId);
       setData(EMPTY_DATA);
       setCampaignFilter("");
       setViewState("dashboard");
-      setSession(current);
+      acceptSession(current);
       flash(`已切换到 ${current.workspace.name}`);
     } catch (caught) {
       setError(messageOf(caught));
@@ -1539,27 +1568,25 @@ export function ContentFlowApp() {
 
   async function createAndActivateWorkspace(name: string) {
     if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
-    await api<unknown>("/auth/workspaces", {
-      method: "POST",
-      body: { name },
-    });
-    const current = await api<Session>("/auth/session");
+    const current = await createBrowserWorkspace(name);
     setData(EMPTY_DATA);
     setCampaignFilter("");
     setViewState("dashboard");
-    setSession(current);
+    acceptSession(current);
     flash(`工作区 ${current.workspace.name} 已创建`);
   }
 
   async function signOut() {
     if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
     try {
-      await api<void>("/auth/logout", { method: "POST" });
-    } finally {
+      await logoutBrowserSession();
+      dataGeneration.current += 1;
       setSession(null);
       setData(EMPTY_DATA);
       setCampaignFilter("");
       setViewState("dashboard");
+    } catch (caught) {
+      setError(messageOf(caught));
     }
   }
 
@@ -1572,7 +1599,7 @@ export function ContentFlowApp() {
     );
   }
   if (!session) {
-    return <AuthScreen onAuthenticated={setSession} />;
+    return <AuthScreen onAuthenticated={acceptSession} />;
   }
 
   const effectiveCampaignFilter = data.campaigns.some((campaign) => campaign.id === campaignFilter)
@@ -1766,6 +1793,15 @@ export function ContentFlowApp() {
           ) : null}
         </div>
         <main className="workspace">
+          {contextBlocked ? (
+            <section className="panel form-panel" role="alert" aria-label="会话上下文已变化">
+              <h2>会话或工作区已在其他页面变化，或续期无法安全完成</h2>
+              <p>本页输入已保留，新的请求已暂停。请先复制尚未保存的文案；不要把当前页面当作新工作区继续操作。</p>
+              <Button onClick={() => {
+                if (window.confirm("重新载入将离开当前页面并丢弃未保存输入。请确认已复制需要保留的文案，是否继续？")) window.location.reload();
+              }}>同步当前会话</Button>
+            </section>
+          ) : null}
           {notice ? (
             <div className="toast toast-success" role="status" aria-live="polite">
               {notice}

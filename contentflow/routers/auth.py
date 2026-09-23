@@ -48,6 +48,7 @@ from ..security import (
     verify_password,
 )
 from ..storage_ledger import create_workspace_storage_usage
+from ..session_context import browser_context, require_browser_context
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -272,6 +273,7 @@ def issue_token_response(
         expires_in=settings.access_token_minutes * 60,
         workspace_id=workspace.id,
         role=membership.role,
+        context=browser_context(auth_session, settings),
     )
 
 
@@ -432,16 +434,10 @@ def login(
     )
 
 
-@router.post(
-    "/refresh",
-    response_model=TokenResponse,
-    response_model_exclude_none=True,
-)
-def refresh_session(
+def _refresh_identity(
     request: Request,
-    response: Response,
-    session: Db,
-    settings: AppSettings,
+    session: Session,
+    settings,
 ):
     require_trusted_origin(request, settings)
     refresh_token = request.cookies.get(settings.refresh_cookie_name)
@@ -473,6 +469,7 @@ def refresh_session(
     auth_session = session.scalar(
         select(AuthSession)
         .where(AuthSession.id == session_id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if auth_session is None:
@@ -527,6 +524,22 @@ def refresh_session(
         session.commit()
         raise HTTPException(status_code=401, detail="用户或工作区访问权限已失效")
 
+    return auth_session, user, workspace, membership
+
+
+@router.post("/bootstrap", response_model=SessionResponse)
+def bootstrap_session(request: Request, session: Db, settings: AppSettings):
+    # A fresh/reloaded page with an expired access cookie can discover a
+    # precondition without rotating refresh cookies. No access token is returned.
+    auth_session, user, workspace, membership = _refresh_identity(request, session, settings)
+    return SessionResponse(user=user, workspace=workspace, role=membership.role,
+        context=browser_context(auth_session, settings))
+
+
+@router.post("/refresh", response_model=TokenResponse, response_model_exclude_none=True)
+def refresh_session(request: Request, response: Response, session: Db, settings: AppSettings):
+    auth_session, user, workspace, membership = _refresh_identity(request, session, settings)
+    require_browser_context(request, auth_session, settings)
     next_refresh_token = rotate_auth_session(
         session,
         auth_session,
@@ -576,7 +589,7 @@ def logout(
         require_trusted_origin(request, settings)
 
     authenticated_session_ids: set[str] = set()
-    if refresh_token:
+    if refresh_token and not bearer_token:
         try:
             refresh_session_id = parse_refresh_token(refresh_token)
             auth_session = session.scalar(
@@ -611,7 +624,7 @@ def logout(
         except ValueError:
             pass
 
-    for token in (bearer_token, access_token):
+    for token in ((bearer_token,) if bearer_token else (access_token,)):
         if not token:
             continue
         try:
@@ -629,8 +642,12 @@ def logout(
         auth_sessions = session.scalars(
             select(AuthSession)
             .where(AuthSession.id.in_(authenticated_session_ids))
+            .execution_options(populate_existing=True)
             .with_for_update()
         ).all()
+        if not bearer_token:
+            for auth_session in auth_sessions:
+                require_browser_context(request, auth_session, settings)
         now = _now()
         for auth_session in auth_sessions:
             if auth_session.revoked_at is not None:
@@ -681,11 +698,12 @@ def logout_all(
 
 
 @router.get("/session", response_model=SessionResponse)
-def session_info(principal: CurrentPrincipal):
+def session_info(principal: CurrentPrincipal, settings: AppSettings):
     return SessionResponse(
         user=principal.user,
         workspace=principal.workspace,
         role=principal.role,
+        context=browser_context(principal.auth_session, settings),
     )
 
 

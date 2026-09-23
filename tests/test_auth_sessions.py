@@ -43,9 +43,12 @@ class AuthSessionTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def cookie_headers(self) -> dict[str, str]:
+        current = self.client.get("/api/v1/auth/session")
+        context = current.json().get("context") if current.status_code == 200 else None
         return {
             "Origin": self.origin,
             "X-ContentFlow-Session-Mode": "cookie",
+            **({"X-ContentFlow-Context": context} if context else {}),
         }
 
     def register_cookie(self, email: str = "cookie-owner@example.com"):

@@ -64,11 +64,12 @@ test("server-renders the ContentFlow application shell", async () => {
 });
 
 test("keeps production copy and design tokens in source", async () => {
-  const [page, app, apiClient, css, design, packageJson, security] =
+  const [page, app, apiClient, apiConfig, css, design, packageJson, security] =
     await Promise.all([
       readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
       readFile(new URL("../app/contentflow-app.tsx", import.meta.url), "utf8"),
       readFile(new URL("../lib/contentflow-api.ts", import.meta.url), "utf8"),
+      readFile(new URL("../lib/api-config.ts", import.meta.url), "utf8"),
       readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
       readFile(new URL("../DESIGN.md", import.meta.url), "utf8"),
       readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -138,8 +139,10 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(design, /No fake analytics or fake platform publish success/);
   assert.match(design, /progressive disclosure/);
   assert.match(app, /生产环境 API 地址由构建配置固定/);
-  assert.match(apiClient, /RUNTIME_API_BASE_CONFIGURABLE/);
+  assert.match(apiConfig, /RUNTIME_API_BASE_CONFIGURABLE/);
+  assert.match(apiClient, /export \{ getApiBase, setApiBase, runtimeApiBaseConfigurable \} from "\.\/api-config"/);
   assert.doesNotMatch(apiClient, /localStorage\.setItem\("contentflow_token"/);
+  assert.doesNotMatch(apiConfig, /localStorage\.setItem\("contentflow_token"/);
   assert.match(security, /Content-Security-Policy/);
   assert.match(security, /Strict-Transport-Security/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
