@@ -33,6 +33,7 @@ from starlette.datastructures import UploadFile
 
 from contentflow.auth_rate_limit import RateLimitKey, consume_rate_limits
 from contentflow.asset_operations import AssetOperationConflict
+from contentflow.asset_work import AssetWorkSuperseded
 from contentflow.audit import record_audit, verify_audit_chain
 from contentflow.connectors import ConnectorResult
 from contentflow.entities import (
@@ -641,16 +642,19 @@ def test_postgres_download_and_content_edit_share_lock_order(postgres_harness: P
 
             event.listen(session, "do_orm_execute", observe_lock)
             with patch("contentflow.worker.download_generated_media", return_value=data.getvalue()):
-                result = handle_asset_download(session, {
-                    "asset_id": asset_id, "candidate_id": "cover-1", "content_version": 1,
-                }, settings)
-            session.commit()
-            return result
+                with pytest.raises(AssetWorkSuperseded):
+                    handle_asset_download(session, {
+                        "asset_id": asset_id, "candidate_id": "cover-1", "content_version": 1,
+                    }, settings)
+            # Same rollback boundary as Worker: tentative attachment must not
+            # commit just because the remote read succeeded.
+            session.rollback()
+            return session.get(Asset, asset_id).status
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         edited, downloaded = pool.submit(edit_content), pool.submit(download)
         edited.result(timeout=20)
-        assert downloaded.result(timeout=20)["status"] == "stale"
+        assert downloaded.result(timeout=20) == "stale"
     with postgres_harness.sessions() as session:
         asset = session.get(Asset, asset_id)
         assert asset.status == "stale"

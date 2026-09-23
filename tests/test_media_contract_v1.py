@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import httpx
 import yaml
@@ -507,8 +507,10 @@ class MediaContractAdapterTest(unittest.TestCase):
             prompt="create a short video",
             metadata_json={"content_version": 1},
         )
-        session = Mock()
+        session = MagicMock()
+        session.info = {}
         session.get.return_value = asset
+        session.scalar.return_value = asset
         provider = Mock()
         provider.generate.return_value = MediaGeneration(
             status="processing",

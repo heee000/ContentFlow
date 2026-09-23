@@ -7,9 +7,10 @@ against claim/recovery on the Job row; late provider evidence remains writable.
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from weakref import WeakSet
 
 from sqlalchemy import event, select, update
 from sqlalchemy.engine import Engine
@@ -20,6 +21,10 @@ from .entities import Job
 
 class JobLeaseLost(RuntimeError):
     """The claimed worker attempt no longer has authority to act."""
+
+
+class ExecutionTransactionOpen(RuntimeError):
+    """External storage I/O cannot run while this execution holds a write fence."""
 
 
 PROVIDER_EVIDENCE_SESSION = "contentflow_provider_evidence"
@@ -35,6 +40,7 @@ class ExecutionFence:
     lease_token: str
     lease_seconds: int
     heartbeat_lost: Callable[[], bool]
+    write_sessions: WeakSet = field(default_factory=WeakSet, compare=False, repr=False)
 
     def lost(self) -> JobLeaseLost:
         return JobLeaseLost(
@@ -89,6 +95,8 @@ class ExecutionFence:
         locked_at = result.scalar_one_or_none()
         if not self.timestamp_is_live(locked_at) or self.heartbeat_lost():
             raise self.lost()
+        session.info["contentflow_execution_write_fence"] = self
+        self.write_sessions.add(session)
 
 
 _execution: ContextVar[ExecutionFence | None] = ContextVar("contentflow_execution", default=None)
@@ -110,11 +118,27 @@ def assert_execution_active() -> None:
         fence.check()
 
 
+def current_execution_fence() -> ExecutionFence | None:
+    return _execution.get()
+
+
+def assert_storage_io_safe() -> None:
+    fence = _execution.get()
+    if fence is not None:
+        fence.check()
+        if any(session.in_transaction() and session.info.get(
+                "contentflow_execution_write_fence") is fence
+                for session in fence.write_sessions):
+            raise ExecutionTransactionOpen(
+                "Worker storage I/O requires the fenced write transaction to finish first"
+            )
+
+
 def guarded_operation(function):
     """Check before one storage/SDK operation; an in-flight operation may finish."""
     @wraps(function)
     def guarded(*args, **kwargs):
-        assert_execution_active()
+        assert_storage_io_safe()
         return function(*args, **kwargs)
     return guarded
 
@@ -157,3 +181,9 @@ def _before_execute(state):
     # Conservative for text SQL (including reads): no unguarded raw DML path.
     if not state.is_select and not state.execution_options.get("contentflow_readonly"):
         _guard_session(state.session)
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _after_transaction_end(session, transaction):
+    if transaction.parent is None:
+        session.info.pop("contentflow_execution_write_fence", None)

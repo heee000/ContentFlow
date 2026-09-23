@@ -261,6 +261,7 @@ type QueueJob = {
   max_attempts: number;
   run_at: string;
   last_error: string | null;
+  result_json?: { outcome?: string };
   updated_at: string;
   manual_review: {
     id: string;
@@ -391,6 +392,7 @@ type StorageUsage = {
   delete_pending_objects: number;
   missing_objects: number;
   integrity_error_objects: number;
+  staging_objects?: number;
   abandoned_reservations: number;
   last_reconciled_at: string | null;
 };
@@ -399,10 +401,12 @@ type StorageObjectAllocation = {
   id: string;
   owner_type: string;
   owner_id: string;
+  write_job_id?: string | null;
   category: string;
   filename: string;
   status:
     | "reserved"
+    | "staging"
     | "active"
     | "delete_pending"
     | "missing"
@@ -807,10 +811,12 @@ const STATUS: Record<string, string> = {
   stale: "旧版本",
   submitted: "已提交",
   succeeded: "成功",
+  superseded: "旧结果未采用",
   reserved: "写入预留",
   delete_pending: "等待删除",
   missing: "对象缺失",
   integrity_error: "完整性异常",
+  staging: "写入待确认",
   deleted: "已删除",
   abandoned: "已释放预留",
 };
@@ -4840,6 +4846,9 @@ function AdministrationView({
   const [error, setError] = useState("");
   const [auditIntegrity, setAuditIntegrity] = useState<AuditIntegrity | null>(null);
   const [auditChecking, setAuditChecking] = useState(true);
+  const [discardStorageId, setDiscardStorageId] = useState("");
+  const [discardStorageNote, setDiscardStorageNote] = useState("");
+  const [discardStorageConfirmed, setDiscardStorageConfirmed] = useState(false);
   const [promptDraftSource, setPromptDraftSource] = useState<
     "active" | "builtin"
   >("active");
@@ -4940,6 +4949,27 @@ function AdministrationView({
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function discardStagedStorage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!discardStorageId || !discardStorageConfirmed || discardStorageNote.trim().length < 8 || busy) return;
+    const id = discardStorageId;
+    if (!window.confirm("确认排队删除这个待确认文件？物理删除无法撤销；系统仍会检查原任务、安全等待期和引用。")) return;
+    setBusy(`storage-discard:${id}`);
+    setError("");
+    try {
+      await api<QueueJob>(`/admin/storage/objects/${id}/discard-staged`, {
+        method: "POST", body: { confirmed_no_inflight_write: true, note: discardStorageNote.trim() },
+      });
+      setDiscardStorageId("");
+      flash("清理请求已接受；实际删除成功前仍占用额度。原生成/发布任务不会因此重试。");
+      await onChanged();
+    } catch (caught) {
+      setError(`${messageOf(caught)}。若请求结果不明，请先刷新存储记录核对；同一对象重发只返回原清理任务。`);
     } finally {
       setBusy("");
     }
@@ -5246,6 +5276,7 @@ function AdministrationView({
                   {storageUsage.integrity_error_objects
                     ? ` · 完整性异常 ${storageUsage.integrity_error_objects}`
                     : ""}
+                  {storageUsage.staging_objects ? ` · 写入待确认 ${storageUsage.staging_objects}` : ""}
                   {storageUsage.abandoned_reservations
                     ? ` · 已释放 ${storageUsage.abandoned_reservations}`
                     : ""}
@@ -5255,7 +5286,10 @@ function AdministrationView({
             <p className="form-note storage-note" role="status">
               {storageUsage.unverified_objects
                 ? `${storageUsage.unverified_objects} 个历史对象尚未验证大小；完成核对前会阻止新增上传。`
-                : "账本中的对象大小均已验证。"}
+                : "账本中的对象大小已记录。"}
+              {storageUsage.staging_objects
+                ? " 写入待确认对象可能仍在上传或在上次中断后未完成入库，继续占用额度；请先核对关联任务，孤儿清理不会删除它们。"
+                : ""}
               {storageUsage.last_reconciled_at
                 ? ` 最近一次完成核对：${formatDateTime(storageUsage.last_reconciled_at)}。`
                 : " 尚未完成过全量核对。"}
@@ -5265,11 +5299,12 @@ function AdministrationView({
           <p className="form-note" role="status">正在读取当前工作区的存储账本…</p>
         )}
         <DataTable
-          headers={["状态", "文件", "归属", "大小", "重试 / 原因", "更新时间"]}
+          headers={["状态", "文件", "归属", "大小", "重试 / 原因", "更新时间", "核对"]}
           rows={storageAttention.map((item) => [
             <StatusBadge key="status" value={item.status} />,
             <span key="file"><strong>{item.filename}</strong><br /><small>{item.category}</small></span>,
-            <code key="owner">{item.owner_type} · {item.owner_id.slice(0, 8)}</code>,
+            <span key="owner"><code>{item.owner_type} · {item.owner_id.slice(0, 8)}</code>
+              {item.write_job_id ? <small>来源任务：<code>{item.write_job_id}</code></small> : null}</span>,
             item.size_verified ? formatBytes(item.size_bytes) : "待验证",
             item.last_error
               ? `${item.delete_attempts} 次 · ${item.last_error}`
@@ -5277,9 +5312,23 @@ function AdministrationView({
                 ? `${item.delete_attempts} 次`
                 : "—",
             formatDateTime(item.updated_at),
+            item.status === "staging" ? <Button key="discard" kind="ghost" disabled={Boolean(busy)} onClick={() => {
+              setDiscardStorageId(item.id); setDiscardStorageNote(""); setDiscardStorageConfirmed(false);
+            }}>核对后申请清理</Button> : "—",
           ])}
-          empty="当前没有缺失、完整性异常、待删除或已释放的对象"
+          empty="当前没有写入待确认、缺失、完整性异常、待删除或已释放的对象"
         />
+        {discardStorageId ? (
+          <form className="form-grid" onSubmit={(event) => void discardStagedStorage(event)} aria-label="核对待确认写入">
+            <p className="form-note">对象编号：<code>{discardStorageId}</code>。先核对原 Worker 已停止、没有在途上传且文件不再需要；无法确认时保留记录。来源任务须已终止或进入人工核对，并经过配置的存储安全等待期。此操作只清理文件，不取消或重试原任务。</p>
+            <label>核对说明<textarea value={discardStorageNote} onChange={(event) => setDiscardStorageNote(event.target.value)} minLength={8} maxLength={2000} required disabled={Boolean(busy)} /></label>
+            <label><input type="checkbox" checked={discardStorageConfirmed} onChange={(event) => setDiscardStorageConfirmed(event.target.checked)} disabled={Boolean(busy)} />我已确认旧 Worker 和在途存储写入均已停止，此文件可以删除</label>
+            <Button type="submit" disabled={Boolean(busy) || !discardStorageConfirmed || discardStorageNote.trim().length < 8}>
+              {busy === `storage-discard:${discardStorageId}` ? <span className="button-spinner" aria-hidden="true" /> : null}确认排队清理
+            </Button>
+            <Button type="button" kind="ghost" disabled={Boolean(busy)} onClick={() => setDiscardStorageId("")}>保留文件，关闭核对</Button>
+          </form>
+        ) : null}
       </section>
 
 
@@ -5993,14 +6042,16 @@ function JobsView({
       ) : null}
       <section className="panel">
         <DataTable
-          headers={["项目 / 内容", "任务类型", "执行时间", "尝试次数", "状态", "最近错误", "操作"]}
+          headers={["项目 / 内容", "任务类型", "执行时间", "尝试次数", "状态", "执行结果 / 最近错误", "操作"]}
           rows={jobs.map((job) => [
             <ProjectIdentity key="project" context={job.context} compact />,
             job.job_type,
             formatDateTime(job.run_at),
             `${job.attempts} / ${job.max_attempts}`,
-            <StatusBadge key="status" value={job.status} />,
-            job.last_error || "—",
+            <StatusBadge key="status" value={job.status === "succeeded" && job.result_json?.outcome === "superseded" ? "superseded" : job.status} />,
+            job.status === "succeeded" && job.result_json?.outcome === "superseded"
+              ? "内容或素材已变化，旧结果未采用；如有暂存对象，请在存储管理核对。"
+              : job.last_error || "—",
             job.status === "manual_review" ? (
               canReview ? (
                 <button className="table-link" key="review" onClick={() => void openReview(job)}>核对处理</button>

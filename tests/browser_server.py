@@ -16,7 +16,7 @@ def main():
     isolate_test_settings()
     from contentflow import db
     from contentflow.api import create_app
-    from contentflow.entities import Asset, Campaign, ChannelConnection, ContentItem, Membership, User, Workspace
+    from contentflow.entities import Asset, Campaign, ChannelConnection, ContentItem, Job, Membership, User, Workspace
     from contentflow.object_storage import build_object_storage
     from contentflow.review_evidence import capture_review, local_review, resolve_brief
     from test_worker_v2 import WorkerIntegrationTest
@@ -96,6 +96,10 @@ def main():
                 asset.provider = "manual"
                 session.commit()
         with db.SessionLocal() as session:
+            session.add(Job(workspace_id=fixture.workspace_id, job_type="asset.generate", status="succeeded",
+                payload_json={"asset_id": "TEST-ONLY-superseded"},
+                idempotency_key="TEST-ONLY-superseded-result", attempts=1,
+                result_json={"asset_id": "TEST-ONLY-superseded", "status": "stale", "outcome": "superseded"}))
             user = session.scalar(select(User).where(User.email == "worker@example.com"))
             workspace = Workspace(name="TEST-ONLY empty review workspace", slug="review-empty", created_by=user.id)
             session.add(workspace)

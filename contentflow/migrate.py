@@ -14,7 +14,7 @@ from .settings import Settings, get_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "e9f0a1b2c3d4"
+HEAD_REVISION = "f0a1b2c3d4e5"
 MINIMUM_PUBLIC_TABLE_COUNT = 35
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
@@ -135,6 +135,10 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         )
     for table_name in sorted(incrementally_added & tables):
         expected_columns = set(db.Base.metadata.tables[table_name].columns.keys())
+        if table_name == STORAGE_OBJECT_ALLOCATION_TABLE:
+            # These belong to the later worker-write revision, not the original
+            # storage table. Validate its all-or-nothing shape below.
+            expected_columns -= {"write_job_id", "write_lease_token"}
         actual_columns = {
             column["name"] for column in inspector.get_columns(table_name)
         }
@@ -344,6 +348,19 @@ def _bootstrap_unversioned_schema(engine: Engine) -> None:
         if (revision != "d8e9f0a1b2c3" or not lease_column["nullable"]
             or getattr(lease_column["type"], "length", None) != 32):
             raise RuntimeError("Job lease identity schema is incomplete; back up before adoption")
+        revision = "e9f0a1b2c3d4"
+
+    storage_columns = {item["name"]: item for item in inspector.get_columns(STORAGE_OBJECT_ALLOCATION_TABLE)} if storage_object_allocation_exists else {}
+    write_columns = {"write_job_id": 36, "write_lease_token": 32}
+    if set(write_columns) & storage_columns.keys():
+        checks = {item["name"]: item["sqltext"] for item in inspector.get_check_constraints(STORAGE_OBJECT_ALLOCATION_TABLE)}
+        if (revision != "e9f0a1b2c3d4" or any(name not in storage_columns
+                or not storage_columns[name]["nullable"]
+                or getattr(storage_columns[name]["type"], "length", None) != size
+                for name, size in write_columns.items())
+            or "'staging'" not in checks.get("ck_storage_object_allocations_status", "")
+            or "write_lease_token" not in checks.get("ck_storage_object_allocations_staging_identity", "")):
+            raise RuntimeError("Worker storage write schema is incomplete; back up before adoption")
         revision = HEAD_REVISION
 
     _run_alembic(engine, command.stamp, revision)

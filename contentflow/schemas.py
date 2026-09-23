@@ -737,6 +737,7 @@ class StorageUsageResponse(UTCResponseModel):
     delete_pending_objects: int
     missing_objects: int
     integrity_error_objects: int
+    staging_objects: int = 0
     abandoned_reservations: int
     last_reconciled_at: datetime | None
 
@@ -749,6 +750,7 @@ class StorageObjectAllocationResponse(ORMModel):
     filename: str
     status: Literal[
         "reserved",
+        "staging",
         "active",
         "delete_pending",
         "missing",
@@ -757,6 +759,7 @@ class StorageObjectAllocationResponse(ORMModel):
         "abandoned",
     ]
     checksum: str | None
+    write_job_id: str | None = None
     size_bytes: int
     size_verified: bool
     mime_type: str | None
@@ -770,3 +773,16 @@ class StorageObjectAllocationResponse(ORMModel):
 
 class StorageReconcileRequest(BaseModel):
     delete_orphans: bool = False
+
+
+class StorageStagingDiscardRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmed_no_inflight_write: Literal[True]
+    note: ManualReviewNote
+
+    @field_validator("confirmed_no_inflight_write", mode="before")
+    @classmethod
+    def require_explicit_confirmation(cls, value):
+        if value is not True:
+            raise ValueError("必须明确确认旧 Worker 和在途存储写入均已停止")
+        return value

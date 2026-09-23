@@ -121,6 +121,25 @@ def _stored_object_name(
     return f"{prefix}{object_name}"
 
 
+def planned_storage_object(settings: Settings, *, workspace_id: str, category: str,
+        filename: str, checksum: str, size_bytes: int, allocation_id: str,
+        content_type: str | None) -> StoredObject:
+    """The same deterministic name as put(); no object or directory is written."""
+    clean_name = safe_filename(filename)
+    name = _stored_object_name(clean_name, checksum_prefix=checksum[:16],
+        allocation_id=allocation_id)
+    if settings.storage_backend == "local":
+        uri = (settings.local_storage_dir.resolve() / workspace_id / category / name).resolve().as_uri()
+    elif settings.storage_backend == "s3":
+        uri = f"s3://{settings.s3_bucket}/{workspace_id}/{category}/{name}"
+    else:
+        raise ValueError("Unsupported object storage backend")
+    if not is_workspace_storage_uri(settings, workspace_id, uri):
+        raise ValueError("Planned storage URI is outside the workspace")
+    return StoredObject(uri=uri, checksum=checksum, size_bytes=size_bytes,
+        mime_type=content_type or mimetypes.guess_type(clean_name)[0] or "application/octet-stream")
+
+
 class ObjectStorage(Protocol):
     def put(
         self,

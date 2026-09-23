@@ -19,6 +19,7 @@ from .entities import (
 )
 from .filenames import safe_filename
 from .job_queue import enqueue_job
+from .execution_fence import assert_execution_active, assert_storage_io_safe, current_execution_fence
 from .object_storage import (
     ObjectStorage,
     StoredObject,
@@ -26,6 +27,7 @@ from .object_storage import (
     build_object_storage,
     build_object_storage_for_uri,
     is_workspace_storage_uri,
+    planned_storage_object,
 )
 from .settings import Settings
 
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 _ROLLBACK_OBJECTS = "contentflow_storage_rollback_objects"
 _ROLLBACK_LISTENERS = "contentflow_storage_rollback_listeners"
 CHARGED_STATUSES = (
+    "staging",
     "active",
     "delete_pending",
     "missing",
@@ -291,6 +294,7 @@ class LedgeredObjectStorage:
             max_size=min(self.settings.max_upload_bytes, 8 * 1024 * 1024)
         ) as staging:
             size_bytes = 0
+            digest = hashlib.sha256()
             while chunk := stream.read(1024 * 1024):
                 size_bytes += len(chunk)
                 if size_bytes > self.settings.max_upload_bytes:
@@ -298,6 +302,11 @@ class LedgeredObjectStorage:
                         f"Upload exceeds {self.settings.max_upload_bytes} byte limit"
                     )
                 staging.write(chunk)
+                digest.update(chunk)
+            if current_execution_fence() is not None:
+                return self._put_worker(staging, workspace_id=workspace_id,
+                    category=category, filename=filename, content_type=content_type,
+                    size_bytes=size_bytes, checksum=digest.hexdigest())
             allocation = reserve_storage_allocation(
                 self.session,
                 settings=self.settings,
@@ -333,6 +342,55 @@ class LedgeredObjectStorage:
             storage=self.storage,
             uri=stored.uri,
         )
+        return stored
+
+    def _put_worker(self, stream, *, workspace_id, category, filename,
+            content_type, size_bytes, checksum) -> StoredObject:
+        """Durable, quota-charged intent -> unlocked I/O -> domain-owned activation.
+
+        A failed/late upload stays staging, not uncharged or silently deleted.
+        Never commit/rollback the caller's business transaction to release locks.
+        """
+        assert_storage_io_safe()
+        fence = current_execution_fence()
+        if fence is None or fence.workspace_id != workspace_id:
+            raise StorageLedgerInvariantError("Worker storage workspace does not match its claim")
+        with Session(self.session.get_bind(), expire_on_commit=False) as reservation:
+            allocation = reserve_storage_allocation(reservation, settings=self.settings,
+                workspace_id=workspace_id, owner_type=self.owner_type, owner_id=self.owner_id,
+                category=category, filename=filename, size_bytes=size_bytes)
+            planned = planned_storage_object(self.settings, workspace_id=workspace_id,
+                category=category, filename=filename, checksum=checksum,
+                size_bytes=size_bytes, allocation_id=allocation.id, content_type=content_type)
+            _activate_allocation(reservation, allocation, planned)
+            allocation.status = "staging"
+            allocation.write_job_id = fence.job_id
+            allocation.write_lease_token = fence.lease_token
+            allocation.last_error = "Worker object write is not confirmed by a committed business result"
+            reservation.commit()
+            allocation_id = allocation.id
+        stream.seek(0)
+        stored = self.storage.put(workspace_id=workspace_id, category=category,
+            filename=filename, stream=stream, content_type=content_type, allocation_id=allocation_id)
+        assert_execution_active()
+        if (stored.uri, stored.checksum, stored.size_bytes, stored.mime_type) != (
+                planned.uri, planned.checksum, planned.size_bytes, planned.mime_type):
+            raise StorageLedgerInvariantError("Stored object does not match its durable write intent")
+        # Same order as administrative recovery: execution Job, then allocation.
+        # There are no further external calls in this write operation.
+        fence.fence_write(self.session)
+        with self.session.no_autoflush:
+            allocation = self.session.scalar(select(StorageObjectAllocation).where(
+                StorageObjectAllocation.id == allocation_id,
+                StorageObjectAllocation.workspace_id == workspace_id,
+            ).with_for_update().execution_options(populate_existing=True))
+        if allocation is None or allocation.status != "staging" or (
+                allocation.write_job_id, allocation.write_lease_token) != (fence.job_id, fence.lease_token):
+            raise StorageLedgerInvariantError("Worker object write intent is no longer attachable")
+        allocation.status = "active"
+        allocation.last_error = None
+        # The caller owns activation + the asset/publish result in one transaction.
+        # No rollback callback may erase this durable uncertain-write evidence.
         return stored
 
     def read(self, uri: str, *, max_bytes: int = 100 * 1024 * 1024) -> bytes:
@@ -522,6 +580,7 @@ def request_storage_deletion(
     size_bytes: int | None,
     checksum: str | None = None,
     mime_type: str | None = None,
+    allow_staging: bool = False,
 ) -> tuple[StorageObjectAllocation, Job | None]:
     if not is_workspace_storage_uri(settings, workspace_id, storage_uri):
         raise ValueError("object URI is not managed by this workspace")
@@ -569,7 +628,9 @@ def request_storage_deletion(
             "automatic deletion is disabled"
         )
         return allocation, None
-    elif allocation.status in {"active", "missing", "integrity_error"}:
+    elif allocation.status in {"active", "missing", "integrity_error"} or (
+        allocation.status == "staging" and allow_staging
+    ):
         allocation.status = "delete_pending"
         allocation.delete_requested_at = requested_at
         allocation.last_error = None
@@ -691,6 +752,35 @@ def reconcile_workspace_storage(
             raise ValueError("storage reconciliation start time is in the future")
     else:
         scan_started_at = now
+    # External I/O precedes mutations/flushes which take this worker's Job lock.
+    # Otherwise expired reservations or earlier repaired rows can block our heartbeat.
+    storage = build_object_storage(settings)
+    page = storage.list_workspace_objects(
+        workspace_id, limit=settings.storage_cleanup_batch_size, cursor=storage_cursor,
+    )
+    orphan_candidates = 0
+    orphan_deleted = 0
+    orphan_delete_failures = 0
+    orphan_keys: list[str] = []
+    for item in page.items:
+        if now - item.modified_at < timedelta(seconds=settings.storage_orphan_grace_seconds):
+            continue
+        # Includes durable staging: a slow/incomplete write is never an orphan.
+        if session.scalar(select(StorageObjectAllocation.id).where(
+                StorageObjectAllocation.workspace_id == workspace_id,
+                StorageObjectAllocation.storage_uri == item.uri,
+                StorageObjectAllocation.status.in_(CHARGED_STATUSES))):
+            continue
+        orphan_candidates += 1
+        if len(orphan_keys) < 20:
+            orphan_keys.append(item.key)
+        if delete_orphans:
+            try:
+                storage.delete(item.uri)
+                orphan_deleted += 1
+            except Exception:
+                orphan_delete_failures += 1
+                logger.exception("failed to delete orphan storage object")
     usage = _usage_for_update(session, workspace_id=workspace_id)
     expired_count, expired_bytes = session.execute(
         select(
@@ -721,12 +811,6 @@ def reconcile_workspace_storage(
             )
             .execution_options(synchronize_session=False)
         )
-    storage = build_object_storage(settings)
-    page = storage.list_workspace_objects(
-        workspace_id,
-        limit=settings.storage_cleanup_batch_size,
-        cursor=storage_cursor,
-    )
     uris = [item.uri for item in page.items]
     known = {
         item.storage_uri: item
@@ -741,13 +825,13 @@ def reconcile_workspace_storage(
     }
     repaired = 0
     integrity_mismatches = 0
-    orphan_candidates = 0
-    orphan_deleted = 0
-    orphan_delete_failures = 0
-    orphan_keys: list[str] = []
     for item in page.items:
         allocation = known.get(item.uri)
         if allocation is not None:
+            if allocation.status == "staging":
+                # Merely observing a file is not authority to attach it to its
+                # asset/publish result or to refund its quota.
+                continue
             if allocation.status == "missing":
                 was_unverified = not allocation.size_verified
                 previous_size = allocation.size_bytes
@@ -798,20 +882,6 @@ def reconcile_workspace_storage(
                 scan_started_at + timedelta(microseconds=1),
             )
             continue
-        if now - item.modified_at < timedelta(
-            seconds=settings.storage_orphan_grace_seconds
-        ):
-            continue
-        orphan_candidates += 1
-        if len(orphan_keys) < 20:
-            orphan_keys.append(item.key)
-        if delete_orphans:
-            try:
-                storage.delete(item.uri)
-                orphan_deleted += 1
-            except Exception:
-                orphan_delete_failures += 1
-                logger.exception("failed to delete orphan storage object")
 
     next_cursor = page.next_cursor
     if next_cursor:
@@ -931,6 +1001,7 @@ def new_reconciliation_run_id() -> str:
 
 def pending_storage_counts(session: Session, workspace_id: str) -> dict[str, int]:
     counts = {
+        "staging": 0,
         "delete_pending": 0,
         "missing": 0,
         "integrity_error": 0,

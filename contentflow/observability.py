@@ -47,6 +47,7 @@ PROVIDER_INVOCATION_STATUSES = (
     "late_failed",
 )
 STORAGE_ALLOCATION_STATUSES = (
+    "staging",
     "reserved",
     "active",
     "delete_pending",

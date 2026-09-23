@@ -33,6 +33,7 @@ from . import db
 from .metric_values import MetricValues
 from .audit import record_audit
 from .asset_operations import lock_asset_for_mutation
+from .asset_work import ASSET_WORK_SESSION_KEY, AssetWork, AssetWorkSuperseded
 from .connectors import ConnectorPublishError, build_connector
 from .connector_errors import CONNECTOR_JOB_TYPES, safe_connector_failure, connector_diagnostic
 from .channel_config import ChannelConfigurationError
@@ -49,7 +50,7 @@ from .entities import (
     WorkerNode,
 )
 from .embeddings import build_embedding_provider
-from .execution_fence import ExecutionFence, execution_scope
+from .execution_fence import ExecutionFence, ExecutionTransactionOpen, execution_scope
 from .image_search import build_image_search_provider
 from .job_recovery import (
     JOB_RECOVERY_POLICIES,
@@ -589,10 +590,12 @@ def handle_asset_search(
     asset = session.get(Asset, payload["asset_id"])
     if asset is None:
         raise ValueError("素材任务不存在")
-    if asset.status in {"ready", "awaiting_selection"}:
+    if asset.status in {"ready", "awaiting_selection", "stale"}:
         return {"asset_id": asset.id, "status": asset.status}
     if asset.kind != "image" or asset.provider != "openverse":
         raise MediaProviderError("素材任务不是开放图库搜索任务", retryable=False)
+    work = AssetWork.begin(session, asset)
+    asset = work.require_current(session)
     metadata = dict(asset.metadata_json or {})
     query = str(metadata.get("search_query") or "").strip()
     provider = LedgeredSearchProvider(
@@ -603,6 +606,8 @@ def handle_asset_search(
         model_name="openverse-images-v1",
     )
     candidates = provider.search(query=query)
+    asset = work.require_current(session, lock=True)
+    metadata = dict(asset.metadata_json or {})
     asset.status = "awaiting_selection"
     asset.error = None
     asset.metadata_json = {
@@ -681,6 +686,8 @@ def handle_asset_download(
     )
     if candidate is None:
         raise MediaProviderError("图片搜索候选不存在", retryable=False)
+    work = AssetWork.begin(session, asset)
+    asset = work.require_current(session)
     generation = MediaGeneration(
         status="ready",
         download_url=str(candidate.get("download_url") or ""),
@@ -738,9 +745,9 @@ def handle_asset_download(
         ContentItem.id == asset.content_item_id,
         ContentItem.workspace_id == asset.workspace_id,
     )
-    # Match all user mutations: parent content first, then the asset. Inverting
-    # this order after a slow download can deadlock an edit or candidate change.
-    asset = lock_asset_for_mutation(session, asset.workspace_id, asset_id)
+    # A read-only preflight avoids an unnecessary PUT. Do not hold content/asset
+    # locks across storage I/O; the definitive locked check is after PUT.
+    asset = work.require_current(session)
     content = session.scalar(content_query.execution_options(populate_existing=True))
     if asset is None or content is None:
         raise MediaProviderError("素材或关联内容已不存在", retryable=False)
@@ -775,6 +782,10 @@ def handle_asset_download(
         stream=BytesIO(normalized.data),
         content_type=normalized.mime_type,
     )
+    asset = work.require_current(session, lock=True)
+    content = session.scalar(content_query.execution_options(populate_existing=True))
+    current_metadata = dict(asset.metadata_json or {})
+    current_pending = current_metadata["pending_candidate_selection"]
     try:
         cleanup_job_id = None
         if (
@@ -873,7 +884,10 @@ def _store_generation(
     asset: Asset,
     settings: Settings,
     generation,
+    work: AssetWork | None = None,
 ) -> None:
+    if work is not None:
+        asset = work.require_current(session)
     allowed_hosts = tuple(settings.media_download_allowed_hosts)
     try:
         if generation.content is None and generation.download_url:
@@ -928,6 +942,8 @@ def _store_generation(
     filename = generation.filename or (
         "asset.png" if asset.kind == "image" else "asset.mp4"
     )
+    work = work or AssetWork.begin(session, asset)
+    asset = work.require_current(session)
     stored = build_ledgered_object_storage(
         session,
         settings,
@@ -940,6 +956,7 @@ def _store_generation(
         stream=BytesIO(data),
         content_type=generation.mime_type,
     )
+    asset = work.require_current(session, lock=True)
     if (
         is_managed_storage_uri(settings, asset.storage_uri)
         and asset.storage_uri != stored.uri
@@ -1007,10 +1024,13 @@ def handle_asset_generate(
         return {"asset_id": asset.id, "status": asset.status}
     if asset.status == "ready":
         return {"asset_id": asset.id, "status": asset.status}
+    work = AssetWork.begin(session, asset)
+    asset = work.require_current(session)
     configured_provider = (
         settings.image_provider if asset.kind == "image" else settings.video_provider
     )
     if asset.provider in {"manual", "manual-upload"}:
+        asset = work.require_current(session, lock=True)
         asset.provider = "manual"
         asset.status = "awaiting_upload"
         asset.error = None
@@ -1034,7 +1054,6 @@ def handle_asset_generate(
             "素材生成配置与已批准的来源不一致；请恢复对应配置，不能静默改用人工或其他 Provider",
             retryable=False,
         )
-    asset.status = "generating"
     provider = build_media_provider(settings, asset.kind)
     if configured_provider == "http":
         model_name = (
@@ -1062,6 +1081,7 @@ def handle_asset_generate(
     if generation.status == "processing":
         if not generation.external_task_id:
             raise RuntimeError("异步素材任务没有 external_task_id")
+        asset = work.require_current(session, lock=True)
         asset.status = "processing"
         asset.external_task_id = generation.external_task_id
         asset.metadata_json = {
@@ -1083,6 +1103,7 @@ def handle_asset_generate(
             asset=asset,
             settings=settings,
             generation=generation,
+            work=work,
         )
     else:
         raise RuntimeError(f"未知素材生成状态: {generation.status}")
@@ -1119,6 +1140,8 @@ def handle_asset_poll(
             "异步素材任务的 Provider 配置已变化或缺少目标指纹，请人工核对",
             retryable=False,
         )
+    work = AssetWork.begin(session, asset)
+    asset = work.require_current(session)
     provider = build_media_provider(settings, asset.kind)
     configured_provider = (
         settings.image_provider if asset.kind == "image" else settings.video_provider
@@ -1136,6 +1159,7 @@ def handle_asset_poll(
             model_name=model_name,
         )
     generation = provider.poll(asset.external_task_id)
+    asset = work.require_current(session)
     if generation.status == "processing":
         raise JobNotReady("素材仍在生成中")
     _store_generation(
@@ -1143,6 +1167,7 @@ def handle_asset_poll(
         asset=asset,
         settings=settings,
         generation=generation,
+        work=work,
     )
     record_audit(
         session,
@@ -1905,7 +1930,27 @@ def mark_domain_failure(
                 "error": message[:2000],
             }
     elif job.job_type.startswith("asset.") and payload.get("asset_id"):
-        asset = session.get(Asset, payload["asset_id"])
+        asset = lock_asset_for_mutation(session, job.workspace_id, payload["asset_id"])
+        work = session.info.get(ASSET_WORK_SESSION_KEY)
+        if isinstance(work, AssetWork):
+            try:
+                asset = work.require_current(session, lock=True)
+            except AssetWorkSuperseded:
+                # Preserve the edit/replacement, but keep the Job's unknown
+                # outcome/manual-review disposition and provider evidence.
+                return
+        elif asset is not None:
+            # Lease recovery has no original in-memory snapshot. Never rewrite
+            # a terminal/replaced asset or an unapproved content version.
+            if asset.status in {"stale", "ready", "awaiting_upload"}:
+                return
+            if asset.content_item_id is not None:
+                content = session.scalar(select(ContentItem).where(
+                    ContentItem.id == asset.content_item_id,
+                    ContentItem.workspace_id == asset.workspace_id,
+                ).execution_options(populate_existing=True))
+                if content is None or content.status != "approved" or content.version != asset.content_version:
+                    return
         if asset:
             asset.status = "failed"
             asset.error = message[:8000]
@@ -2208,6 +2253,22 @@ class Worker:
                         logger.error("stale worker failure ignored id=%s", job_id)
                         return True
                 job = session.get(Job, job_id)
+                if isinstance(error, AssetWorkSuperseded) and job is not None:
+                    # The handler transaction (including any tentative object
+                    # activation) was rolled back above. Durable staging and
+                    # provider receipts remain; no replay or deletion is implied.
+                    current = lock_asset_for_mutation(session, error.work.workspace_id, error.work.asset_id)
+                    result = {"asset_id": error.work.asset_id,
+                        "status": current.status if current is not None else "missing",
+                        "outcome": "superseded", "reason": "asset_or_content_changed"}
+                    record_audit(session, action="asset.result_superseded", entity_type="asset",
+                        entity_id=error.work.asset_id, workspace_id=error.work.workspace_id,
+                        actor_user_id=None, metadata={"job_id": job_id, "job_type": job_type, **result})
+                    complete_job(session, job, result, worker_id=self.worker_id, attempt=attempt,
+                        lease_token=lease_token, lease_seconds=self.settings.worker_lease_seconds)
+                    session.commit()
+                    logger.info("superseded asset result retained without attachment id=%s", job_id)
+                    return True
                 ai_provenance = getattr(error, "ai_provenance", None)
                 persisted_error: Exception | str = error
                 if database_error_kind is not None:
@@ -2288,6 +2349,7 @@ class Worker:
                                     PublishReconciliationRequired,
                                     PublishRetrySafeFailure,
                                     StorageLedgerInvariantError,
+                                    ExecutionTransactionOpen,
                                     StorageLedgerUnverified,
                                     StorageQuotaExceeded,
                                     ChannelConfigurationError,

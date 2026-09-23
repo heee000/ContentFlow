@@ -113,7 +113,7 @@ class StorageObjectAllocation(TimestampMixin, Base):
         CheckConstraint("delete_attempts >= 0", name="delete_attempts_non_negative"),
         CheckConstraint(
             "status IN ('reserved', 'active', 'delete_pending', 'missing', "
-            "'integrity_error', 'deleted', 'abandoned')",
+            "'integrity_error', 'deleted', 'abandoned', 'staging')",
             name="status",
         ),
         CheckConstraint(
@@ -132,6 +132,11 @@ class StorageObjectAllocation(TimestampMixin, Base):
         CheckConstraint(
             "checksum IS NULL OR length(checksum) = 64",
             name="checksum_length",
+        ),
+        CheckConstraint(
+            "status != 'staging' OR (write_job_id IS NOT NULL AND "
+            "write_lease_token IS NOT NULL AND length(write_lease_token) = 32 "
+            "AND checksum IS NOT NULL)", name="staging_identity",
         ),
         Index(
             "ix_storage_allocations_workspace_status_updated_page",
@@ -160,6 +165,8 @@ class StorageObjectAllocation(TimestampMixin, Base):
         String(24), default="reserved", server_default=text("'reserved'"), index=True
     )
     storage_uri: Mapped[str | None] = mapped_column(Text)
+    write_job_id: Mapped[str | None] = mapped_column(String(36))
+    write_lease_token: Mapped[str | None] = mapped_column(String(32))
     checksum: Mapped[str | None] = mapped_column(String(64), index=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     size_verified: Mapped[bool] = mapped_column(

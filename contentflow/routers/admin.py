@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -11,13 +11,17 @@ from ..audit import record_audit, verify_audit_chain
 from ..db import get_db
 from ..dependencies import AppSettings, Principal, require_role
 from ..entities import (
+    Asset,
     AuditLog,
     Job,
     JobManualReview,
+    KnowledgeDocument,
     Membership,
     PromptEvalRun,
     PromptEvalSuite,
     PromptRelease,
+    PublishJob,
+    PublishEvidence,
     StorageObjectAllocation,
     User,
     WorkerNode,
@@ -69,12 +73,14 @@ from ..schemas import (
     StorageObjectAllocationResponse,
     StorageReconcileRequest,
     StorageUsageResponse,
+    StorageStagingDiscardRequest,
     WorkerHealthResponse,
     WorkerQueueHealthResponse,
 )
 from ..storage_ledger import (
     enqueue_storage_reconciliation,
     pending_storage_counts,
+    request_storage_deletion,
 )
 
 
@@ -1266,6 +1272,7 @@ def storage_usage(
         delete_pending_objects=counts["delete_pending"],
         missing_objects=counts["missing"],
         integrity_error_objects=counts["integrity_error"],
+        staging_objects=counts["staging"],
         abandoned_reservations=counts["abandoned"],
         last_reconciled_at=(
             usage.last_reconciled_at if usage is not None else None
@@ -1288,6 +1295,7 @@ def list_storage_objects(
 ):
     allowed_statuses = {
         "reserved",
+        "staging",
         "active",
         "delete_pending",
         "missing",
@@ -1310,7 +1318,7 @@ def list_storage_objects(
     elif attention_only:
         query = query.where(
             StorageObjectAllocation.status.in_(
-                ("delete_pending", "missing", "integrity_error", "abandoned")
+                ("delete_pending", "missing", "integrity_error", "abandoned", "staging")
             )
         )
     return paginate(
@@ -1322,6 +1330,66 @@ def list_storage_objects(
         cursor=cursor,
         response=response,
     )
+
+
+def _staging_cleanup_receipt(session: Session, allocation, workspace_id: str):
+    if allocation is not None and allocation.write_job_id and allocation.status in {"delete_pending", "deleted"}:
+        accepted = session.scalar(select(Job).where(Job.workspace_id == workspace_id,
+            Job.job_type == "storage.delete", Job.idempotency_key == f"storage.delete:{allocation.id}"))
+        if accepted is None or (accepted.payload_json or {}).get("allocation_id") != allocation.id:
+            raise HTTPException(status_code=409, detail="清理回执不完整，请人工核对；不会自动补发")
+        return accepted
+    return None
+
+
+@router.post("/storage/objects/{allocation_id}/discard-staged", response_model=JobResponse,
+    status_code=status.HTTP_202_ACCEPTED)
+def discard_staged_storage(allocation_id: str, payload: StorageStagingDiscardRequest,
+        principal: Admin, session: Db, settings: AppSettings):
+    query = select(StorageObjectAllocation).where(StorageObjectAllocation.id == allocation_id,
+        StorageObjectAllocation.workspace_id == principal.workspace_id)
+    observed = session.scalar(query)
+    if observed is None:
+        raise HTTPException(status_code=404, detail="存储对象不存在")
+    accepted = _staging_cleanup_receipt(session, observed, principal.workspace_id)
+    if accepted is not None:
+        return accepted
+    origin = session.scalar(select(Job).where(Job.id == observed.write_job_id,
+        Job.workspace_id == principal.workspace_id).with_for_update().execution_options(populate_existing=True))
+    allocation = session.scalar(query.with_for_update().execution_options(populate_existing=True))
+    accepted = _staging_cleanup_receipt(session, allocation, principal.workspace_id)
+    if accepted is not None:
+        return accepted
+    if origin is None or allocation is None or allocation.status != "staging":
+        raise HTTPException(status_code=409, detail="仅支持核对未完成的 Worker 写入；记录已变化或来源任务缺失")
+    if origin.status not in {"failed", "manual_review", "succeeded"}:
+        raise HTTPException(status_code=409, detail="来源任务仍在排队、重试或执行，禁止清理")
+    origin_updated = origin.updated_at
+    if origin_updated.tzinfo is None:
+        origin_updated = origin_updated.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - origin_updated < timedelta(seconds=settings.storage_orphan_grace_seconds):
+        raise HTTPException(status_code=409, detail="来源任务尚在存储安全等待期内；确认旧 Worker 和在途上传停止后，等待安全期结束再核对")
+    referenced = session.scalar(select(Asset.id).where(Asset.storage_uri == allocation.storage_uri).limit(1))
+    referenced = referenced or session.scalar(select(PublishJob.id).where(
+        PublishJob.external_url == allocation.storage_uri).limit(1))
+    referenced = referenced or session.scalar(select(KnowledgeDocument.id).where(
+        KnowledgeDocument.storage_uri == allocation.storage_uri).limit(1))
+    referenced = referenced or session.scalar(select(PublishEvidence.id).where(
+        PublishEvidence.storage_uri == allocation.storage_uri).limit(1))
+    if referenced:
+        raise HTTPException(status_code=409, detail="对象仍被内容或发布结果引用，禁止清理")
+    allocation, job = request_storage_deletion(session, settings=settings,
+        workspace_id=principal.workspace_id, storage_uri=allocation.storage_uri,
+        owner_type=allocation.owner_type, owner_id=allocation.owner_id,
+        category=allocation.category, filename=allocation.filename,
+        size_bytes=allocation.size_bytes, checksum=allocation.checksum,
+        mime_type=allocation.mime_type, allow_staging=True)
+    record_audit(session, action="storage.staged_write_discard_requested", entity_type="storage_allocation",
+        entity_id=allocation.id, workspace_id=principal.workspace_id, actor_user_id=principal.user_id,
+        metadata={"write_job_id": origin.id, "confirmed_no_inflight_write": True,
+            "note": payload.note, "cleanup_job_id": job.id})
+    session.flush()
+    return job
 
 
 @router.post(
