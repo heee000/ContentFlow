@@ -2307,3 +2307,5 @@ Prompt/模型变更控制已从“人工审批后直接发布”推进到“不�
 - 本地最终后端 599 passed / 24 skipped / 7 warnings / 226 subtests；确认＋渠道专项 128 passed。六条真实前端/API/临时 SQLite 浏览器旅程 6 passed（Edge 无头），包括丢回执、刷新、精确重放和跨身份隔离。无 Worker，不访问真实账号。新增 Playwright/隔离服务/CI 入口，详见 `docs/browser_acceptance.md`。
 - 夹具 `put()` 新 URI、测试标签选择器和 Node/原生可选依赖环境问题分别记录，不误报产品漏洞，不删除锁文件。后续最终构建/SSR、源码同步/CI 结果须看进度页；不把中间结果冒称最后签收。
 - 未部署、未运行真实模型/媒体/微信、未修改网络/密钥或保护知识文件。Ubuntu 最后记录仍是 `1502460`，本轮未刷新在线状态；不能再次用旧一次性授权重跑真实稿。下一步本批 CI 后继续 A04/A06、生成幂等、费用/租约与剩余完整计划，不以发布专项阶段结束完整目标。
+- 最终源码 **`0d6608f`** 已普通推送；[CI 35858597117](https://github.com/heee000/ContentFlow/actions/runs/35858597117) 四项全过：**623 passed / 226 subtests，84.56% 覆盖率**，含四种 PG 确认竞争和 MinIO。生产 standalone 浏览器本地 Edge 6/6（27.2 秒）、CI Chromium 6/6（32.9 秒）；SSR 2/2、构建和当次安全/来源校验通过。最后只补文档签收，勿重发同一 CI。Git 作者仍为 John Wang/heee000 noreply，没有 PR/合并/部署。
+- 下一阶段入口已重读：`ReviewView.decide()` 只发送当前已保存版本，独立非受控表单没有 dirty 门禁；`update_content()` 升版仍保留 `model_review/quality_score`，`review_content()` 尚无新版规则复查。先补失败的 API/浏览器回归，再实施 A04/A06；不要暗中收费重跑模型，不以旧评分代替新稿证据。
