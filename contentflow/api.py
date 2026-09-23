@@ -18,6 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
 from .asset_operations import AssetOperationConflict
+from .publish_manifest import PublishManifestConflict
 from .migrate import upgrade_database
 from .object_storage import build_object_storage
 from .observability import ObservabilityMetrics
@@ -175,6 +176,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 }
             },
         )
+
+    @application.exception_handler(PublishManifestConflict)
+    async def publish_manifest_conflict(request: Request, error: PublishManifestConflict):
+        return JSONResponse(status_code=409, content={"error": {
+            "code": "publish_manifest_conflict", "message": str(error),
+            "request_id": getattr(request.state, "request_id", None),
+        }})
 
     @application.exception_handler(AssetOperationConflict)
     async def asset_conflict(request: Request, error: AssetOperationConflict):

@@ -33,6 +33,8 @@ from contentflow.entities import (
     WorkflowRun,
 )
 from contentflow.media_providers import MediaGeneration
+from contentflow.object_storage import build_object_storage
+from contentflow.publish_manifest import PublishManifestConflict, build_release_manifest
 from contentflow.settings import Settings
 from contentflow.provider_invocations import current_provider_job_id
 from contentflow.providers import MockProvider
@@ -491,15 +493,22 @@ class WorkerIntegrationTest(unittest.TestCase):
             )
             session.add_all([content, channel])
             session.flush()
+            stored = build_object_storage(self.settings).put(
+                workspace_id=self.workspace_id, category="assets", filename="cover.png",
+                stream=BytesIO(b"isolated-publish-cover"), content_type="image/png",
+            )
             asset = Asset(
                 workspace_id=self.workspace_id,
                 content_item_id=content.id,
                 kind="image",
                 status="ready",
-                storage_uri=f"memory://asset/{suffix}.png",
+                storage_uri=stored.uri,
                 mime_type="image/png",
-                metadata_json={"content_version": 1},
+                size_bytes=stored.size_bytes,
+                metadata_json={"content_version": 1, "checksum": stored.checksum},
             )
+            session.add(asset)
+            session.flush()
             publish_job = PublishJob(
                 workspace_id=self.workspace_id,
                 content_item_id=content.id,
@@ -509,7 +518,8 @@ class WorkerIntegrationTest(unittest.TestCase):
                 idempotency_key=f"fixture-{suffix}",
                 external_id=external_id,
                 attempts=1 if status == "submitted" else 0,
-                request_json={"content_version": 1},
+                request_json={"content_version": 1, "release_manifest":
+                    build_release_manifest(content, channel, [asset], self.settings)},
                 response_json={"submit": {"publish_id": external_id}},
             )
             session.add_all([asset, publish_job])
@@ -765,6 +775,137 @@ class WorkerIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(disconnected.status_code, 409, disconnected.text)
         self.assertIn("连接测试", disconnected.json()["error"]["message"])
+
+    def test_post_schedule_cover_selection_cannot_change_publication(self):
+        from contentflow.worker import handle_publish_dispatch
+
+        for mode in ("connector", "script"):
+            with self.subTest(mode=mode):
+                fixture = self._create_publish_fixture(status="scheduled")
+                with db.SessionLocal() as session:
+                    first = session.scalar(select(Asset).where(
+                        Asset.content_item_id == fixture["content_id"]))
+                    first.metadata_json = {**first.metadata_json,
+                        "candidate_group": "cover", "candidate_optional": True, "selected": True}
+                    other_object = build_object_storage(self.settings).put(
+                        workspace_id=self.workspace_id, category="assets", filename="different-cover.png",
+                        stream=BytesIO(b"different-unapproved-cover"), content_type="image/png",
+                    )
+                    second = Asset(
+                        workspace_id=self.workspace_id, content_item_id=first.content_item_id,
+                        content_version=1, kind="image", provider=first.provider, status="ready",
+                        storage_uri=other_object.uri, mime_type=first.mime_type,
+                        size_bytes=other_object.size_bytes, metadata_json={**first.metadata_json,
+                            "checksum": other_object.checksum, "selected": False},
+                    )
+                    session.add(second)
+                    session.commit()
+                    first_id, second_id = first.id, second.id
+                response = self.client.post("/api/v1/publishing/jobs", headers=self.headers, json={
+                    "content_item_id": fixture["content_id"], "channel_id": fixture["channel_id"],
+                    "delivery_mode": mode, "publish_now": True, "request_id": f"manifest-{mode}",
+                })
+                self.assertEqual(response.status_code, 202, response.text)
+                publish_id = response.json()["id"]
+                selected = self.client.post(f"/api/v1/assets/{second_id}/select",
+                    headers=self.headers, json={})
+                self.assertEqual(selected.status_code, 200, selected.text)
+                with db.SessionLocal() as session, patch("contentflow.worker.build_connector") as connector:
+                    manifest = session.get(PublishJob, publish_id).request_json["release_manifest"]
+                    self.assertEqual([item["asset_id"] for item in manifest["assets"]], [first_id])
+                    self.assertEqual(session.get(ContentItem, fixture["content_id"]).version, 1)
+                    with self.assertRaisesRegex(PublishManifestConflict, "已变化"):
+                        handle_publish_dispatch(session, {"publish_job_id": publish_id}, self.settings)
+                    connector.assert_not_called()
+
+    def test_manifest_blocks_legacy_queue_but_not_terminal_replay(self):
+        from contentflow.worker import handle_publish_dispatch
+
+        fixture = self._create_publish_fixture(status="scheduled")
+        with db.SessionLocal() as session:
+            job = session.get(PublishJob, fixture["publish_job_id"])
+            job.request_json = {"content_version": 1}
+            session.commit()
+        with db.SessionLocal() as session, patch("contentflow.worker.build_connector") as connector:
+            with self.assertRaisesRegex(PublishManifestConflict, "旧任务"):
+                handle_publish_dispatch(session, fixture, self.settings)
+            session.rollback()
+            for state in ("submitted", "published", "draft_created", "script_ready", "exported"):
+                job = session.get(PublishJob, fixture["publish_job_id"])
+                job.status = state
+                session.commit()
+                self.assertEqual(handle_publish_dispatch(session, fixture, self.settings)["status"], state)
+            connector.assert_not_called()
+
+    def test_changed_manifest_blocks_safe_retry_and_script_fallback(self):
+        for changed in ("body", "channel", "checksum"):
+            with self.subTest(changed=changed):
+                fixture = self._create_publish_fixture(status="failed")
+                with db.SessionLocal() as session:
+                    job = session.get(PublishJob, fixture["publish_job_id"])
+                    job.response_json = {"dispatch_failure": {"retry_safe": True}}
+                    if changed == "body":
+                        session.get(ContentItem, fixture["content_id"]).body = "different payload"
+                    elif changed == "channel":
+                        session.get(ChannelConnection, fixture["channel_id"]).config_json = {"auto_publish": False}
+                    else:
+                        asset = session.scalar(select(Asset).where(Asset.content_item_id == fixture["content_id"]))
+                        asset.metadata_json = {**asset.metadata_json, "checksum": "a" * 64}
+                    session.commit()
+                for action in ("retry", "script-package"):
+                    response = self.client.post(
+                        f"/api/v1/publishing/jobs/{fixture['publish_job_id']}/{action}", headers=self.headers)
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertEqual(response.json()["error"]["code"], "publish_manifest_conflict")
+
+    def test_schedule_requires_ready_integrity_record(self):
+        for changed in ("status", "checksum", "uri"):
+            with self.subTest(changed=changed):
+                fixture = self._create_publish_fixture(status="scheduled")
+                with db.SessionLocal() as session:
+                    asset = session.scalar(select(Asset).where(Asset.content_item_id == fixture["content_id"]))
+                    if changed == "status":
+                        asset.status = "queued"
+                    elif changed == "checksum":
+                        asset.metadata_json = {"content_version": 1}
+                    else:
+                        asset.storage_uri = "file:///outside-workspace/cover.png"
+                    session.commit()
+                response = self.client.post("/api/v1/publishing/jobs", headers=self.headers, json={
+                    "content_item_id": fixture["content_id"], "channel_id": fixture["channel_id"],
+                    "publish_now": True, "request_id": f"not-ready-{changed}",
+                })
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertIn("素材", response.json()["error"]["message"])
+
+    def test_dispatch_uses_detached_payload_after_remote_call_starts(self):
+        from contentflow.worker import handle_publish_dispatch
+
+        fixture = self._create_publish_fixture(status="scheduled")
+        observed = {}
+        with db.SessionLocal() as session:
+            def build(*, channel, settings, storage):
+                class FakeConnector:
+                    def publish(inner, *, publish_job, content, assets):
+                        original_title, original_uri = content.title, assets[0].storage_uri
+                        with db.SessionLocal() as editor:
+                            editor.get(ContentItem, fixture["content_id"]).title = "later edit"
+                            editor.get(ChannelConnection, fixture["channel_id"]).config_json = {"auto_publish": False}
+                            asset = editor.get(Asset, assets[0].id)
+                            asset.storage_uri = "file:///must-not-be-read.png"
+                            editor.commit()
+                        session.expire_all()
+                        observed.update(title=content.title, uri=assets[0].storage_uri,
+                            auto_publish=channel.config_json["auto_publish"], data=storage.read(assets[0].storage_uri))
+                        self.assertEqual(content.title, original_title)
+                        self.assertEqual(assets[0].storage_uri, original_uri)
+                        return ConnectorResult(status="draft_created", external_id="isolated-draft")
+                return FakeConnector()
+            with patch("contentflow.worker.build_connector", side_effect=build):
+                result = handle_publish_dispatch(session, fixture, self.settings)
+            self.assertEqual(result["status"], "draft_created")
+        self.assertTrue(observed["auto_publish"])
+        self.assertEqual(observed["data"], b"isolated-publish-cover")
 
     def test_running_immediate_publish_cannot_be_cancelled(self):
         fixture = self._create_publish_fixture(status="queued")

@@ -152,7 +152,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
                     storage_uri=stored.uri,
                     mime_type="image/png",
                     size_bytes=stored.size_bytes,
-                    metadata_json={"content_version": 1},
+                    metadata_json={"content_version": 1, "checksum": stored.checksum},
                 )
             )
             session.commit()
@@ -538,6 +538,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
             publish_job = session.get(PublishJob, scheduled["id"])
             publish_job.status = "failed"
             publish_job.request_json = {
+                **publish_job.request_json,
                 "content_version": 1,
                 "delivery_mode": "connector",
             }

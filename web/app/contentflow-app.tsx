@@ -3916,6 +3916,9 @@ function PublishingView({
                 当前公众号连接为安全模式：执行后只创建草稿，不会公开发布。
               </p>
             ) : null}
+            <p className="safe-notice">
+              请先完成素材准备并选好封面。创建任务会固定当前正文、选用素材和渠道配置；排期后改稿、换图或更改渠道配置，需要重新确认并创建发布任务。
+            </p>
             {publishTiming === "scheduled" ? (
               <label>计划执行时间
                 <input

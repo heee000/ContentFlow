@@ -54,11 +54,13 @@ from contentflow.entities import (
 )
 from contentflow.job_queue import enqueue_job
 from contentflow.migrate import HEAD_REVISION, PROJECT_ROOT
-from contentflow.object_storage import LocalObjectStorage
+from contentflow.object_storage import LocalObjectStorage, build_object_storage
+from contentflow.publish_manifest import PublishManifestConflict, build_release_manifest
 from contentflow.observability import ObservabilityMetrics
 from contentflow.routers.publish_evidence import upload_publish_evidence
-from contentflow.routers.assets import change_asset_source, retry_asset
-from contentflow.schemas import AssetSourceChangeRequest
+from contentflow.routers.assets import change_asset_source, retry_asset, select_asset_candidate
+from contentflow.routers.publishing import schedule_publish
+from contentflow.schemas import AssetSelectionRequest, AssetSourceChangeRequest, PublishScheduleRequest
 from contentflow.security import hash_rate_limit_key
 from contentflow.settings import Settings
 from contentflow.storage_ledger import (
@@ -73,6 +75,7 @@ from contentflow.worker import (
     classify_database_error,
     database_error_sqlstate,
     handle_publish_reconcile,
+    handle_publish_dispatch,
     handle_asset_download,
     logger as worker_logger,
     sanitized_database_error,
@@ -398,15 +401,22 @@ def _create_publish_fixture(
         )
         session.add_all([content, channel])
         session.flush()
+        stored = build_object_storage(harness.settings).put(
+            workspace_id=workspace.id, category="assets", filename="cover.png",
+            stream=io.BytesIO(b"isolated-postgres-cover"), content_type="image/png",
+        )
         asset = Asset(
             workspace_id=workspace.id,
             content_item_id=content.id,
             kind="image",
             status="ready",
-            storage_uri=f"memory://postgres/{suffix}.png",
+            storage_uri=stored.uri,
             mime_type="image/png",
-            metadata_json={"content_version": 1},
+            size_bytes=stored.size_bytes,
+            metadata_json={"content_version": 1, "checksum": stored.checksum},
         )
+        session.add(asset)
+        session.flush()
         publish_job = PublishJob(
             workspace_id=workspace.id,
             content_item_id=content.id,
@@ -416,7 +426,8 @@ def _create_publish_fixture(
             idempotency_key=f"postgres-publish-{suffix}",
             external_id=external_id,
             attempts=1 if status == "submitted" else 0,
-            request_json={"content_version": 1},
+            request_json={"content_version": 1, "release_manifest":
+                build_release_manifest(content, channel, [asset], harness.settings)},
             response_json={"submit": {"publish_id": external_id}},
         )
         session.add_all([asset, publish_job])
@@ -526,6 +537,69 @@ def test_postgres_download_and_content_edit_share_lock_order(postgres_harness: P
         assert asset.status == "stale"
         assert asset.storage_uri is None
         assert session.get(ContentItem, content_id).version == 2
+
+
+def test_postgres_schedule_and_cover_selection_preserve_release_boundary(postgres_harness: PostgresHarness):
+    fixture = _create_publish_fixture(postgres_harness, status="scheduled", external_id=None)
+    with postgres_harness.sessions() as session:
+        original = session.scalar(select(Asset).where(Asset.workspace_id == fixture["workspace_id"]))
+        original.metadata_json = {**original.metadata_json, "candidate_group": "cover",
+            "candidate_optional": True, "selected": True}
+        other = Asset(workspace_id=original.workspace_id, content_item_id=original.content_item_id,
+            content_version=1, kind="image", provider=original.provider, status="ready",
+            storage_uri=original.storage_uri, size_bytes=original.size_bytes, mime_type=original.mime_type,
+            metadata_json={**original.metadata_json, "selected": False})
+        session.add(other)
+        job = session.get(PublishJob, fixture["publish_job_id"])
+        content_id, channel_id = job.content_item_id, job.channel_id
+        session.commit()
+        first_id, second_id = original.id, other.id
+    principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
+    captured, selection_requested = threading.Event(), threading.Event()
+
+    def schedule():
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+
+            def observe_capture(session, _context):
+                if any(isinstance(item, PublishJob) for item in session.new):
+                    captured.set()
+                    assert selection_requested.wait(timeout=10)
+
+            event.listen(session, "after_flush", observe_capture)
+            job = schedule_publish(PublishScheduleRequest(content_item_id=content_id,
+                channel_id=channel_id, publish_now=True, request_id="postgres-manifest-race"),
+                principal, session, postgres_harness.settings)
+            session.commit()
+            return job.id
+
+    def select_other():
+        assert captured.wait(timeout=10)
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+
+            def observe_lock(state):
+                if getattr(state.statement, "_for_update_arg", None) is not None and any(
+                    column.get("entity") is ContentItem
+                    for column in getattr(state.statement, "column_descriptions", [])
+                ):
+                    selection_requested.set()
+
+            event.listen(session, "do_orm_execute", observe_lock)
+            select_asset_candidate(second_id, AssetSelectionRequest(), principal, session, postgres_harness.settings)
+            session.commit()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        scheduled, selected = pool.submit(schedule), pool.submit(select_other)
+        publish_id = scheduled.result(timeout=20)
+        selected.result(timeout=20)
+    with postgres_harness.sessions() as session, patch("contentflow.worker.build_connector") as connector:
+        manifest = session.get(PublishJob, publish_id).request_json["release_manifest"]
+        assert [item["asset_id"] for item in manifest["assets"]] == [first_id]
+        assert session.get(Asset, second_id).metadata_json["selected"] is True
+        with pytest.raises(PublishManifestConflict, match="已变化"):
+            handle_publish_dispatch(session, {"publish_job_id": publish_id}, postgres_harness.settings)
+        connector.assert_not_called()
 
 
 def test_postgres_driver_sqlstate_classification(postgres_harness: PostgresHarness):

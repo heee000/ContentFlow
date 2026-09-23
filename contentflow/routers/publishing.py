@@ -20,6 +20,11 @@ from ..dependencies import (
 from ..entities import ChannelConnection, ContentItem, Job, PublishJob
 from ..job_queue import enqueue_job
 from ..object_storage import build_object_storage
+from ..publish_manifest import (
+    build_release_manifest,
+    load_release_inputs,
+    require_publish_manifest,
+)
 from ..pagination import (
     DEFAULT_PAGE_LIMIT,
     PageCursor,
@@ -96,18 +101,19 @@ def schedule_publish(
     payload: PublishScheduleRequest,
     principal: Reviewer,
     session: Db,
+    settings: AppSettings,
 ):
     content = session.scalar(
         select(ContentItem).where(
             ContentItem.id == payload.content_item_id,
             ContentItem.workspace_id == principal.workspace_id,
-        )
+        ).with_for_update().execution_options(populate_existing=True)
     )
     channel = session.scalar(
         select(ChannelConnection).where(
             ChannelConnection.id == payload.channel_id,
             ChannelConnection.workspace_id == principal.workspace_id,
-        )
+        ).with_for_update().execution_options(populate_existing=True)
     )
     if content is None or channel is None:
         raise HTTPException(status_code=404, detail="内容或连接器不存在")
@@ -160,6 +166,11 @@ def schedule_publish(
             status_code=409,
             detail="官方 API 发布要求先通过平台连接测试",
         )
+    content, channel, assets = load_release_inputs(
+        session, workspace_id=principal.workspace_id, content_id=content.id,
+        channel_id=channel.id, settings=settings,
+    )
+    manifest = build_release_manifest(content, channel, assets, settings)
     publish_job = PublishJob(
         workspace_id=principal.workspace_id,
         content_item_id=content.id,
@@ -173,6 +184,7 @@ def schedule_publish(
             "publish_timing": publish_timing,
             "request_id": payload.request_id,
             "script_requested_by": principal.user_id,
+            "release_manifest": manifest,
         },
     )
     session.add(publish_job)
@@ -216,6 +228,7 @@ def retry_publish_safely(
     publish_job_id: str,
     principal: Reviewer,
     session: Db,
+    settings: AppSettings,
 ):
     query = select(PublishJob).where(
         PublishJob.id == publish_job_id,
@@ -246,6 +259,11 @@ def retry_publish_safely(
             detail="请先重新测试平台连接，确认恢复 connected 后再安全重试",
         )
 
+    content, channel, assets = load_release_inputs(
+        session, workspace_id=principal.workspace_id, content_id=job.content_item_id,
+        channel_id=job.channel_id, settings=settings,
+    )
+    require_publish_manifest(job, content, channel, assets, settings)
     queue_job = get_publish_queue_job_for_update(session, job.id)
     if queue_job is not None and queue_job.status == "running":
         raise HTTPException(status_code=409, detail="分发任务正在执行，不能重复重试")
@@ -505,6 +523,12 @@ def create_script_package(
     }:
         raise HTTPException(status_code=409, detail="当前状态不能生成脚本发布包")
 
+    content, channel, assets = load_release_inputs(
+        session, workspace_id=principal.workspace_id, content_id=job.content_item_id,
+        channel_id=job.channel_id, settings=settings,
+    )
+    # Switching delivery mode never silently approves different text or media.
+    require_publish_manifest(job, content, channel, assets, settings)
     queue_job = get_publish_queue_job_for_update(session, job.id)
     if queue_job is not None and queue_job.status == "running":
         raise HTTPException(

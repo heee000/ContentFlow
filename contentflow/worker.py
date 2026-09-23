@@ -75,6 +75,12 @@ from .media_providers import (
 from .object_storage import build_object_storage, is_managed_storage_uri
 from .prompt_eval import execute_prompt_eval_run
 from .publish_evidence import PublishEvidenceError, normalize_publish_evidence
+from .publish_manifest import (
+    ManifestObjectStorage,
+    detached_copy,
+    load_release_inputs,
+    require_publish_manifest,
+)
 from .provider_invocations import (
     LedgeredEmbeddingProvider,
     LedgeredMediaDownloader,
@@ -1293,36 +1299,17 @@ def handle_publish_dispatch(
         session.commit()
         raise PublishReconciliationRequired(publish_job.error)
 
-    content = session.get(ContentItem, publish_job.content_item_id)
-    channel = session.get(ChannelConnection, publish_job.channel_id)
-    if content is None or channel is None:
-        raise ValueError("发布任务关联的内容或连接器不存在")
-    if content.status != "approved":
-        raise ValueError("发布前内容必须保持人工审核通过状态")
+    content, channel, assets = load_release_inputs(
+        session, workspace_id=publish_job.workspace_id,
+        content_id=publish_job.content_item_id, channel_id=publish_job.channel_id,
+        settings=settings,
+    )
     if content.version != int(publish_job.request_json.get("content_version", 0)):
         raise ValueError("内容版本已变化，请重新审核并创建发布任务")
-    current_assets = list(
-        session.scalars(
-            select(Asset).where(
-                Asset.workspace_id == publish_job.workspace_id,
-                Asset.content_item_id == content.id,
-                Asset.content_version == content.version,
-            ).limit(settings.asset_max_items_per_content_version + 1)
-        )
-    )
-    if len(current_assets) > settings.asset_max_items_per_content_version:
-        raise ValueError("当前内容版本素材数量超过配置上限，请先处理异常数据")
-    assets = [
-        asset
-        for asset in current_assets
-        if not bool((asset.metadata_json or {}).get("candidate_optional"))
-        or bool((asset.metadata_json or {}).get("selected"))
-    ]
-    if not assets:
-        raise ValueError("当前内容版本没有已选用的可发布素材")
-    unfinished = [asset.id for asset in assets if asset.status != "ready"]
-    if unfinished:
-        raise ValueError(f"仍有素材未就绪: {', '.join(unfinished)}")
+    manifest = require_publish_manifest(publish_job, content, channel, assets, settings)
+    content = detached_copy(content)
+    channel_snapshot = detached_copy(channel)
+    assets = [detached_copy(asset) for asset in assets]
     delivery_mode = publish_job.delivery_mode
     # Jobs queued before delivery modes were introduced used the connector default
     # for Xiaohongshu's export-only channel. Preserve that already-supported path.
@@ -1353,6 +1340,7 @@ def handle_publish_dispatch(
             owner_type="publish_job",
             owner_id=f"{publish_job.id}:{script_attempt_id}",
         )
+        storage = ManifestObjectStorage(storage, manifest)
         expires_at = datetime.now(timezone.utc) + timedelta(
             minutes=settings.script_confirmation_ttl_minutes
         )
@@ -1364,7 +1352,7 @@ def handle_publish_dispatch(
         package = build_script_package(
             publish_job=publish_job,
             content=content,
-            channel=channel,
+            channel=channel_snapshot,
             assets=assets,
             script_attempt_id=script_attempt_id,
             expires_at=expires_at,
@@ -1438,7 +1426,8 @@ def handle_publish_dispatch(
         owner_type="publish_job",
         owner_id=publish_job.id,
     )
-    connector = build_connector(channel=channel, settings=settings, storage=storage)
+    storage = ManifestObjectStorage(storage, manifest)
+    connector = build_connector(channel=channel_snapshot, settings=settings, storage=storage)
 
     request_json = dict(publish_job.request_json or {})
     request_json["dispatch_token"] = (
