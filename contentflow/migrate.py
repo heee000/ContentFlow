@@ -10,12 +10,15 @@ from sqlalchemy.engine import Connection, Engine
 
 from . import db
 from .settings import Settings, get_settings
+from .schema_contract import (
+    HEAD_REVISION as HEAD_REVISION,
+    MINIMUM_PUBLIC_TABLE_COUNT as MINIMUM_PUBLIC_TABLE_COUNT,
+    validate_public_restore_contract as validate_public_restore_contract,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INITIAL_REVISION = "dcf960d6d7a0"
-HEAD_REVISION = "f0a1b2c3d4e5"
-MINIMUM_PUBLIC_TABLE_COUNT = 35
 AUTH_RATE_LIMIT_REVISION = "a73f9c2e4b61"
 LAYOUT_TABLES = ("content_items", "content_revisions")
 LAYOUT_REVISION = "8b6c1f3a9d21"
@@ -54,22 +57,6 @@ AUDIT_CHAIN_COLUMNS = {
 }
 
 
-def validate_public_restore_contract(script: str) -> list[str]:
-    """Keep public restore guards synchronized with the current schema."""
-    errors: list[str] = []
-    expected_revision = f'test "$revision" = "{HEAD_REVISION}"'
-    expected_table_count = (
-        f'test "$tables" -ge {MINIMUM_PUBLIC_TABLE_COUNT}'
-    )
-    if expected_revision not in script:
-        errors.append("public-test restore must require the current Alembic head")
-    if expected_table_count not in script:
-        errors.append(
-            "public-test restore table threshold does not match the current schema"
-        )
-    return errors
-
-
 def _alembic_config(connection: Connection) -> Config:
     # Editable/source runs and installed wheels have different asset locations.
     # Never select migration code from the process's arbitrary working directory.
@@ -82,6 +69,9 @@ def _alembic_config(connection: Connection) -> Config:
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "migrations").replace("%", "%%"))
     config.attributes["connection"] = connection
+    # Embedded migration must not replace host handlers or disable application
+    # loggers. Standalone Alembic remains responsible for its own CLI logging.
+    config.attributes["configure_logger"] = False
     return config
 
 

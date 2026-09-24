@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from .diagnostics import log_exception
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -637,7 +638,7 @@ class LedgeredEmbeddingProvider:
                     error_type=type(error).__name__,
                 )
             except Exception:
-                logger.exception(
+                log_exception(logger,
                     "provider invocation failure could not be finalized id=%s",
                     handle.invocation_id,
                 )
@@ -809,7 +810,7 @@ class LedgeredMediaProvider:
                     error_type=type(error).__name__,
                 )
             except Exception:
-                logger.exception(
+                log_exception(logger,
                     "media provider invocation failure could not be finalized id=%s",
                     handle.invocation_id,
                 )
@@ -890,7 +891,7 @@ class LedgeredSearchProvider:
                     error_type=type(error).__name__,
                 )
             except Exception:
-                logger.exception(
+                log_exception(logger,
                     "search provider invocation failure could not be finalized id=%s",
                     handle.invocation_id,
                 )
@@ -981,7 +982,7 @@ class LedgeredMediaDownloader:
                     error_type=type(error).__name__,
                 )
             except Exception:
-                logger.exception(
+                log_exception(logger,
                     "media download invocation failure could not be finalized id=%s",
                     handle.invocation_id,
                 )

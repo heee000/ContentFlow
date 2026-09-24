@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+from ..diagnostics import log_exception
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -271,7 +272,7 @@ async def upload_publish_evidence(
             try:
                 storage.delete(stored.uri)
             except (OSError, ValueError):
-                logger.exception("failed to compensate invalid evidence object")
+                log_exception(logger, "failed to compensate invalid evidence object")
         raise HTTPException(
             status_code=503, detail="Evidence storage failed"
         ) from error
@@ -320,7 +321,7 @@ async def upload_publish_evidence(
         try:
             storage.delete(stored.uri)
         except Exception:
-            logger.exception("failed to compensate uncommitted evidence object")
+            log_exception(logger, "failed to compensate uncommitted evidence object")
         raise
     session.refresh(evidence)
     return evidence

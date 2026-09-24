@@ -91,7 +91,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
           tar -czf "${RUNNER_TEMP}/contentflow-release.tar.gz" \
-            deploy/public-test scripts/validate_public_test_deployment.py
+            deploy/public-test scripts/validate_public_test_deployment.py contentflow/schema_contract.py
           cd "${RUNNER_TEMP}"
           sha256sum contentflow-release.tar.gz > contentflow-release.tar.gz.sha256
 

@@ -105,15 +105,22 @@ npm run dev:local
 
 面向工作区的可增长列表均默认每页 100 条，使用 `limit`（最大 200；运行记录保持最大 100）与不透明 `cursor` 继续读取；范围包括活动、运行、内容、素材、渠道、发布任务、知识文档、队列任务、工作区、成员、风格 Skill、内容修订、发布证据/确认、审计和 Prompt/Eval 历史。响应头 `X-ContentFlow-Next-Cursor` 表示还有下一页。运营增量接口的 `updated_after` 只接受带时区时间，`X-ContentFlow-Sync-Time` 提供服务端同步水位；按版本号或审计序号排序的历史使用独立序列游标。数组响应结构保持不变，跨域 Web 可读取这些分页头。Prompt/Eval 管理摘要只返回最近 100 条嵌套记录，完整历史由对应分页端点提供。
 
-## 一键容器部署
+## 容器部署（显式迁移）
 
 复制 `.env.example` 为 `.env`，至少设置两个不同的 32 位以上随机密钥 `CONTENTFLOW_SECRET_KEY`、`CONTENTFLOW_CREDENTIAL_ENCRYPTION_KEY`，并替换 PostgreSQL 与 MinIO 密码。离线验收可保留 `CONTENTFLOW_ALLOW_MOCK_PROVIDERS=true`；真实生产必须设为 `false` 并配置真实 Provider。生产还必须显式设置 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true` 和 `CONTENTFLOW_METRICS_ENABLED=true`；Compose 的 API/Worker 默认启用 Prompt 门禁。指标端点必须使用与应用签名/凭据密钥不同的 32 位以上 Bearer Token，并只允许内部监控网络访问。
 
-首次生产初始化时保持门禁开启，只临时允许受限来源注册两个管理员：一人创建并激活工作区，另一人加入该工作区成为管理员；随后依次完成 Eval 套件双人激活、Prompt 评测、双人审批与激活。管理页显示“可生成”后立刻设置 `CONTENTFLOW_ALLOW_REGISTRATION=false` 并重新部署。初始化期间未完成治理的生成请求会在入队前返回 409，不应通过临时关闭治理门禁绕过。
+首次生产初始化时保持注册关闭与治理门禁开启，先按下面的维护步骤迁移；再在受限维护终端使用 `contentflow-bootstrap-admin bootstrap-workspace` 和 `add-admin` 交互创建两名独立管理员。随后完成 Eval 套件双人激活、Prompt 评测、双人审批与激活。初始化期间未完成治理的生成请求会在入队前返回 409，不应通过临时关闭治理门禁绕过。
 
 ```powershell
 docker compose config
-docker compose up --build -d
+docker compose build api worker web
+docker compose up -d --wait postgres minio
+docker compose run --rm minio-init
+# 已有库升级必须先核对任务/未知副作用、停止同库写入者并完成验证备份。
+docker compose stop worker api
+# 确认备份成功后再继续；首次空白库也需要显式迁移。
+docker compose run --rm --no-deps api contentflow-migrate
+docker compose up -d api worker web
 docker compose ps
 ```
 
@@ -121,7 +128,7 @@ Compose 会启动：
 
 - `postgres`：PostgreSQL 16 + pgvector
 - `minio` / `minio-init`：私有对象存储与 bucket 初始化
-- `api`：先执行 Alembic，再启动 FastAPI
+- `api`：只启动 FastAPI；schema 缺失/错版会拒绝启动，不隐式迁移
 - `worker`：消费持久化任务队列
 - `web`：Next.js standalone 运营工作台
 - `prometheus` / `grafana`：可选 `observability` profile，加载版本化抓取、记录/告警规则和只读运维看板

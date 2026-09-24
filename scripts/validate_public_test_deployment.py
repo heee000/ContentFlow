@@ -4,10 +4,15 @@ import argparse
 import json
 import math
 import re
+from runpy import run_path
 import subprocess
 from pathlib import Path
 
-from contentflow.migrate import validate_public_restore_contract
+# This file is executed on a clean deployment host, without application deps or
+# an installed ContentFlow package. Load only the packaged stdlib-only contract.
+validate_public_restore_contract = run_path(
+    str(Path(__file__).resolve().parents[1] / "contentflow" / "schema_contract.py")
+)["validate_public_restore_contract"]
 
 
 IMMUTABLE_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
@@ -33,9 +38,8 @@ def _render_compose(compose_file: Path, env_file: Path) -> dict:
             capture_output=True,
             encoding="utf-8",
         )
-    except subprocess.CalledProcessError as error:
-        message = (error.stderr or error.stdout or "Docker Compose render failed").strip()
-        raise RuntimeError(message) from error
+    except subprocess.CalledProcessError:
+        raise RuntimeError("Docker Compose rendering failed; inspect configuration privately") from None
     return json.loads(completed.stdout)
 
 
@@ -165,8 +169,13 @@ def validate_document(document: dict, *, caddyfile: str) -> list[str]:
     errors.extend(validate_worker_runtime_environment(environment))
     if str(environment.get("CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_ENABLED", "")).lower() != "true":
         errors.append("public-test storage reconciliation schedule must be enabled")
-    if environment.get("CONTENTFLOW_EMBEDDING_PROVIDER") in {"hash", "mock"}:
-        errors.append("public-test stack must not use hash/mock embeddings")
+    embedding_provider = environment.get("CONTENTFLOW_EMBEDDING_PROVIDER")
+    if embedding_provider not in {"bge-m3-local", "openai-compatible"}:
+        errors.append("public-test embeddings must explicitly use bge-m3-local or openai-compatible")
+    worker_environment = services.get("worker", {}).get("environment") or {}
+    for key in ("CONTENTFLOW_EMBEDDING_PROVIDER", "CONTENTFLOW_RELEASE_SHA"):
+        if worker_environment.get(key) != environment.get(key):
+            errors.append(f"API and Worker must agree on {key}")
     for key in (
         "CONTENTFLOW_S3_ENDPOINT_URL",
         "CONTENTFLOW_MODEL_API_BASE",
@@ -214,6 +223,8 @@ def main() -> int:
         type=Path,
         default=Path("deploy/public-test/verify-backup.sh"),
     )
+    parser.add_argument("--print-embedding-provider", action="store_true",
+        help="After full validation, print only the effective non-secret embedding mode")
     args = parser.parse_args()
     document = _render_compose(args.compose, args.env_file)
     errors = validate_document(
@@ -229,7 +240,8 @@ def main() -> int:
         for error in errors:
             print(f"ERROR: {error}")
         return 1
-    print("Public-test deployment configuration passed fail-closed validation.")
+    print(document["services"]["api"]["environment"]["CONTENTFLOW_EMBEDDING_PROVIDER"]
+        if args.print_embedding_provider else "Public-test deployment configuration passed fail-closed validation.")
     return 0
 
 

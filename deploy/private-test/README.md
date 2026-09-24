@@ -37,11 +37,14 @@ cf_compose=(docker compose --env-file .env --env-file images.env \
 "${cf_compose[@]}" config --quiet
 "${cf_compose[@]}" run --rm --no-deps api python -c \
   'from contentflow.settings import Settings; Settings(_env_file=None).validate_runtime(); print("Runtime validation passed")'
+# 已有实例升级须先确认任务/未知副作用、停止同库的全部写入者，完成并验证备份。
+"${cf_compose[@]}" stop worker api
+# 只有备份确认成功后，才执行下面的显式迁移；不能照抄跳过已有数据备份。
 "${cf_compose[@]}" run --rm --no-deps api contentflow-migrate
 "${cf_compose[@]}" up -d --wait --wait-timeout 180 api worker web caddy
 ```
 
-迁移是显式维护步骤，API/Worker 不并发自动迁移。第一次管理员使用既有 `contentflow-bootstrap-admin bootstrap-workspace` 离线创建，只允许空数据库且注册关闭；密码在操作者终端隐式输入，不作为命令参数。不要复制旧用户表或用开放注册绕过。内容生产仍需 Prompt 评测和独立审核激活，不因私人测试自动批准。
+迁移是显式维护步骤，生产 API/Worker/管理员 CLI 不自动迁移；错版/缺表启动拒绝，运行就绪必须包含 `schema=ok`。第一次管理员使用 `contentflow-bootstrap-admin bootstrap-workspace` 离线创建，只允许已迁移但无账户的数据库且注册关闭；先验证 schema 再提示密码，密码不作为命令参数。不要复制旧用户表或用开放注册绕过。内容生产仍需 Prompt 评测和独立审核激活，不因私人测试自动批准。升级失败不要重启不兼容旧 Worker，先按 [数据库契约](../../docs/database_schema_contract.md) 核对实际版本与备份；禁止 `down -v`。
 
 ## 私人访问入口
 

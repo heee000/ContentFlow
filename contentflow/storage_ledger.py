@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from .diagnostics import log_exception
 import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -76,7 +77,7 @@ def _delete_rollback_objects(session: Session) -> None:
         try:
             storage.delete(uri)
         except Exception:
-            logger.exception("failed to remove rolled-back storage object")
+            log_exception(logger, "failed to remove rolled-back storage object")
 
 
 def _clear_rollback_objects(session: Session) -> None:
@@ -334,7 +335,7 @@ class LedgeredObjectStorage:
                     try:
                         self.storage.delete(stored.uri)
                     except Exception:
-                        logger.exception("failed to remove uncommitted storage object")
+                        log_exception(logger, "failed to remove uncommitted storage object")
                 _abandon_reservation(self.session, allocation, error=error)
                 raise
         _register_rollback_object(
@@ -780,7 +781,7 @@ def reconcile_workspace_storage(
                 orphan_deleted += 1
             except Exception:
                 orphan_delete_failures += 1
-                logger.exception("failed to delete orphan storage object")
+                log_exception(logger, "failed to delete orphan storage object")
     usage = _usage_for_update(session, workspace_id=workspace_id)
     expired_count, expired_bytes = session.execute(
         select(

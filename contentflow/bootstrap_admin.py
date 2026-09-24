@@ -7,6 +7,7 @@ from sqlalchemy import func, select, text
 
 from . import db
 from .audit import record_audit
+from .database_schema import verify_database_schema
 from .entities import Membership, User, Workspace
 from .migrate import upgrade_database
 from .routers.auth import make_slug
@@ -171,8 +172,10 @@ def main() -> int:
 
     settings = Settings(_env_file=None)
     settings.validate_runtime()
-    upgrade_database(settings)
+    if not settings.production:
+        upgrade_database(settings)
     db.configure_database(settings.database_url)
+    verify_database_schema(db.SessionLocal)
     password = _read_password()
     if args.command == "bootstrap-workspace":
         workspace_slug, _user_id = bootstrap_workspace_admin(

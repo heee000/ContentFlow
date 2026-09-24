@@ -20,7 +20,7 @@
 
 密钥轮换时先把新值设为 `CONTENTFLOW_CREDENTIAL_ENCRYPTION_KEY`，把旧凭据密钥加入 JSON 数组 `CONTENTFLOW_CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`，所有 API/Worker 实例同时部署后重新创建平台连接，确认新密钥可解密，再移除旧密钥。应用签名密钥与凭据加密密钥不得复用，也不得只保存在同一台主机的 `.env` 中。
 
-仓库不会在生产环境自动 `create_all`。API 容器启动前执行 `alembic upgrade head`；迁移失败时服务不会启动。
+生产 API、Worker 和管理员 CLI 不自动建表/迁移。维护窗口先停止同库全部旧 API/Worker、验证已有数据备份，再显式执行候选镜像的 `contentflow-migrate`，之后同版启动。启动与 `/health/ready` 验证 Alembic head/关键 schema；数据库可连接不代表业务就绪，缺表/错版返回 503 或拒绝启动。失败不自动 downgrade，也不重启不兼容旧代码。详见 [数据库运行准入与升级契约](database_schema_contract.md)。
 
 ## 媒体 Provider v1 上线检查
 
@@ -52,11 +52,11 @@ v1 尚未交付取消操作、能力发现和签名 Webhook；部署验收必须
 
 首次部署按以下顺序初始化：
 
-1. 保持 `CONTENTFLOW_ENVIRONMENT=production` 与 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true`，临时设置 `CONTENTFLOW_ALLOW_REGISTRATION=true`；初始化入口必须限制在 VPN、堡垒机或 IP 白名单内。
-2. 注册两名独立管理员账户；第一名创建目标工作区，并在“团队管理”中把第二名加入该工作区且设为管理员。
+1. 保持 `CONTENTFLOW_ENVIRONMENT=production`、`CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true` 与 `CONTENTFLOW_ALLOW_REGISTRATION=false`；先显式完成迁移并验证 schema。维护入口限制在 VPN/堡垒机。
+2. 在维护终端用 `contentflow-bootstrap-admin bootstrap-workspace` 创建首个工作区/管理员，再用 `add-admin` 添加独立审核管理员；交互密码不回显，不为初始化开放公网注册。具体参数见公网测试部署 README。
 3. 第一名创建覆盖 plan/generate/review 的 Eval 套件，第二名激活；套件创建者不得自行激活。
 4. 第一名基于内置安全基线创建 Prompt 草稿，用生产目标 Provider/模型运行评测；通过后由第二名审批，再由有权限的管理员激活。
-5. 确认管理页 Prompt 状态为可生成，执行一次受控生成；随后设置 `CONTENTFLOW_ALLOW_REGISTRATION=false` 并重新部署全部 API 实例。
+5. 确认管理页 Prompt 状态为可生成，经授权执行一次受控生成；注册保持关闭。
 
 不要为初始化临时关闭治理门禁，也不要把注册入口直接暴露到公网。目标 Provider/模型、活动 Eval 套件或 Prompt 哈希变化会使旧证据失效，必须重新评测。
 
@@ -70,7 +70,14 @@ v1 尚未交付取消操作、能力发现和签名 Webhook；部署验收必须
 Copy-Item .env.example .env
 # 编辑 .env，替换所有 replace-me
 docker compose config
-docker compose up --build -d
+docker compose build api worker web
+docker compose up -d --wait postgres minio
+docker compose run --rm minio-init
+# 已有实例：先核对运行任务与未知副作用，停止旧写入者并验证备份；首次空库也显式迁移。
+docker compose stop worker api
+# 操作者确认已有数据备份成功后再继续；以下命令不会替你备份。
+docker compose run --rm --no-deps api contentflow-migrate
+docker compose up -d api worker web
 docker compose ps
 ```
 

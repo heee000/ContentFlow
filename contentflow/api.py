@@ -13,10 +13,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST
-from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
+from .diagnostics import exception_diagnostic
+from .error_boundary import SafeErrorBoundary
+from .database_schema import SchemaCompatibilityError, verify_database_schema
 from .asset_operations import AssetOperationConflict
 from .channel_config import ChannelConfigurationError
 from .publish_manifest import PublishManifestConflict
@@ -55,6 +57,7 @@ def normalized_request_id(value: str | None) -> str:
 
 
 def configure_logging() -> None:
+    logger.disabled = False
     if logging.getLogger().handlers:
         return
     logging.basicConfig(
@@ -78,13 +81,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not settings.production:
             upgrade_database(settings)
             db.configure_database(settings.database_url)
-            db.create_schema()
+        verify_database_schema(db.SessionLocal)
         logger.info(
             json.dumps(
                 {
                     "event": "app.started",
                     "environment": settings.environment,
-                    "database": settings.database_url.split("@")[-1],
+                    "database": db.engine.dialect.name,
                 },
                 ensure_ascii=False,
             )
@@ -98,6 +101,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     application.dependency_overrides[get_settings] = lambda: settings
+    # Inside CORS/request instrumentation, outside route execution. The normal
+    # Exception handler alone is too late: ServerErrorMiddleware rethrows raw
+    # failures even after sending its generic 500 response.
+    application.add_middleware(
+        SafeErrorBoundary, on_error=lambda request, error: unexpected_error(request, error)
+    )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -235,10 +244,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "method": request.method,
                     "path": request.url.path,
                     "error_type": type(error).__name__,
+                    "diagnostic": exception_diagnostic(error),
                 },
                 ensure_ascii=False,
             ),
-            exc_info=(type(error), error, error.__traceback__),
         )
         return JSONResponse(
             status_code=500,
@@ -282,16 +291,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.get("/health/ready")
     def readiness():
-        with db.SessionLocal() as session:
-            session.execute(text("SELECT 1"))
-        storage = build_object_storage(settings)
-        storage.check()
-        return {
-            "status": "ready",
-            "database": "ok",
-            "storage": "ok",
+        result = {
+            "status": "not_ready",
+            "database": "unavailable",
+            "schema": "unknown",
+            "storage": "not_checked",
             "release_sha": settings.release_sha,
         }
+        try:
+            verify_database_schema(db.SessionLocal)
+        except SchemaCompatibilityError as error:
+            if error.reason != "database_unavailable":
+                result.update(database="ok", schema="incompatible")
+            logger.warning(json.dumps({"event": "readiness.schema_failed", "reason": error.reason}))
+            return JSONResponse(status_code=503, content=result, headers={"Cache-Control": "no-store"})
+        result.update(database="ok", schema="ok")
+        try:
+            build_object_storage(settings).check()
+        except Exception as error:
+            result["storage"] = "unavailable"
+            logger.warning(json.dumps({"event": "readiness.storage_failed", "error_type": type(error).__name__}))
+            return JSONResponse(status_code=503, content=result, headers={"Cache-Control": "no-store"})
+        result.update(status="ready", storage="ok")
+        return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
 
     @application.get("/metrics", include_in_schema=False)
     def prometheus_metrics(request: Request):

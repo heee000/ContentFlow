@@ -92,6 +92,37 @@ class MediaProviderError(RuntimeError):
         self.provider_request_id_source = provider_request_id_source
 
 
+_MEDIA_CONFIGURATION_GUIDANCE = {
+    "media_source_configuration_changed": (
+        "素材生成配置与已批准的来源不一致；请恢复对应配置并核对素材任务，"
+        "不能静默改用人工或其他 Provider"
+    ),
+    "media_poll_configuration_changed": (
+        "异步素材任务的 Provider 配置已变化或缺少目标指纹；"
+        "请人工核对原任务及对应配置，确认远端结果前不要重新生成"
+    ),
+}
+
+
+class MediaConfigurationError(MediaProviderError):
+    """Local preflight failure with a fixed public code and recovery guidance."""
+
+    def __init__(self, code: str) -> None:
+        message = _MEDIA_CONFIGURATION_GUIDANCE[code]
+        super().__init__(message, retryable=False)
+        self.code = code
+
+
+def media_configuration_receipt(error: BaseException) -> str | None:
+    # Never trust arbitrary provider messages, args, chains or subclasses.
+    if type(error) is not MediaConfigurationError:
+        return None
+    code = error.code
+    if type(code) is not str or code not in _MEDIA_CONFIGURATION_GUIDANCE:
+        return None
+    return f"[{code}] {_MEDIA_CONFIGURATION_GUIDANCE[code]}"
+
+
 @dataclass(slots=True)
 class MediaGeneration:
     status: str

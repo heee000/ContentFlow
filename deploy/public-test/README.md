@@ -46,7 +46,11 @@
 
 ## 首次初始化顺序
 
-部署脚本会校验至少 8 GiB 空闲空间、Compose 安全配置、不可变镜像、BGE offline 缓存、数据库迁移、API readiness 和 Worker 心跳。首次没有 BGE 缓存时会下载固定 revision，并立即用 offline 模式复验。
+部署脚本会校验至少 8 GiB 空闲空间、Compose 安全配置和不可变镜像，并取得共享环境目录的独占部署锁（宿主需 `flock`）。仅当有效 Embedding 模式为本地 BGE 时才校验缓存；首次缺缓存会下载固定 revision 再离线复验。使用 Embedding API 时不启动本地模型准备，支持不含 PyTorch 的 API-only 后端镜像。
+
+之后进入维护窗口：停止旧 Worker/API，等待数据库健康；已有表就先备份，即使应用原来已经停止也不能跳过。空白库才跳过备份。再显式 `contentflow-migrate`、启动同版 API/Worker/Web，核对 API schema/readiness/期望 SHA，以及**当前 Worker 容器**的版本和有效心跳。失败不晋级；候选启动后核验失败会再次停止业务写入者，不自动回退数据库或重启旧版本。其他主机的写入者必须由操作者事先停止。
+
+迁移不由生产 API/Worker/管理员 CLI 自动执行。已有库升级前必须初始化并验证备份仓库；不能因备份失败而跳过。完整准入与失败处置见 [数据库运行契约](../../docs/database_schema_contract.md)。发布包的宿主预检仅需 Python 标准库，不依赖安装整套应用。
 
 部署成功后，在服务器终端交互创建两位管理员；`getpass` 读取的密码不会回显：
 
@@ -63,7 +67,7 @@ docker compose --env-file /opt/contentflow/shared/.env -f compose.yml run --rm -
   --email reviewer@example.com --display-name Reviewer
 ```
 
-第一条命令只允许空数据库；第二条拒绝复用已有邮箱。两条命令都要求 `CONTENTFLOW_ALLOW_REGISTRATION=false` 并写入系统审计。创建完成后从公网登录，建立 Eval 套件、双人激活、Prompt 评测/审批/激活，直到管理页显示“可生成”。
+第一条命令只允许已经迁移、没有账户的数据库；第二条拒绝复用已有邮箱。两条命令都先验证 schema，再提示密码，生产环境绝不隐式迁移。它们要求 `CONTENTFLOW_ALLOW_REGISTRATION=false` 并写入系统审计。创建完成后从公网登录，建立 Eval 套件、双人激活、Prompt 评测/审批/激活，直到管理页显示“可生成”。
 
 ## R2 真实兼容性签收
 
@@ -100,9 +104,9 @@ docker compose --env-file /opt/contentflow/shared/.env -f compose.yml run --rm -
 
 ## 上线后验收
 
-1. `https://域名/health/ready` 返回 database/storage `ok` 和当前 release SHA。
+1. `https://域名/health/ready` 返回 database/schema/storage `ok` 和当前 release SHA。
 2. 注册接口保持 403；两位管理员可登录、刷新和退出。
-3. 上传小型知识文件，Worker 完成 BGE 索引；重启 Worker 后检索仍有效。
+3. 上传小型知识文件，Worker 使用已选择的 Embedding API 或本地 BGE 完成索引；重启 Worker 后检索仍有效。
 4. 新活动完成 Agent 生成、人工审核、封面人工上传/图库选择，保持微信 `auto_publish=false`。
 5. 从 Worker 容器查询出口 IPv4，加入微信公众号白名单；家庭网络和手机热点访问时该 Worker 出口不变。
 6. 先完成公众号连接测试，再创建一份“不公开发布”的草稿并保存外部 ID/证据。

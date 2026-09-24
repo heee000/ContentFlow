@@ -30,6 +30,7 @@ from contentflow.entities import (
 from contentflow.object_storage import build_object_storage
 from contentflow.job_queue import enqueue_job, request_job_manual_review
 from contentflow.models import CampaignBrief
+from contentflow.media_providers import media_provider_profile_fingerprint
 from contentflow.provider_invocations import ProviderInvocationLedger
 from contentflow.settings import Settings
 from contentflow.worker import Worker
@@ -687,6 +688,9 @@ class ManualMediaFlowTest(unittest.TestCase):
             self.assertEqual(session.scalar(select(func.count(Job.id))), 0)
 
     def test_worker_rejects_provider_drift_before_any_external_call(self):
+        private = "TEST_ONLY_PRIVATE_CONFIGURATION"
+        self.settings.media_api_base = f"https://media.example/{private}"
+        self.settings.image_model = private
         for selected, configured in (("http", "manual"), ("http", "mock"), ("mock", "http")):
             with self.subTest(selected=selected, configured=configured):
                 self.settings.image_provider = configured
@@ -701,7 +705,9 @@ class ManualMediaFlowTest(unittest.TestCase):
                     )
                     session.commit()
                     job_id = job.id
-                with patch("contentflow.worker.build_media_provider") as provider:
+                with patch("contentflow.worker.build_media_provider") as provider, self.assertLogs(
+                    "contentflow.worker", level="ERROR"
+                ) as logs:
                     self.assertTrue(Worker(settings=self.settings, session_factory=db.SessionLocal).run_once())
                     provider.assert_not_called()
                 with db.SessionLocal() as session:
@@ -710,6 +716,45 @@ class ManualMediaFlowTest(unittest.TestCase):
                     self.assertEqual((asset.provider, asset.status), (selected, "failed"))
                     self.assertEqual(job.status, "failed")
                     self.assertIn("配置与已批准的来源不一致", asset.error)
+                    self.assertIn("media_source_configuration_changed", asset.error)
+                    self.assertIn("请恢复对应配置", asset.error)
+                    self.assertEqual(job.last_error, asset.error)
+                    self.assertNotIn(private, asset.error + "".join(logs.output))
+
+    def test_worker_poll_configuration_failure_keeps_safe_recovery_guidance(self):
+        self.settings.image_provider = "http"
+        self.settings.image_model = "TEST_ONLY_ORIGINAL_MODEL"
+        original_profile = media_provider_profile_fingerprint(self.settings, "image")
+        self.settings.image_model = "TEST_ONLY_CHANGED_PRIVATE_MODEL"
+        for profile in (None, original_profile):
+            with self.subTest(missing_profile=profile is None):
+                with db.SessionLocal() as session:
+                    session.get(ContentItem, self.content_id).status = "approved"
+                    asset = session.get(Asset, self.asset_id)
+                    asset.provider = "http"
+                    asset.status = "processing"
+                    asset.external_task_id = "TEST_ONLY_REMOTE_TASK"
+                    asset.metadata_json = {"media_provider_profile_fingerprint": profile}
+                    job = enqueue_job(session, job_type="asset.poll",
+                        payload={"asset_id": asset.id}, workspace_id=self.workspace_id,
+                        idempotency_key=uuid.uuid4().hex)
+                    session.commit()
+                    job_id = job.id
+                with patch("contentflow.worker.build_media_provider") as provider, self.assertLogs(
+                    "contentflow.worker", level="ERROR"
+                ) as logs:
+                    self.assertTrue(Worker(settings=self.settings, session_factory=db.SessionLocal).run_once())
+                    provider.assert_not_called()
+                with db.SessionLocal() as session:
+                    asset = session.get(Asset, self.asset_id)
+                    job = session.get(Job, job_id)
+                    self.assertEqual((asset.status, job.status), ("failed", "failed"))
+                    self.assertIn("media_poll_configuration_changed", asset.error)
+                    self.assertIn("请人工核对原任务", asset.error)
+                    self.assertIn("确认远端结果前不要重新生成", asset.error)
+                    self.assertEqual(job.last_error, asset.error)
+                    self.assertNotIn(self.settings.image_model, asset.error + "".join(logs.output))
+                    self.assertNotIn(asset.external_task_id, asset.error + "".join(logs.output))
 
 
 if __name__ == "__main__":

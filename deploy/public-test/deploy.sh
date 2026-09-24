@@ -48,30 +48,64 @@ compose() {
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
-python3 "${REPOSITORY_ROOT}/scripts/validate_public_test_deployment.py" \
-  --compose "$COMPOSE_FILE" --env-file "$ENV_FILE" \
-  --caddyfile "${SCRIPT_DIR}/Caddyfile"
-
-if compose ps --status running --services | grep -Eq '^(api|worker)$'; then
-  "${SCRIPT_DIR}/backup.sh" "$ENV_FILE"
+# Serialize manual invocations as well as CI. Never source a secret env file.
+umask 077
+exec 9>"$(dirname -- "$ENV_FILE")/.contentflow-deploy.lock"
+if ! flock -n 9; then
+  echo "Another deployment holds the shared environment lock" >&2
+  exit 1
 fi
+
+embedding_provider=$(python3 "${REPOSITORY_ROOT}/scripts/validate_public_test_deployment.py" \
+  --compose "$COMPOSE_FILE" --env-file "$ENV_FILE" \
+  --caddyfile "${SCRIPT_DIR}/Caddyfile" --verify-backup "${SCRIPT_DIR}/verify-backup.sh" \
+  --print-embedding-provider)
+case "$embedding_provider" in
+  bge-m3-local|openai-compatible) ;;
+  *) echo "No validated embedding mode; deployment refused" >&2; exit 1 ;;
+esac
 
 compose pull postgres api worker web caddy
-if ! compose --profile maintenance run --rm embedding-bootstrap \
-  contentflow-prepare-embedding-cache verify; then
-  echo "Pinned BGE-M3 cache is absent or invalid; preparing it once."
-  compose --profile maintenance run --rm embedding-bootstrap \
-    contentflow-prepare-embedding-cache prepare
-  compose --profile maintenance run --rm embedding-bootstrap \
-    contentflow-prepare-embedding-cache verify
+if [ "$embedding_provider" = bge-m3-local ]; then
+  if ! compose --profile maintenance run --rm --no-deps embedding-bootstrap \
+    contentflow-prepare-embedding-cache verify; then
+    echo "Pinned BGE-M3 cache is absent or invalid; preparing it once."
+    compose --profile maintenance run --rm --no-deps embedding-bootstrap \
+      contentflow-prepare-embedding-cache prepare
+    compose --profile maintenance run --rm --no-deps embedding-bootstrap \
+      contentflow-prepare-embedding-cache verify
+  fi
 fi
-compose up -d postgres
-compose run --rm --no-deps --entrypoint alembic api upgrade head
+
+echo "Entering maintenance: stopping API and Worker before backup/migration."
+compose stop worker api
+compose up -d --wait --wait-timeout 120 postgres
+tables=$(compose --profile maintenance run --rm --no-deps backup-db \
+  psql -tA -c "SELECT count(*) FROM pg_tables WHERE schemaname='public';")
+case "$tables" in
+  ''|*[!0-9]*) echo "Cannot establish database contents; migration refused" >&2; exit 1 ;;
+esac
+if [ "$tables" -gt 0 ]; then
+  "${SCRIPT_DIR}/backup.sh" "$ENV_FILE"
+fi
+compose run --rm --no-deps api contentflow-migrate
+
+# If candidate startup or verification fails, stop its business writers again.
+# Never auto-restart old binaries after a possibly irreversible migration.
+finish() {
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    echo "Candidate failed verification; stopping business writers, no promotion." >&2
+    compose stop worker api || echo "Stop failed; operator intervention required" >&2
+  fi
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 compose up -d --remove-orphans postgres api worker web caddy
 
 attempt=0
-until compose exec -T api python -c \
-  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"; do
+until compose exec -T api python -m contentflow.deployment_checks api "$CONTENTFLOW_RELEASE_SHA"; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 30 ]; then
     echo "API readiness did not recover; release was not promoted" >&2
@@ -82,9 +116,7 @@ done
 
 attempt=0
 while :; do
-  active_workers=$(compose --profile maintenance run --rm --no-deps backup-db \
-    psql -tA -c "SELECT count(*) FROM worker_nodes WHERE status='online' AND heartbeat_at > now() - interval '90 seconds';")
-  if [ "${active_workers:-0}" -ge 1 ]; then
+  if compose exec -T worker python -m contentflow.deployment_checks worker "$CONTENTFLOW_RELEASE_SHA"; then
     break
   fi
   attempt=$((attempt + 1))

@@ -156,20 +156,32 @@ def test_missing_or_invalid_operation_key_cannot_create_work(application, key):
         assert session.scalar(select(func.count(WorkflowRun.id))) == 0
 
 
-def test_audit_failure_rolls_back_run_and_receipt_atomically(application):
+def test_audit_failure_rolls_back_run_and_receipt_atomically(application, caplog):
     item = campaign(application)
     key = str(uuid.uuid4())
     with patch(
         "contentflow.routers.runs.record_audit",
         side_effect=RuntimeError("TEST-ONLY audit failure"),
     ):
-        with pytest.raises(RuntimeError, match="TEST-ONLY audit failure"):
-            submit(application, item, key)
+        response = submit(application, item, key)
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "internal_error"
+    assert response.json()["error"]["request_id"] == response.headers["x-request-id"]
+    assert response.headers["cache-control"] == "no-store"
+    assert "TEST-ONLY audit failure" not in response.text + caplog.text
+    assert "RuntimeError" in caplog.text
     with db.SessionLocal() as session:
         assert session.scalar(select(func.count(WorkflowRun.id))) == 0
         assert session.scalar(select(func.count(Job.id))) == 0
         assert session.scalar(select(func.count()).select_from(GenerationIntent)) == 0
+        assert session.scalar(select(func.count(AuditLog.id)).where(
+            AuditLog.action == "workflow.enqueue")) == 0
     assert submit(application, item, key).status_code == 202
+    with db.SessionLocal() as session:
+        for model in (WorkflowRun, Job, GenerationIntent):
+            assert session.scalar(select(func.count()).select_from(model)) == 1
+        assert session.scalar(select(func.count(AuditLog.id)).where(
+            AuditLog.action == "workflow.enqueue")) == 1
 
 
 @pytest.mark.parametrize("targets", [["douyin"], ["wechat", "wechat"]])

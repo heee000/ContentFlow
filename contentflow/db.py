@@ -29,6 +29,7 @@ def build_engine(database_url: str | None = None) -> Engine:
     engine = create_engine(
         url,
         pool_pre_ping=True,
+        hide_parameters=True,
         connect_args=connect_args,
         future=True,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
+from .diagnostics import log_exception, safe_error_receipt
 import os
 import random
 import signal
@@ -30,6 +31,7 @@ from sqlalchemy.exc import (
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import db
+from .database_schema import verify_database_schema
 from .metric_values import MetricValues
 from .audit import record_audit
 from .asset_operations import lock_asset_for_mutation
@@ -70,11 +72,13 @@ from .job_queue import (
 )
 from .knowledge_service import index_document
 from .media_providers import (
+    MediaConfigurationError,
     MediaGeneration,
     MediaProviderError,
     build_media_provider,
     download_generated_media,
     media_provider_profile_fingerprint,
+    media_configuration_receipt,
     validate_media_download_url,
 )
 from .object_storage import build_object_storage, is_managed_storage_uri
@@ -369,7 +373,7 @@ class LeaseHeartbeat:
                         type(error).__name__,
                     )
                 else:
-                    logger.exception(
+                    log_exception(logger,
                         "job lease heartbeat failed id=%s worker=%s attempt=%s",
                         self.job_id,
                         self.worker_id,
@@ -387,12 +391,14 @@ class WorkerNodeHeartbeat:
         interval_seconds: float,
         hostname: str | None = None,
         process_id: int | None = None,
+        release_sha: str = "development",
     ):
         self.session_factory = session_factory
         self.worker_id = worker_id
         self.interval_seconds = interval_seconds
         self.hostname = hostname or socket.gethostname()
         self.process_id = process_id or os.getpid()
+        self.release_sha = release_sha
         self.started_at = datetime.now(timezone.utc)
         self._stop = threading.Event()
         self._started = False
@@ -448,6 +454,11 @@ class WorkerNodeHeartbeat:
                     node.process_id = self.process_id
                     node.status = status
                     node.heartbeat_at = now
+                node.metadata_json = {
+                    **(node.metadata_json or {}),
+                    "heartbeat_interval_seconds": self.interval_seconds,
+                    "release_sha": self.release_sha,
+                }
                 if status == "stopped":
                     node.stopped_at = now
                 else:
@@ -477,7 +488,7 @@ class WorkerNodeHeartbeat:
                     type(error).__name__,
                 )
             else:
-                logger.exception(
+                log_exception(logger,
                     "worker node heartbeat failed id=%s status=%s",
                     self.worker_id,
                     status,
@@ -1050,10 +1061,7 @@ def handle_asset_generate(
     if configured_provider == "manual" or (
         asset.provider in {"http", "mock"} and asset.provider != configured_provider
     ):
-        raise MediaProviderError(
-            "素材生成配置与已批准的来源不一致；请恢复对应配置，不能静默改用人工或其他 Provider",
-            retryable=False,
-        )
+        raise MediaConfigurationError("media_source_configuration_changed")
     provider = build_media_provider(settings, asset.kind)
     if configured_provider == "http":
         model_name = (
@@ -1136,10 +1144,7 @@ def handle_asset_poll(
     )
     current_profile = media_provider_profile_fingerprint(settings, asset.kind)
     if not isinstance(expected_profile, str) or expected_profile != current_profile:
-        raise MediaProviderError(
-            "异步素材任务的 Provider 配置已变化或缺少目标指纹，请人工核对",
-            retryable=False,
-        )
+        raise MediaConfigurationError("media_poll_configuration_changed")
     work = AssetWork.begin(session, asset)
     asset = work.require_current(session)
     provider = build_media_provider(settings, asset.kind)
@@ -1466,7 +1471,7 @@ def handle_publish_dispatch(
             try:
                 storage.delete(stored.uri)
             except Exception:
-                logger.exception("failed to compensate uncommitted script package")
+                log_exception(logger, "failed to compensate uncommitted script package")
             raise
         return {
             "publish_job_id": publish_job.id,
@@ -2042,6 +2047,12 @@ class Worker:
         self._shutdown_signal: int | None = None
         self._next_storage_reconciliation_sweep_at = 0.0
         self._next_publish_reconciliation_sweep_at = 0.0
+        if self.settings.production:
+            try:
+                verify_database_schema(self.session_factory)
+            except Exception:
+                self.close()
+                raise
 
     @property
     def stop_requested(self) -> bool:
@@ -2067,6 +2078,10 @@ class Worker:
     def run_once(self) -> bool:
         if self.stop_requested:
             return False
+        if self.settings.production:
+            # Do not claim work or call providers after an incompatible migration
+            # or structural drift. Startup validation alone becomes stale.
+            verify_database_schema(self.session_factory)
 
         expired_job_refs: list[tuple[str, str, JobRecoveryPolicy]] = []
         with self.session_factory() as session:
@@ -2270,7 +2285,7 @@ class Worker:
                     logger.info("superseded asset result retained without attachment id=%s", job_id)
                     return True
                 ai_provenance = getattr(error, "ai_provenance", None)
-                persisted_error: Exception | str = error
+                persisted_error: Exception | str = safe_error_receipt(error)
                 if database_error_kind is not None:
                     persisted_error = sanitized_database_error(error)
                 elif job_type in CONNECTOR_JOB_TYPES:
@@ -2293,6 +2308,10 @@ class Worker:
                     and ai_provenance
                 ):
                     persisted_error = f"AI workflow failed ({type(error).__name__})"
+                elif type(error) is JobNotReady:
+                    persisted_error = "Task is waiting for the remote operation to become ready"
+                elif job_type in {"asset.generate", "asset.poll"}:
+                    persisted_error = media_configuration_receipt(error) or persisted_error
                 if job is not None:
                     publish_outcome_uncertain = False
                     if (
@@ -2406,7 +2425,7 @@ class Worker:
                     logger.error("platform job failed id=%s type=%s diagnostic=%s",
                         job_id, job_type, persisted_error)
                 elif isinstance(error, JobNotReady):
-                    logger.info("job pending id=%s message=%s", job_id, error)
+                    logger.info("job pending id=%s", job_id)
                 elif ai_provenance:
                     logger.error(
                         "AI job failed id=%s error_type=%s",
@@ -2423,7 +2442,7 @@ class Worker:
                         type(error).__name__,
                     )
                 else:
-                    logger.exception("job failed id=%s", job_id)
+                    log_exception(logger, "job failed id=%s", job_id)
             return True
 
     def _database_retry_delay(self, retry_attempt: int) -> float:
@@ -2446,6 +2465,7 @@ class Worker:
             session_factory=self.session_factory,
             worker_id=self.worker_id,
             interval_seconds=self.settings.worker_heartbeat_seconds,
+            release_sha=self.settings.release_sha,
         )
         consecutive_database_failures = 0
         try:
@@ -2534,7 +2554,7 @@ def main() -> None:
 
         upgrade_database(settings)
         db.configure_database(settings.database_url)
-    db.create_schema()
+    verify_database_schema(db.SessionLocal)
     # Alembic configures logging while migrations run. Re-apply the worker
     # logger afterwards so startup and job failures remain visible.
     configure_worker_logging()

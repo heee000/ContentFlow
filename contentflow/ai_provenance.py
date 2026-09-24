@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from .diagnostics import log_exception
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -176,7 +177,7 @@ class AIProvenanceRecorder:
                         error_type=provider_error_type(error),
                     )
                 except Exception:
-                    logger.exception(
+                    log_exception(logger,
                         "provider invocation failure could not be finalized id=%s",
                         ledger_handle.invocation_id,
                     )
