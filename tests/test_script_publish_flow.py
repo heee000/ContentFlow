@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from publishing_helpers import confirm_publish
+from media_fixtures import png_bytes
 
 import hashlib
 import io
@@ -98,7 +99,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
             workspace_id=self.workspace_id,
             category="assets",
             filename="approved-cover.png",
-            stream=io.BytesIO(b"\x89PNG\r\napproved-script-cover"),
+            stream=io.BytesIO(png_bytes()),
             content_type="image/png",
         )
         with db.SessionLocal() as session:

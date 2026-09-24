@@ -26,6 +26,7 @@ from fastapi import HTTPException
 import pytest
 from sqlalchemy import create_engine, event, inspect, select, text, update
 from PIL import Image
+from media_fixtures import png_bytes
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -412,7 +413,7 @@ def _create_publish_fixture(
         session.flush()
         stored = build_object_storage(harness.settings).put(
             workspace_id=workspace.id, category="assets", filename="cover.png",
-            stream=io.BytesIO(b"isolated-postgres-cover"), content_type="image/png",
+            stream=io.BytesIO(png_bytes()), content_type="image/png",
         )
         asset = Asset(
             workspace_id=workspace.id,

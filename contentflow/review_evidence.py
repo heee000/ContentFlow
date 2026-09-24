@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 REVIEW_SCHEMA_VERSION = 1
-RULESET_VERSION = "deterministic-v1"
+RULESET_VERSION = "deterministic-v2-publication-fields"
 
 
 def digest(value: Any) -> str:
@@ -119,7 +119,9 @@ def local_review(
         "brief_snapshot": brief.to_dict(),
         "brief_sha256": digest(brief.to_dict()),
         "rule_review": RuleReviewer()
-        .review(item.platform, {"title": item.title, "body": item.body}, brief)
+        .review(item.platform, {"title": item.title, "body": item.body,
+            "hashtags": item.hashtags, "call_to_action": item.call_to_action,
+            "layout": item.layout_json}, brief)
         .to_dict(),
         "requires_human_approval": True,
         "model_review": {},
@@ -157,6 +159,30 @@ def approval_warnings(review: dict[str, Any]) -> list[str]:
     ):
         warnings.append("当前版本 AI 审核未通过或标为高风险")
     return warnings
+
+
+def require_publication_field_review(session: Session, item: ContentItem) -> None:
+    """Old approval cannot waive a failure it never inspected under the new rules."""
+    from .publish_manifest import PublishManifestConflict
+
+    try:
+        current = local_review(item, resolve_brief(session, item))
+    except (ValueError, TypeError, KeyError):
+        raise PublishManifestConflict("发布前无法复核内容规则，请编辑保存后重新审核") from None
+    if current["rule_review"]["checks"]["avoids_forbidden_phrases"]:
+        return
+    old = item.review_json or {}
+    if (old.get("ruleset_version") == RULESET_VERSION
+            and old.get("human_decision") == "approve"
+            and old.get("human_content_sha256") == current["content_sha256"]
+            and old.get("human_content_version") == item.version
+            and old.get("human_reviewer_id") == item.approved_by
+            and old.get("human_acknowledged_warnings") is True
+            and len(str(old.get("human_reason") or "").strip()) >= 8
+            and old.get("rule_review") == current["rule_review"]):
+        return
+    raise PublishManifestConflict("发布字段存在未核对的规则问题，请编辑保存并重新人工审核",
+        code="publication_review_required")
 
 
 def capture_review(

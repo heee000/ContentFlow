@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import logging
 from .diagnostics import log_exception, safe_error_receipt
+from .media_validation import require_video_decoders, validate_media, validation_error_receipt
+from .review_evidence import resolve_brief
 import os
 import random
 import signal
@@ -83,7 +85,7 @@ from .media_providers import (
 )
 from .object_storage import build_object_storage, is_managed_storage_uri
 from .prompt_eval import execute_prompt_eval_run
-from .publish_evidence import PublishEvidenceError, normalize_publish_evidence
+from .publish_evidence import PublishEvidenceError
 from .publish_manifest import (
     ManifestObjectStorage,
     PublishManifestConflict,
@@ -737,10 +739,11 @@ def handle_asset_download(
             ),
             call_metadata=call_metadata,
         )
-        normalized = normalize_publish_evidence(
+        normalized = validate_media(
             raw,
             filename="searched-image.jpg",
-            kind="screenshot",
+            kind="image",
+            mime_type=None,
             max_bytes=settings.max_upload_bytes,
             max_pixels=settings.publish_evidence_max_pixels,
         )
@@ -840,6 +843,7 @@ def handle_asset_download(
             "license_checked_at": current_pending.get("license_checked_at"),
             "checksum": stored.checksum,
             "source_checksum": normalized.source_sha256,
+            "media_validation": normalized.evidence,
         }
         candidate_group = current_metadata.get("candidate_group")
         if candidate_group:
@@ -953,6 +957,15 @@ def _store_generation(
     filename = generation.filename or (
         "asset.png" if asset.kind == "image" else "asset.mp4"
     )
+    forbidden_phrases = ()
+    if asset.kind == "video_storyboard" and generation.mime_type == "application/json":
+        content = session.get(ContentItem, asset.content_item_id)
+        forbidden_phrases = tuple(resolve_brief(session, content).forbidden_phrases)
+    normalized = validate_media(data, kind=asset.kind, mime_type=generation.mime_type,
+        filename=filename, max_bytes=settings.max_upload_bytes,
+        max_pixels=settings.publish_evidence_max_pixels, forbidden_phrases=forbidden_phrases)
+    data = normalized.data
+    filename = f"asset.{normalized.extension}"
     work = work or AssetWork.begin(session, asset)
     asset = work.require_current(session)
     stored = build_ledgered_object_storage(
@@ -965,7 +978,7 @@ def _store_generation(
         category="assets",
         filename=filename,
         stream=BytesIO(data),
-        content_type=generation.mime_type,
+        content_type=normalized.mime_type,
     )
     asset = work.require_current(session, lock=True)
     if (
@@ -998,6 +1011,8 @@ def _store_generation(
         **(asset.metadata_json or {}),
         **generation.metadata,
         "checksum": stored.checksum,
+        "source_checksum": normalized.source_sha256,
+        "media_validation": normalized.evidence,
     }
 
 
@@ -1062,6 +1077,8 @@ def handle_asset_generate(
         asset.provider in {"http", "mock"} and asset.provider != configured_provider
     ):
         raise MediaConfigurationError("media_source_configuration_changed")
+    if configured_provider == "http" and asset.kind != "image":
+        require_video_decoders()
     provider = build_media_provider(settings, asset.kind)
     if configured_provider == "http":
         model_name = (
@@ -1147,10 +1164,12 @@ def handle_asset_poll(
         raise MediaConfigurationError("media_poll_configuration_changed")
     work = AssetWork.begin(session, asset)
     asset = work.require_current(session)
-    provider = build_media_provider(settings, asset.kind)
     configured_provider = (
         settings.image_provider if asset.kind == "image" else settings.video_provider
     )
+    if configured_provider == "http" and asset.kind != "image":
+        require_video_decoders()
+    provider = build_media_provider(settings, asset.kind)
     if configured_provider == "http":
         model_name = (
             settings.image_model if asset.kind == "image" else settings.video_model
@@ -1367,6 +1386,7 @@ def handle_publish_dispatch(
     if content.version != int(publish_job.request_json.get("content_version", 0)):
         raise ValueError("内容版本已变化，请重新审核并创建发布任务")
     manifest = require_publish_manifest(publish_job, content, channel, assets, settings)
+    forbidden_phrases = tuple(resolve_brief(session, content).forbidden_phrases)
     content = detached_copy(content)
     channel_snapshot = detached_copy(channel)
     assets = [detached_copy(asset) for asset in assets]
@@ -1400,7 +1420,8 @@ def handle_publish_dispatch(
             owner_type="publish_job",
             owner_id=f"{publish_job.id}:{script_attempt_id}",
         )
-        storage = ManifestObjectStorage(storage, manifest)
+        storage = ManifestObjectStorage(storage, manifest, max_bytes=settings.max_upload_bytes,
+            max_pixels=settings.publish_evidence_max_pixels, forbidden_phrases=forbidden_phrases)
         expires_at = datetime.now(timezone.utc) + timedelta(
             minutes=settings.script_confirmation_ttl_minutes
         )
@@ -1486,7 +1507,8 @@ def handle_publish_dispatch(
         owner_type="publish_job",
         owner_id=publish_job.id,
     )
-    storage = ManifestObjectStorage(storage, manifest)
+    storage = ManifestObjectStorage(storage, manifest, max_bytes=settings.max_upload_bytes,
+        max_pixels=settings.publish_evidence_max_pixels, forbidden_phrases=forbidden_phrases)
     connector = build_connector(channel=channel_snapshot, settings=settings, storage=storage)
 
     request_json = dict(publish_job.request_json or {})
@@ -2310,8 +2332,9 @@ class Worker:
                     persisted_error = f"AI workflow failed ({type(error).__name__})"
                 elif type(error) is JobNotReady:
                     persisted_error = "Task is waiting for the remote operation to become ready"
-                elif job_type in {"asset.generate", "asset.poll"}:
-                    persisted_error = media_configuration_receipt(error) or persisted_error
+                elif job_type in {"asset.generate", "asset.poll", "asset.download"}:
+                    persisted_error = (media_configuration_receipt(error)
+                        or validation_error_receipt(error) or persisted_error)
                 if job is not None:
                     publish_outcome_uncertain = False
                     if (

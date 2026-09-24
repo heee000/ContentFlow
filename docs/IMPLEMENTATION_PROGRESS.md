@@ -304,3 +304,16 @@
 - A41/A53/A54 无新增迁移，head 仍 f0a1b2c3d4e5；真实 PG/MinIO/kill/升级恢复、最小权限、Docker/Compose 实测、当前 CI/部署保持待验。Git 作者及当前 GitHub 登录已确认 John Wang/heee000；仅阶段普通 commit/push 当前分支，分支 push 不触发 CI，不绕过在线扫描权限，不强推/PR/合并/部署。受保护知识文件不读/哈希/修改/暂存。
 - 第一阶段本地实现与验收完成，提交范围为 40 个明确的源码/测试/契约/交接文件；实际同步提交见本功能分支历史和本任务交付回执。后续只读核对提交/远端结果，不因文档签收再次全套测试。下一阶段由用户决定，不自动开展 A39/A40/A12/A47，也不自行创建持续目标。
 - 实现提交 **`1e540f99a062728deeb104326439d5e1e0269040`** 已形成，作者 John Wang / `182348029+heee000@users.noreply.github.com`。暂存检查发现既有新增 shell 测试文件尾部多一个空行，仅去除此空行后通过，不改逻辑、不重跑全套。普通 `git push origin HEAD:refs/heads/codex/enterprise-media-runtime` 失败：Git 经 `127.0.0.1` 连接 github.com:443 被拒绝；不是自动审批拒绝，也没有改代理/DNS/账号或换路绕过边界。此时远端仍为 `628bb0aad1c3fe1f299cd5afa8dfb4f938264c17`，不能称已同步。本条及交接断点仅追加文档提交；恢复现有 Git 连接后只需核对远端并普通推送，不重做实现或测试。
+
+## 2026-09-24 第二阶段：推送恢复与 A39/A40 实施
+
+- 用户要求优先检查并解决 GitHub 推送后继续整改。确认全局 Git 的 GitHub 专用代理为不可用的 `127.0.0.1:7890`；按单次命令 `-c http.https://github.com.proxy=` 读取并普通推送成功。第一阶段提交远端/本地同为 `ba4503eb5ed3cf0263da4764db594baaf9e03b7c`。没有修改全局或仓库代理、DNS、账号；分支 push 不触发 CI，没有在线扫描/部署。
+- 新失败回归确认 A39：真实 HTTP 解析→Worker→存储将 12 字节假图记作 ready；A40：标签、独立 CTA、脚本 narration/heading 四种非正文字段漏检。最初 A39 探针因配置/空 prompt 没有进入 HTTP 路径，补齐并断言确实发出一条 Mock HTTP 请求后才取得有效失败证据，没有把前置拒绝当成修复成功。
+- A39 统一搜索、生成、轮询和人工上传的解码检查；PNG/JPEG/WebP 单帧与 MIME/像素/体积校验，MP4 封装边界、轨道/时长/像素/帧率限制和完整解码。视频必须实际解出帧；缺 ffmpeg/ffprobe 在 HTTP 视频调用前停止。上传解码走线程池；Dockerfile 声明安装工具，尚未真实构建容器。
+- 发布预览/适配器/脚本包的实际对象读取先校验清单长度/摘要，再重新解码，旧 ready 和旧 metadata 不作豁免，不修改已确认字节。格式失败不可自动重试，不清除原 Provider 费用/未知结果证据。详见 [媒体有效性契约](media_validity_contract.md)。
+- A40 规则升级 `deterministic-v2-publication-fields`，扫描标题/正文/标签/CTA 和嵌套 layout 字符串与 JSON 键；保存、审核及发布入口复查同一冻结 Brief。旧批准不能默默豁免新检出的禁词；保留当前版本明确理由/警告确认的人工例外。独立分镜 JSON 在上传、生成、最终读取另查禁词，不能用正文审批豁免后生成素材。无 OCR/ASR、语义/版权/平台质量保证，详见 [内容审核契约](content_review_contract.md)。
+- 中间专项 79 passed/2 failed/19 subtests：截断 MP4 尾部索引被宽容解码器接受，补有界 box 长度检查；旧审批测试使用不存在的用户外键，改成真实合成用户。随后 76 passed/4 failed/8 subtests 都是原成功夹具使用假图片，替换为真实 PNG，保留精确字节、账本、状态等断言，并同步更正 PG 成功夹具（未运行真实 PG）。
+- 下一组 117 passed/1 failed/58 subtests：分镜禁词测试误写未映射的 Campaign 属性，改为真实 brief JSON 后，媒体/审核/存储/并发专项 **97 passed / 1 warning，87.00 秒**；新增生成分镜拦截 **1 passed / 1 warning，1.94 秒**。Ruff/diff 通过。本次当前 API/重新构建 Next standalone/Node 24.19/独立 Edge **44/44，2.1 分钟**，正常退出且临时服务端口已回收。
+- 无新迁移，head 仍 f0a1b2c3d4e5。真实 PG/MinIO、Docker/Linux 解码工具、恢复、平台与 CI/部署保持待验；未接触真实配置/业务数据/费用/账号或受保护知识文件。作者仍 John Wang/heee000 noreply，只按授权普通提交推送当前功能分支。本轮阶段关闭后，预算、生成成果检查点和配置身份等余项继续独立排期。
+- 最终完整后端 **1002 passed / 59 skipped / 7 warnings / 228 subtests，565.04 秒**，无失败；新增的真实离线视频探测/解码在本机执行通过。59 项外部服务跳过不记通过；7 条 warning 为 Starlette/httpx 和 SQLite datetime adapter 弃用提示。前端源码/依赖未变，不重复历史 40/40 模块/SSR、lint/类型检查，也不把历史数字冒作本次新成绩。全套开始后仅清除两份新增测试文件的末尾多余空行，无逻辑变化；本次阶段验证全部结束，不重复全套。
+- 按明确清单仅同步 23 个实现/测试/契约/交接文件。实际源码 SHA 与远端同步结果以本功能分支阶段提交和任务交付回执为准；不强推、不创建 PR/合并、不手动触发 CI/部署。受保护知识文件仍未跟踪且不纳入提交；整体产品剩余问题不因此关闭。

@@ -22,6 +22,7 @@ from ..entities import Asset, ChannelConnection, ContentItem, Job, PublishJob
 from ..job_queue import enqueue_job
 from ..object_storage import build_object_storage, is_workspace_storage_uri
 from ..publication_payload import preview_document
+from ..review_evidence import resolve_brief
 from ..publish_manifest import (
     ManifestObjectStorage,
     PublishManifestConflict,
@@ -217,9 +218,15 @@ def preview_asset_bytes(asset_id: str, principal: Reviewer, session: Db, setting
     if (asset.status != "ready" or (asset.metadata_json or {}).get("checksum") != checksum
         or not is_workspace_storage_uri(settings, principal.workspace_id, asset.storage_uri)):
         raise PublishManifestConflict("预览素材已变化，请重新预览")
+    content = session.get(ContentItem, asset.content_item_id)
+    if content is None or content.workspace_id != principal.workspace_id:
+        raise PublishManifestConflict("预览素材没有当前内容，请重新预览")
+    forbidden_phrases = tuple(resolve_brief(session, content).forbidden_phrases)
     storage = ManifestObjectStorage(build_object_storage(settings), {"assets": [{
         "uri": asset.storage_uri, "size_bytes": asset.size_bytes, "sha256": checksum,
-    }]})
+        "kind": asset.kind, "mime_type": asset.mime_type,
+    }]}, max_bytes=settings.max_upload_bytes, max_pixels=settings.publish_evidence_max_pixels,
+        forbidden_phrases=forbidden_phrases)
     try:
         data = storage.read(asset.storage_uri, max_bytes=settings.max_upload_bytes)
     except (OSError, ValueError) as error:

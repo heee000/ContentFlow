@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from ..db import get_db
 from ..asset_operations import lock_asset_for_mutation, require_new_asset_operation
@@ -26,7 +27,8 @@ from ..entities import (
     ProviderInvocationAttempt,
     new_id,
 )
-from ..filenames import safe_filename
+from ..media_validation import MediaValidationError, validate_media
+from ..review_evidence import resolve_brief
 from ..job_queue import enqueue_job
 from ..knowledge_service import local_path_from_uri
 from ..object_storage import build_object_storage, is_managed_storage_uri
@@ -37,7 +39,6 @@ from ..pagination import (
     UpdatedAfter,
     paginate,
 )
-from ..publish_evidence import PublishEvidenceError, normalize_publish_evidence
 from ..provider_invocations import provider_invocation_attempt_response_data
 from ..schemas import (
     AssetCapabilitiesResponse,
@@ -729,55 +730,19 @@ async def upload_asset(
     )
     original_filename = filename
     source_checksum: str | None = None
-    if target_kind == "image":
-        if not claimed_type.startswith("image/"):
-            raise HTTPException(status_code=415, detail="封面任务只接受图片文件")
-        try:
-            normalized = normalize_publish_evidence(
-                data,
-                filename=filename,
-                kind="screenshot",
-                max_bytes=settings.max_upload_bytes,
-                max_pixels=settings.publish_evidence_max_pixels,
-            )
-        except PublishEvidenceError as error:
-            raise HTTPException(
-                status_code=415,
-                detail=f"封面图片无法安全处理: {error}",
-            ) from error
-        data = normalized.data
-        claimed_type = normalized.mime_type
-        original_filename = normalized.original_filename
-        filename = f"cover.{normalized.extension}"
-        source_checksum = normalized.source_sha256
-    elif target_kind == "video_storyboard":
-        if claimed_type != "application/json":
-            raise HTTPException(status_code=415, detail="分镜任务只接受 JSON 文件")
-        try:
-            normalized = normalize_publish_evidence(
-                data,
-                filename=filename,
-                kind="platform_export",
-                max_bytes=settings.max_upload_bytes,
-                max_pixels=settings.publish_evidence_max_pixels,
-            )
-        except PublishEvidenceError as error:
-            raise HTTPException(status_code=415, detail="分镜 JSON 无效") from error
-        data = normalized.data
-        claimed_type = normalized.mime_type
-        original_filename = normalized.original_filename
-        filename = f"storyboard.{normalized.extension}"
-        source_checksum = normalized.source_sha256
-    elif target_kind == "video":
-        if not claimed_type.startswith("video/"):
-            raise HTTPException(status_code=415, detail="视频任务只接受视频文件")
-        try:
-            filename = safe_filename(filename)
-            original_filename = filename
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail="素材文件名无效") from error
-    else:
-        raise HTTPException(status_code=415, detail="仅支持图片、视频或分镜 JSON")
+    if target_kind == "video_storyboard" and claimed_type != "application/json":
+        raise HTTPException(status_code=415, detail="分镜任务只接受 JSON 文件")
+    try:
+        forbidden_phrases = tuple(resolve_brief(session, content).forbidden_phrases)
+        normalized = await run_in_threadpool(validate_media, data, kind=target_kind, mime_type=claimed_type,
+            filename=filename, max_bytes=settings.max_upload_bytes,
+            max_pixels=settings.publish_evidence_max_pixels, forbidden_phrases=forbidden_phrases)
+    except MediaValidationError as error:
+        raise HTTPException(status_code=415, detail=f"[{error.code}] {error}") from None
+    data, claimed_type = normalized.data, normalized.mime_type
+    original_filename = normalized.original_filename
+    filename = f"asset.{normalized.extension}"
+    source_checksum = normalized.source_sha256
 
     storage_owner_id = asset.id if asset is not None else new_id()
     storage = build_ledgered_object_storage(
@@ -822,6 +787,7 @@ async def upload_asset(
         "content_version": content.version,
         "checksum": stored.checksum,
         "source_checksum": source_checksum or stored.checksum,
+        "media_validation": normalized.evidence,
         "original_filename": original_filename,
         "manual_upload_required": False,
     }

@@ -61,6 +61,8 @@ docker-compose.yml  PostgreSQL、MinIO、API、Worker、Web
 
 环境要求：Python 3.11+、Node.js 22.13+、Docker Desktop。SQLite 只用于显式指定数据库 URL 的隔离测试，不再是默认运行数据库。
 
+视频素材还要求 API 和 Worker 的 PATH 中都有 `ffmpeg`、`ffprobe`；运行时 Dockerfile 已声明安装。缺工具时拒绝视频校验，并在 HTTP 视频生成调用前拦截，不自动重新生成。图片、MP4 与离线分镜的支持边界见 [媒体有效性契约](docs/media_validity_contract.md)。
+
 ```powershell
 Copy-Item .env.example .env
 # 将 .env 中所有 replace-me 替换为本机开发凭据。

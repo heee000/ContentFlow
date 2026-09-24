@@ -151,6 +151,8 @@ def load_release_inputs(
         raise PublishManifestConflict("内容必须保持人工审核通过状态")
     if content.platform != channel.platform:
         raise PublishManifestConflict("内容平台与连接器不匹配")
+    from .review_evidence import require_publication_field_review
+    require_publication_field_review(session, content)
     current = list(
         session.scalars(
             select(Asset)
@@ -277,15 +279,19 @@ def require_publish_manifest(
 class ManifestObjectStorage:
     """Validate the exact bytes consumed by every API/export/script adapter."""
 
-    def __init__(self, storage: ObjectStorage, manifest: dict[str, Any]):
+    def __init__(self, storage: ObjectStorage, manifest: dict[str, Any], *,
+                 max_bytes: int = 100 * 1024 * 1024, max_pixels: int = 40_000_000,
+                 forbidden_phrases: tuple[str, ...] = ()):
         self.storage = storage
         self.records = {record["uri"]: record for record in manifest["assets"]}
+        self.max_bytes, self.max_pixels = max_bytes, max_pixels
+        self.forbidden_phrases = forbidden_phrases
 
     def read(self, uri: str, *, max_bytes: int = 100 * 1024 * 1024) -> bytes:
         record = self.records.get(uri)
         if record is None:
             raise PublishManifestConflict("分发试图读取未确认的素材")
-        data = self.storage.read(uri, max_bytes=min(max_bytes, record["size_bytes"]))
+        data = self.storage.read(uri, max_bytes=min(max_bytes, self.max_bytes, record["size_bytes"]))
         if (
             len(data) != record["size_bytes"]
             or hashlib.sha256(data).hexdigest() != record["sha256"]
@@ -293,6 +299,17 @@ class ManifestObjectStorage:
             raise PublishManifestConflict(
                 "素材文件与发布确认的校验和不一致，已阻止使用"
             )
+        from .media_validation import MediaValidationError, validate_media
+        try:
+            validate_media(data, kind=record.get("kind"), mime_type=record.get("mime_type"),
+                filename="confirmed-asset", max_bytes=self.max_bytes,
+                max_pixels=self.max_pixels, normalize=False, forbidden_phrases=self.forbidden_phrases)
+        except MediaValidationError as error:
+            if error.code == "media_text_review_required":
+                raise PublishManifestConflict("分镜文件存在未核对的禁用词，请修正素材并重新确认",
+                    code="publication_review_required") from None
+            raise PublishManifestConflict("素材实际字节未通过解码检查，请替换有效素材并重新确认",
+                code="publication_media_invalid") from None
         return data
 
     def __getattr__(self, name):

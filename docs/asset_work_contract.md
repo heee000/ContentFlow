@@ -57,3 +57,5 @@ staging 不等于孤儿，不因 TTL 到期自动删除或返还配额。管理�
 - `web/tests/browser/jobs.spec.ts`：真实临时 API 返回合成 superseded 回执，生产页面显示正确说明与无重放按钮；不声称该浏览器用例执行了真实 Provider/Worker。
 
 A52 不修复 A39 文件解码校验、A40 最终载荷审核或 A47 多平台检查点。组合候选需要迁移 f0a1b2c3d4e5、同版 API/Worker/Web、真实 PG/MinIO/恢复和部署验收；不混跑旧 Worker，不借旧 CI 绿色签收。
+
+后续 A39/A40 实施另见 [媒体有效性契约](media_validity_contract.md) 和 [审核契约](content_review_contract.md#31-a40-发布字段复查2026-09-24)。生成/轮询结果在 PUT 前解码，发布读取重新检查实际字节；原 A52 并发、旧结果和 staging 规则继续生效。上段为 A52 阶段范围，不代表 A39/A40 当前仍无实现。

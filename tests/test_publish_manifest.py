@@ -7,10 +7,11 @@ import httpx
 from contentflow.connectors import ConnectorPublishError, WechatConnector
 from contentflow.entities import Asset, ChannelConnection, ContentItem, PublishJob
 from contentflow.publish_manifest import ManifestObjectStorage, PublishManifestConflict
+from media_fixtures import png_bytes
 
 
 @pytest.mark.parametrize(
-    "payload", [b"confirmed", b"tampered!", b"short", b"too-long-data"]
+    "payload", [png_bytes(), b"tampered!", b"short", b"too-long-data"]
 )
 def test_manifest_storage_checks_exact_bytes(payload):
     storage = Mock()
@@ -21,18 +22,19 @@ def test_manifest_storage_checks_exact_bytes(payload):
             "assets": [
                 {
                     "uri": "test://confirmed",
-                    "size_bytes": 9,
-                    "sha256": hashlib.sha256(b"confirmed").hexdigest(),
+                    "size_bytes": len(png_bytes()),
+                    "sha256": hashlib.sha256(png_bytes()).hexdigest(),
+                    "kind": "image", "mime_type": "image/png",
                 }
             ]
         },
     )
-    if payload == b"confirmed":
+    if payload == png_bytes():
         assert protected.read("test://confirmed") == payload
     else:
         with pytest.raises(PublishManifestConflict):
             protected.read("test://confirmed")
-    storage.read.assert_called_once_with("test://confirmed", max_bytes=9)
+    storage.read.assert_called_once_with("test://confirmed", max_bytes=len(png_bytes()))
     storage.read.reset_mock()
     with pytest.raises(PublishManifestConflict):
         protected.read("test://not-approved")

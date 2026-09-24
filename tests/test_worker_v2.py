@@ -3,6 +3,7 @@ from __future__ import annotations
 from generation_helpers import request_run
 
 from publishing_helpers import confirm_publish
+from media_fixtures import png_bytes
 
 import tempfile
 import unittest
@@ -306,7 +307,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             return_value=FakeHTTPMediaProvider(),
         ), patch(
             "contentflow.worker.download_generated_media",
-            return_value=b"generated image bytes",
+            return_value=png_bytes(),
         ):
             self.assertTrue(worker.run_once())
 
@@ -349,7 +350,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             self.assertTrue(attempts[0].idempotency_key_sent)
             self.assertFalse(attempts[1].idempotency_key_sent)
             self.assertEqual(attempts[0].provider_request_id, "media-worker-request")
-            self.assertEqual(attempts[1].response_bytes, len(b"generated image bytes"))
+            self.assertEqual(attempts[1].response_bytes, len(png_bytes()))
 
     def test_openverse_search_is_bound_to_queue_job_ledger(self):
         with db.SessionLocal() as session:
@@ -502,7 +503,7 @@ class WorkerIntegrationTest(unittest.TestCase):
             session.flush()
             stored = build_object_storage(self.settings).put(
                 workspace_id=self.workspace_id, category="assets", filename="cover.png",
-                stream=BytesIO(b"isolated-publish-cover"), content_type="image/png",
+                stream=BytesIO(png_bytes()), content_type="image/png",
             )
             asset = Asset(
                 workspace_id=self.workspace_id,
@@ -911,7 +912,7 @@ class WorkerIntegrationTest(unittest.TestCase):
                 result = handle_publish_dispatch(session, fixture, self.settings)
             self.assertEqual(result["status"], "draft_created")
         self.assertTrue(observed["auto_publish"])
-        self.assertEqual(observed["data"], b"isolated-publish-cover")
+        self.assertEqual(observed["data"], png_bytes())
 
     def test_running_immediate_publish_cannot_be_cancelled(self):
         fixture = self._create_publish_fixture(status="queued")
