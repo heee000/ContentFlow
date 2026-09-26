@@ -350,7 +350,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.3,<13.0" },
     { name = "pip-audit", marker = "extra == 'security'", specifier = ">=2.10,<3.0" },
     { name = "prometheus-client", specifier = ">=0.25,<1.0" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4.0" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4,<4.0" },
     { name = "pydantic-settings", specifier = ">=2.7,<3.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.3,<10.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=6,<7" },
