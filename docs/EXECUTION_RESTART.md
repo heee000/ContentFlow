@@ -70,3 +70,5 @@
 - #12 与 #3 已合并，main 为 `26cffe10b0ce274aa0718b5430d711fac42c4d98`；#16 主体改进等待修复后同版 CI 通过再合并。已在功能分支正常合并 origin/main，解决 uv.lock 冲突，保留本地 Embedding extras 和主分支依赖更新，不 rebase/强推。
 - 当前 CI 失败为官方 MinIO 容器拉取不可用、npm 依赖漏洞、urllib3 2.7.0 三项漏洞。CI 改用固定官方 MinIO 源码 commit 与固定 Go toolchain 构建，仅测试服务；不删真实 S3 测试、不降低安全阈值。Next/eslint-config-next 升至 16.3.8，Undici 7.29.1 override，正常范围更新 brace-expansion/fast-uri；urllib3 锁为 2.8.0。
 - 新版前端 lint、模块/SSR 40/40 与 Next 生产构建通过，npm 扫描零漏洞；供应链专项 12/12 通过。最终 Python 扫描零已知漏洞、资源/Embedding 专项 42 passed / 6 subtests，本次独立 Edge 44/44（1.9 分钟）通过。GitHub 同版 PG/S3/完整回归等待推送后执行。实际最终结果见 PR #16 与后续签收，不把历史成绩或跳过算作本版通过。私测 Compose 的旧 MinIO/mc 镜像另需部署前修复，未启动或部署。
+
+- 兼容性检查后追加整合 #10（setuptools 最低版本）和 #15（固定 setup-uv 10.2.0，统一三个 CI 入口）；它们的提交通过普通 merge 保留在功能分支。随 #16 同版完整 CI 验证后进入 main，不能用旧 PR 的过期检查冒称通过。#14 会降回已修复的 Next 版本，#5/#6/#7 为工具/类型大版本，#2 有冲突，暂不合并。
