@@ -72,6 +72,11 @@ test("another tab switches workspace: preserve draft and block old-page writes",
 
 test("server rejects actual old-page create when broadcast notifications are unavailable", async ({ context, page }) => {
   await context.addInitScript(() => { Object.defineProperty(window, "BroadcastChannel", { value: undefined }); });
+  // Keep this stale page in the background so its periodic GET cannot discover
+  // the changed context before the POST under test. Otherwise slower CI can
+  // correctly block the page via polling and never issue the expected POST.
+  // The adjacent test covers proactive blocking; this one covers server denial.
+  await page.addInitScript(() => { Object.defineProperty(document, "visibilityState", { value: "hidden" }); });
   await login(page);
   await navigation(page).getByRole("button", { name: "1 创建内容", exact: true }).click();
   await page.getByRole("button", { name: "新建活动", exact: true }).click();
@@ -82,6 +87,7 @@ test("server rejects actual old-page create when broadcast notifications are una
   await page.locator('input[type="radio"][name="image_source"][value="manual"]').check();
   const other = await secondPage(page);
   await switchWorkspace(other);
+  await expect(blocked(page)).toHaveCount(0);
   const rejected = page.waitForResponse((response) => response.url() === `${API}/campaigns` && response.request().method() === "POST");
   await page.getByRole("button", { name: "保存活动", exact: true }).click();
   expect((await rejected).status()).toBe(409);
