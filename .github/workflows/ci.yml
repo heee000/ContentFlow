@@ -46,15 +46,26 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Start pinned MinIO
+      - name: Install pinned Go toolchain for CI-only MinIO
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.24.8"
+          cache: false
+
+      - name: Build and start pinned official MinIO source
+        env:
+          MINIO_ROOT_USER: contentflow-test
+          MINIO_ROOT_PASSWORD: contentflow-test-secret
         run: |
-          docker run --detach --rm \
-            --name contentflow-minio-ci \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER=contentflow-test \
-            --env MINIO_ROOT_PASSWORD=contentflow-test-secret \
-            quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e \
-            server /data --console-address ":9001"
+          # Upstream community images are unavailable. Build verified Go modules
+          # from this immutable upstream commit; never substitute a third-party image.
+          GOBIN="${RUNNER_TEMP}/minio-bin" GOTOOLCHAIN=local \
+            go install github.com/minio/minio@7aac2a2c5b7c882e68c1ce017d8256be2feea27f
+          nohup "${RUNNER_TEMP}/minio-bin/minio" server \
+            "${RUNNER_TEMP}/minio-data" --address 127.0.0.1:9000 \
+            --console-address 127.0.0.1:9001 \
+            > "${RUNNER_TEMP}/minio.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/minio.pid"
           for attempt in $(seq 1 30); do
             if curl --fail --silent \
               http://127.0.0.1:9000/minio/health/ready > /dev/null; then
@@ -62,7 +73,7 @@ jobs:
             fi
             sleep 1
           done
-          docker logs contentflow-minio-ci
+          cat "${RUNNER_TEMP}/minio.log"
           exit 1
 
       - name: Install Python and uv
@@ -120,7 +131,10 @@ jobs:
 
       - name: Stop MinIO
         if: always()
-        run: docker stop contentflow-minio-ci || true
+        run: |
+          if test -f "${RUNNER_TEMP}/minio.pid"; then
+            kill "$(cat "${RUNNER_TEMP}/minio.pid")" || true
+          fi
 
   frontend:
     name: Frontend, build, and security
