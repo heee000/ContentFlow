@@ -34,7 +34,7 @@ def production_settings(**overrides) -> Settings:
         "metrics_bearer_token": "m" * 32,
     }
     values.update(overrides)
-    return Settings(**values)
+    return Settings(_env_file=None, **values)
 
 
 class SecurityTest(unittest.TestCase):
@@ -185,6 +185,16 @@ class RuntimeSettingsTest(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 Settings(script_confirmation_ttl_minutes=invalid)
 
+    def test_model_request_timeout_has_safe_bounds(self):
+        self.assertEqual(Settings().model_request_timeout_seconds, 120)
+        self.assertEqual(
+            Settings(model_request_timeout_seconds=180).model_request_timeout_seconds,
+            180,
+        )
+        for invalid in (9, 301):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                Settings(model_request_timeout_seconds=invalid)
+
     def test_production_requires_auth_rate_limiting(self):
         settings = production_settings(auth_rate_limit_enabled=False)
         with self.assertRaisesRegex(ValueError, "rate limiting"):
@@ -262,6 +272,44 @@ class RuntimeSettingsTest(unittest.TestCase):
             video_model="configured-video-model",
         )
         settings.validate_runtime()
+
+    def test_embedding_api_can_be_configured_independently(self):
+        settings = production_settings(
+            embedding_provider="openai-compatible",
+            embedding_api_base="https://embeddings.example/v1",
+            embedding_api_key="embedding-key",
+            embedding_model="configured-embedding-model",
+        )
+        settings.validate_runtime()
+        self.assertEqual(
+            settings.resolved_embedding_api_base,
+            "https://embeddings.example/v1",
+        )
+        self.assertEqual(settings.resolved_embedding_api_key, "embedding-key")
+
+    def test_embedding_api_keeps_shared_model_endpoint_compatibility(self):
+        settings = production_settings(
+            embedding_provider="openai-compatible",
+            model_api_base="https://models.example/v1",
+            model_api_key="shared-key",
+            embedding_model="configured-embedding-model",
+        )
+        settings.validate_runtime()
+        self.assertEqual(
+            settings.resolved_embedding_api_base,
+            "https://models.example/v1",
+        )
+        self.assertEqual(settings.resolved_embedding_api_key, "shared-key")
+
+    def test_independent_embedding_api_requires_safe_https_url(self):
+        settings = production_settings(
+            embedding_provider="openai-compatible",
+            embedding_api_base="http://embeddings.example/v1",
+            embedding_api_key="embedding-key",
+            embedding_model="configured-embedding-model",
+        )
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            settings.validate_runtime()
 
     def test_production_live_provider_api_bases_require_safe_https_urls(self):
         base = {
@@ -371,16 +419,65 @@ class RuntimeSettingsTest(unittest.TestCase):
     def test_publish_evidence_limits_are_bounded(self):
         settings = Settings()
         self.assertEqual(settings.publish_evidence_max_bytes, 10 * 1024 * 1024)
+        self.assertEqual(settings.publish_evidence_max_items, 20)
+        self.assertEqual(
+            settings.publish_evidence_max_total_bytes,
+            50 * 1024 * 1024,
+        )
         self.assertEqual(settings.publish_evidence_max_pixels, 40_000_000)
         for values in (
             {"publish_evidence_max_bytes": 0},
             {"publish_evidence_max_bytes": 100 * 1024 * 1024 + 1},
+            {"publish_evidence_max_items": 0},
+            {"publish_evidence_max_items": 101},
+            {"publish_evidence_max_total_bytes": 0},
+            {"publish_evidence_max_total_bytes": 1024**3 + 1},
             {"publish_evidence_max_pixels": 0},
             {"publish_evidence_max_pixels": 100_000_001},
             {
                 "max_upload_bytes": 1024,
                 "publish_evidence_max_bytes": 1025,
             },
+            {
+                "publish_evidence_max_bytes": 1025,
+                "publish_evidence_max_total_bytes": 1024,
+            },
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Settings(**values)
+
+    def test_asset_per_content_version_limit_is_bounded(self):
+        self.assertEqual(Settings().asset_max_items_per_content_version, 20)
+        for invalid in (0, 101):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                Settings(asset_max_items_per_content_version=invalid)
+
+    def test_storage_reconciliation_schedule_is_bounded(self):
+        settings = Settings()
+        self.assertTrue(settings.storage_reconcile_schedule_enabled)
+        self.assertEqual(settings.storage_reconcile_interval_hours, 24)
+        self.assertEqual(settings.storage_reconcile_schedule_batch_size, 25)
+        self.assertEqual(settings.storage_reconcile_schedule_poll_seconds, 60)
+        for values in (
+            {"storage_reconcile_interval_hours": 0},
+            {"storage_reconcile_interval_hours": 30 * 24 + 1},
+            {"storage_reconcile_schedule_batch_size": 0},
+            {"storage_reconcile_schedule_batch_size": 201},
+            {"storage_reconcile_schedule_poll_seconds": 4},
+            {"storage_reconcile_schedule_poll_seconds": 3601},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Settings(**values)
+
+    def test_publish_reconciliation_sweep_is_bounded(self):
+        settings = Settings()
+        self.assertEqual(settings.publish_reconciliation_sweep_poll_seconds, 60)
+        self.assertEqual(settings.publish_reconciliation_sweep_batch_size, 100)
+        for values in (
+            {"publish_reconciliation_sweep_poll_seconds": 4},
+            {"publish_reconciliation_sweep_poll_seconds": 3601},
+            {"publish_reconciliation_sweep_batch_size": 0},
+            {"publish_reconciliation_sweep_batch_size": 1001},
         ):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 Settings(**values)
@@ -412,6 +509,30 @@ class RuntimeSettingsTest(unittest.TestCase):
             "worker_stale_seconds",
         ):
             Settings(worker_heartbeat_seconds=10, worker_stale_seconds=20)
+
+    def test_worker_database_retry_policy_is_bounded(self):
+        settings = Settings()
+        self.assertEqual(settings.worker_database_retry_initial_seconds, 1.0)
+        self.assertEqual(settings.worker_database_retry_max_seconds, 30.0)
+        self.assertEqual(settings.worker_database_retry_max_attempts, 8)
+        self.assertEqual(settings.worker_database_retry_jitter_ratio, 0.2)
+        for values in (
+            {"worker_database_retry_initial_seconds": 0},
+            {"worker_database_retry_max_seconds": 601},
+            {"worker_database_retry_max_attempts": 0},
+            {"worker_database_retry_max_attempts": 101},
+            {"worker_database_retry_jitter_ratio": -0.01},
+            {"worker_database_retry_jitter_ratio": 1.01},
+            {"worker_database_retry_initial_seconds": float("nan")},
+            {"worker_database_retry_max_seconds": float("inf")},
+            {"worker_database_retry_jitter_ratio": float("nan")},
+            {
+                "worker_database_retry_initial_seconds": 10,
+                "worker_database_retry_max_seconds": 9,
+            },
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Settings(**values)
 
 
 if __name__ == "__main__":

@@ -39,9 +39,11 @@ CI 使用固定摘要的 Prometheus 3.13.1 distroless 镜像执行相同的三�
 - API 抓取存活、请求速率、5xx 比例、模板路由 P95；
 - 活跃/陈旧 Worker、队列各状态与最长就绪等待；
 - Workflow、Prompt Eval 状态和待人工发布对账；
+- 存储账本各固定状态、已用/预留容量与对象数、未验证对象；
+- 自动存储核对开关、超期工作区、终态失败任务和最老待删除时长；
 - Prometheus 自身规则计算失败。
 
-数据库 Gauge 在每个 API 副本上是同一数据库全局视图，看板与规则必须使用 `max` 去重；HTTP Counter/Histogram 才按实例 `sum(rate(...))` 聚合。不要加入 workspace、用户、活动或发布任务 ID 标签。
+数据库 Gauge 在每个 API 副本上是同一数据库全局视图，看板与规则必须使用 `max` 去重；HTTP Counter/Histogram 才按实例 `sum(rate(...))` 聚合。不要加入 workspace、用户、活动、对象 URI 或发布任务 ID 标签。存储完整性、核对超期/失败和删除积压三类告警的处置步骤见运维手册“工作区存储账本与对账”；自动核对只报告，不自动删除孤儿。
 
 ## 仍需生产集成
 

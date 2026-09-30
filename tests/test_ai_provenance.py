@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 from contentflow.ai_provenance import AIProvenanceRecorder
 from contentflow.prompts import PROMPT_HASHES, PROMPT_SET_VERSION, PROMPTS
 from contentflow.providers import OpenAICompatibleProvider
+from contentflow.settings import Settings
+from contentflow.text_generation import build_text_provider
 
 
 class StaticProvider:
@@ -105,11 +107,12 @@ class AIProvenanceTest(unittest.TestCase):
         self.assertNotIn("never-persist-this", serialized)
         self.assertNotIn("sensitive-provider-error-body", serialized)
 
-    @patch("contentflow.providers.urllib.request.urlopen")
+    @patch("contentflow.providers.open_model_request")
     def test_openai_compatible_captures_reported_usage(self, urlopen):
         response = MagicMock()
         response.read.return_value = json.dumps(
             {
+                "id": "provider-request-123",
                 "model": "provider-model-revision",
                 "choices": [{"message": {"content": json.dumps({"passed": True})}}],
                 "usage": {
@@ -126,6 +129,7 @@ class AIProvenanceTest(unittest.TestCase):
             model="configured-model",
             provider_name="provider-proxy",
         )
+        provider.set_invocation_context("a" * 64)
 
         result = provider.complete_json(
             "review",
@@ -142,16 +146,32 @@ class AIProvenanceTest(unittest.TestCase):
         )
         self.assertEqual(provider.provider_name, "provider-proxy")
         self.assertEqual(provider.model_name, "configured-model")
+        self.assertEqual(request.get_header("Idempotency-key"), "a" * 64)
         self.assertEqual(
             provider.last_call_metadata,
             {
                 "usage_source": "provider_reported",
+                "idempotency_key_sent": True,
+                "provider_request_id": "provider-request-123",
+                "provider_request_id_source": "body.id",
                 "input_tokens": 23,
                 "output_tokens": 5,
                 "total_tokens": 28,
                 "response_model": "provider-model-revision",
             },
         )
+
+    def test_text_provider_uses_configured_request_timeout(self):
+        provider = build_text_provider(
+            Settings(
+                text_provider="openai-compatible",
+                model_api_base="https://provider.test/v1",
+                model_api_key="test-key",
+                text_model="test-model",
+                model_request_timeout_seconds=180,
+            )
+        )
+        self.assertEqual(provider.timeout_seconds, 180)
 
     def test_prompt_hash_manifest_covers_every_template(self):
         self.assertEqual(set(PROMPT_HASHES), set(PROMPTS))

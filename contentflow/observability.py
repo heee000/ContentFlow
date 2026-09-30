@@ -11,16 +11,51 @@ from prometheus_client import (
     generate_latest,
 )
 from prometheus_client.core import GaugeMetricFamily
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .entities import Job, PromptEvalRun, PublishJob, WorkerNode, WorkflowRun
+from .entities import (
+    Job,
+    JobManualReview,
+    PromptEvalRun,
+    ProviderInvocation,
+    ProviderInvocationAttempt,
+    PublishJob,
+    StorageObjectAllocation,
+    WorkerNode,
+    WorkflowRun,
+    WorkspaceStorageUsage,
+)
 from .settings import Settings
 
 
-JOB_STATUSES = ("queued", "retry", "running", "failed", "succeeded")
+JOB_STATUSES = (
+    "queued",
+    "retry",
+    "running",
+    "manual_review",
+    "failed",
+    "succeeded",
+)
 WORKFLOW_STATUSES = ("queued", "running", "awaiting_review", "failed", "error")
 PROMPT_EVAL_STATUSES = ("queued", "running", "passed", "failed", "error")
+PROVIDER_INVOCATION_STATUSES = (
+    "started",
+    "succeeded",
+    "outcome_unknown",
+    "late_succeeded",
+    "late_failed",
+)
+STORAGE_ALLOCATION_STATUSES = (
+    "staging",
+    "reserved",
+    "active",
+    "delete_pending",
+    "missing",
+    "integrity_error",
+    "deleted",
+    "abandoned",
+)
 HTTP_METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 
 
@@ -74,6 +109,45 @@ class DatabaseOperationalCollector:
                 PromptEvalRun,
                 PROMPT_EVAL_STATUSES,
             )
+            provider_invocation_counts = self._status_counts(
+                session,
+                ProviderInvocationAttempt,
+                PROVIDER_INVOCATION_STATUSES,
+            )
+            unresolved_provider_unknown_filter = (
+                ProviderInvocationAttempt.status == "outcome_unknown",
+                Job.status == "manual_review",
+            )
+            unresolved_provider_unknown = int(
+                session.scalar(
+                    select(func.count(ProviderInvocationAttempt.id))
+                    .join(
+                        ProviderInvocation,
+                        ProviderInvocation.id
+                        == ProviderInvocationAttempt.invocation_id,
+                    )
+                    .join(Job, Job.id == ProviderInvocation.job_id)
+                    .where(*unresolved_provider_unknown_filter)
+                )
+                or 0
+            )
+            oldest_provider_unknown_at = session.scalar(
+                select(func.min(ProviderInvocationAttempt.started_at))
+                .join(
+                    ProviderInvocation,
+                    ProviderInvocation.id == ProviderInvocationAttempt.invocation_id,
+                )
+                .join(Job, Job.id == ProviderInvocation.job_id)
+                .where(*unresolved_provider_unknown_filter)
+            )
+            oldest_provider_unknown_age = (
+                max(
+                    0.0,
+                    (now - _aware(oldest_provider_unknown_at)).total_seconds(),
+                )
+                if oldest_provider_unknown_at is not None
+                else 0.0
+            )
             ready_filter = (
                 Job.status.in_(("queued", "retry")),
                 Job.run_at <= now,
@@ -87,6 +161,19 @@ class DatabaseOperationalCollector:
             oldest_ready_age = (
                 max(0.0, (now - _aware(oldest_ready_at)).total_seconds())
                 if oldest_ready_at is not None
+                else 0.0
+            )
+            oldest_manual_review_at = session.scalar(
+                select(func.min(JobManualReview.requested_at)).where(
+                    JobManualReview.resolved_at.is_(None)
+                )
+            )
+            oldest_manual_review_age = (
+                max(
+                    0.0,
+                    (now - _aware(oldest_manual_review_at)).total_seconds(),
+                )
+                if oldest_manual_review_at is not None
                 else 0.0
             )
             stale_cutoff = now - timedelta(seconds=self.settings.worker_stale_seconds)
@@ -126,6 +213,72 @@ class DatabaseOperationalCollector:
                 )
                 or 0
             )
+            storage_counts = self._status_counts(
+                session,
+                StorageObjectAllocation,
+                STORAGE_ALLOCATION_STATUSES,
+            )
+            (
+                storage_used_bytes,
+                storage_reserved_bytes,
+                storage_used_objects,
+                storage_reserved_objects,
+                storage_unverified_objects,
+            ) = session.execute(
+                select(
+                    func.coalesce(func.sum(WorkspaceStorageUsage.used_bytes), 0),
+                    func.coalesce(func.sum(WorkspaceStorageUsage.reserved_bytes), 0),
+                    func.coalesce(func.sum(WorkspaceStorageUsage.used_objects), 0),
+                    func.coalesce(
+                        func.sum(WorkspaceStorageUsage.reserved_objects), 0
+                    ),
+                    func.coalesce(
+                        func.sum(WorkspaceStorageUsage.unverified_objects), 0
+                    ),
+                )
+            ).one()
+            reconcile_cutoff = now - timedelta(
+                hours=self.settings.storage_reconcile_interval_hours
+            )
+            overdue_reconciliations = int(
+                session.scalar(
+                    select(func.count(WorkspaceStorageUsage.workspace_id)).where(
+                        or_(
+                            WorkspaceStorageUsage.last_reconciled_at.is_(None),
+                            WorkspaceStorageUsage.last_reconciled_at
+                            <= reconcile_cutoff,
+                        )
+                    )
+                )
+                or 0
+            )
+            oldest_delete_pending_at = session.scalar(
+                select(
+                    func.min(
+                        func.coalesce(
+                            StorageObjectAllocation.delete_requested_at,
+                            StorageObjectAllocation.updated_at,
+                        )
+                    )
+                ).where(StorageObjectAllocation.status == "delete_pending")
+            )
+            oldest_delete_pending_age = (
+                max(
+                    0.0,
+                    (now - _aware(oldest_delete_pending_at)).total_seconds(),
+                )
+                if oldest_delete_pending_at is not None
+                else 0.0
+            )
+            failed_storage_reconciliations = int(
+                session.scalar(
+                    select(func.count(Job.id)).where(
+                        Job.job_type == "storage.reconcile",
+                        Job.status == "failed",
+                    )
+                )
+                or 0
+            )
 
         queue = GaugeMetricFamily(
             "contentflow_queue_jobs",
@@ -146,6 +299,11 @@ class DatabaseOperationalCollector:
             "contentflow_queue_oldest_ready_age_seconds",
             "Age in seconds of the oldest ready queue job, or zero when empty.",
             value=oldest_ready_age,
+        )
+        yield GaugeMetricFamily(
+            "contentflow_job_manual_review_oldest_age_seconds",
+            "Age of the oldest unresolved job manual review, or zero.",
+            value=oldest_manual_review_age,
         )
 
         workers = GaugeMetricFamily(
@@ -175,10 +333,81 @@ class DatabaseOperationalCollector:
             eval_runs.add_metric([item_status], count)
         yield eval_runs
 
+        provider_invocations = GaugeMetricFamily(
+            "contentflow_provider_invocation_attempts",
+            "Provider invocation attempts by controlled ledger status.",
+            labels=["status"],
+        )
+        for item_status, count in provider_invocation_counts.items():
+            provider_invocations.add_metric([item_status], count)
+        yield provider_invocations
+        yield GaugeMetricFamily(
+            "contentflow_provider_invocation_unresolved_outcome_unknown",
+            "Outcome-unknown provider calls whose jobs still require review.",
+            value=unresolved_provider_unknown,
+        )
+        yield GaugeMetricFamily(
+            "contentflow_provider_invocation_outcome_unknown_oldest_age_seconds",
+            "Age of the oldest unresolved outcome-unknown provider call, or zero.",
+            value=oldest_provider_unknown_age,
+        )
+
         yield GaugeMetricFamily(
             "contentflow_publish_reconciliation_required",
             "Publish jobs requiring manual reconciliation.",
             value=reconciliation_required,
+        )
+
+        storage_allocations = GaugeMetricFamily(
+            "contentflow_storage_allocations",
+            "Storage ledger allocations by controlled status.",
+            labels=["status"],
+        )
+        for item_status, count in storage_counts.items():
+            storage_allocations.add_metric([item_status], count)
+        yield storage_allocations
+
+        storage_bytes = GaugeMetricFamily(
+            "contentflow_storage_usage_bytes",
+            "Storage ledger bytes by controlled accounting state.",
+            labels=["state"],
+        )
+        storage_bytes.add_metric(["used"], int(storage_used_bytes))
+        storage_bytes.add_metric(["reserved"], int(storage_reserved_bytes))
+        yield storage_bytes
+
+        storage_objects = GaugeMetricFamily(
+            "contentflow_storage_usage_objects",
+            "Storage ledger object counts by controlled accounting state.",
+            labels=["state"],
+        )
+        storage_objects.add_metric(["used"], int(storage_used_objects))
+        storage_objects.add_metric(["reserved"], int(storage_reserved_objects))
+        storage_objects.add_metric(
+            ["unverified"],
+            int(storage_unverified_objects),
+        )
+        yield storage_objects
+
+        yield GaugeMetricFamily(
+            "contentflow_storage_reconciliation_scheduler_enabled",
+            "Whether automatic report-only storage reconciliation is enabled.",
+            value=int(self.settings.storage_reconcile_schedule_enabled),
+        )
+        yield GaugeMetricFamily(
+            "contentflow_storage_reconciliation_overdue_workspaces",
+            "Workspaces whose last complete storage reconciliation is overdue.",
+            value=overdue_reconciliations,
+        )
+        yield GaugeMetricFamily(
+            "contentflow_storage_reconciliation_failed_jobs",
+            "Terminally failed storage reconciliation jobs requiring attention.",
+            value=failed_storage_reconciliations,
+        )
+        yield GaugeMetricFamily(
+            "contentflow_storage_delete_pending_oldest_age_seconds",
+            "Age of the oldest storage allocation pending deletion, or zero.",
+            value=oldest_delete_pending_age,
         )
 
 

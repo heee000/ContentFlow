@@ -13,15 +13,17 @@
     "start:local": "next start -p 3001",
     "dev:sites": "vinext dev",
     "build:sites": "vinext build",
-    "test": "npm run build:sites && node --test tests/rendered-html.test.mjs",
+    "test": "npm run build:sites && node --test tests/rendered-html.test.mjs tests/browser-session.test.mjs tests/generation-intents.test.mjs tests/publication-intents.test.mjs",
+    "test:e2e": "playwright test",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
-    "next": "16.2.12",
+    "next": "16.3.8",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@cloudflare/vite-plugin": "1.51.1",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
@@ -30,7 +32,7 @@
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.32",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.2.12",
+    "eslint-config-next": "16.3.8",
     "react-server-dom-webpack": "19.2.8",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
@@ -41,7 +43,8 @@
   "overrides": {
     "postcss": "8.5.23",
     "nanoid": "3.3.18",
-    "sharp": "0.35.3"
+    "sharp": "0.35.4",
+    "undici": "7.29.1"
   },
   "type": "module"
 }

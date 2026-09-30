@@ -32,6 +32,9 @@ class HashEmbedding:
             vector = [value / norm for value in vector]
         return vector
 
+    def encode_many(self, texts: list[str]) -> list[list[float]]:
+        return [self.encode(text) for text in texts]
+
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right, strict=True))
@@ -63,9 +66,7 @@ class KnowledgeIndex:
         prepared: list[tuple[str, str, str, list[float]]] = []
         for path in sorted(knowledge_dir.glob("*.md")):
             for chunk_id, source, text in chunk_markdown(path):
-                prepared.append(
-                    (chunk_id, source, text, self.embedder.encode(text))
-                )
+                prepared.append((chunk_id, source, text, self.embedder.encode(text)))
         if not prepared:
             raise ValueError(f"知识库目录中没有可用 Markdown: {knowledge_dir}")
         return self.database.replace_chunks(prepared)

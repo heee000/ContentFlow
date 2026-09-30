@@ -4,16 +4,21 @@ import argparse
 import copy
 import gzip
 import hashlib
+import importlib.metadata
 import io
 import json
+import os
 import re
 import subprocess
+import sys
 import tarfile
+import tempfile
 import tomllib
 import uuid
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 
 MAX_SBOM_BYTES = 16 * 1024 * 1024
@@ -73,7 +78,9 @@ def _merge_properties(left: list[Any], right: list[Any]) -> list[dict[str, str]]
             merged.append(
                 {
                     "name": "contentflow:npm:package:paths",
-                    "value": json.dumps(current, ensure_ascii=False, separators=(",", ":")),
+                    "value": json.dumps(
+                        current, ensure_ascii=False, separators=(",", ":")
+                    ),
                 }
             )
         else:
@@ -210,11 +217,7 @@ def repository_commit(repository_root: Path) -> str:
 
 def tracked_files(repository_root: Path, commit: str) -> set[str]:
     output = _git(repository_root, "ls-tree", "-r", "--name-only", "-z", commit).stdout
-    return {
-        item.decode("utf-8")
-        for item in output.split(b"\0")
-        if item
-    }
+    return {item.decode("utf-8") for item in output.split(b"\0") if item}
 
 
 def _source_archive_bytes(repository_root: Path, commit: str) -> bytes:
@@ -252,11 +255,15 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def write_hash_manifest(directory: Path, names: Iterable[str], output_name: str) -> None:
+def write_hash_manifest(
+    directory: Path, names: Iterable[str], output_name: str
+) -> None:
     directory = directory.resolve()
     selected = sorted(set(names))
     if not selected or output_name in selected:
-        raise SupplyChainError("manifest inputs are empty or include the manifest itself")
+        raise SupplyChainError(
+            "manifest inputs are empty or include the manifest itself"
+        )
     lines: list[str] = []
     for name in selected:
         if Path(name).name != name:
@@ -268,9 +275,7 @@ def write_hash_manifest(directory: Path, names: Iterable[str], output_name: str)
     (directory / output_name).write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
-def verify_hash_manifest(
-    manifest_path: Path, expected_paths: Iterable[Path]
-) -> None:
+def verify_hash_manifest(manifest_path: Path, expected_paths: Iterable[Path]) -> None:
     expected = {path.name: path for path in expected_paths}
     actual: dict[str, str] = {}
     for line in manifest_path.read_text(encoding="ascii").splitlines():
@@ -392,7 +397,9 @@ def validate_cyclonedx(
             raise SupplyChainError("SBOM dependency ref is invalid or duplicated")
         if not isinstance(depends_on, list) or len(depends_on) != len(set(depends_on)):
             raise SupplyChainError("SBOM dependsOn must be a unique list")
-        if reference not in references or any(item not in references for item in depends_on):
+        if reference not in references or any(
+            item not in references for item in depends_on
+        ):
             raise SupplyChainError("SBOM dependency graph contains an unknown bom-ref")
         dependency_refs.add(reference)
 
@@ -408,7 +415,9 @@ def validate_cyclonedx(
 
 def _is_forbidden_archive_path(path: str) -> bool:
     pure = PurePosixPath(path)
-    if path == ".env" or (pure.name.startswith(".env.") and pure.name != ".env.example"):
+    if path == ".env" or (
+        pure.name.startswith(".env.") and pure.name != ".env.example"
+    ):
         return True
     if pure.parts and pure.parts[0] == ".contentflow":
         return True
@@ -425,10 +434,13 @@ def validate_source_archive(
     if not archive_bytes or len(archive_bytes) > MAX_ARCHIVE_BYTES:
         raise SupplyChainError("source archive size is outside the allowed range")
     expected_bytes = _source_archive_bytes(repository_root, expected_commit)
-    if not hashlib.sha256(archive_bytes).digest() == hashlib.sha256(
-        expected_bytes
-    ).digest():
-        raise SupplyChainError("source archive is not reproducible from the checked-out commit")
+    if (
+        not hashlib.sha256(archive_bytes).digest()
+        == hashlib.sha256(expected_bytes).digest()
+    ):
+        raise SupplyChainError(
+            "source archive is not reproducible from the checked-out commit"
+        )
 
     prefix = f"contentflow-{expected_commit}/"
     archived_files: set[str] = set()
@@ -442,7 +454,9 @@ def validate_source_archive(
                 if member.name == prefix.rstrip("/") and member.isdir():
                     continue
                 if not member.name.startswith(prefix):
-                    raise SupplyChainError("source archive contains an unexpected prefix")
+                    raise SupplyChainError(
+                        "source archive contains an unexpected prefix"
+                    )
                 relative = member.name.removeprefix(prefix).rstrip("/")
                 if not relative:
                     continue
@@ -454,17 +468,23 @@ def validate_source_archive(
                 if not member.isfile():
                     raise SupplyChainError("source archive contains a non-regular file")
                 if relative in archived_files or _is_forbidden_archive_path(relative):
-                    raise SupplyChainError("source archive contains a forbidden or duplicate file")
+                    raise SupplyChainError(
+                        "source archive contains a forbidden or duplicate file"
+                    )
                 total_size += member.size
                 if total_size > MAX_ARCHIVE_BYTES:
-                    raise SupplyChainError("source archive expands beyond the allowed size")
+                    raise SupplyChainError(
+                        "source archive expands beyond the allowed size"
+                    )
                 archived_files.add(relative)
     except (tarfile.TarError, OSError) as error:
         raise SupplyChainError("source archive is not a valid gzip tar file") from error
 
     expected_files = tracked_files(repository_root, expected_commit)
     if archived_files != expected_files:
-        raise SupplyChainError("source archive does not exactly match tracked Git files")
+        raise SupplyChainError(
+            "source archive does not exactly match tracked Git files"
+        )
     if not SOURCE_REQUIRED_FILES.issubset(archived_files):
         raise SupplyChainError("source archive is missing required delivery files")
     return len(archived_files)
@@ -517,13 +537,215 @@ def verify_materials(
     }
 
 
+def normalize_python_audit_requirements(
+    requirements: str,
+    installed_torch_version: str,
+) -> tuple[str, str | None]:
+    """Map an official CPU wheel local version to its public advisory identity."""
+    if "+" not in installed_torch_version:
+        return requirements, None
+    if not installed_torch_version.endswith("+cpu"):
+        raise SupplyChainError(
+            "unsupported local PyTorch version for advisory normalization"
+        )
+    pinned = f"torch=={installed_torch_version}"
+    if requirements.count(pinned) != 1:
+        raise SupplyChainError(
+            "locked export does not contain exactly one installed CPU PyTorch pin"
+        )
+    advisory_version = installed_torch_version.removesuffix("+cpu")
+    return requirements.replace(
+        pinned, f"torch=={advisory_version}", 1
+    ), advisory_version
+
+
+def restore_python_sbom_local_version(
+    document: dict[str, Any],
+    *,
+    advisory_version: str,
+    installed_version: str,
+) -> dict[str, Any]:
+    """Restore the exact installed wheel identity after advisory lookup."""
+    restored = copy.deepcopy(document)
+    components = restored.get("components")
+    if not isinstance(components, list):
+        raise SupplyChainError("Python CycloneDX components must be a list")
+    matches = [
+        component
+        for component in components
+        if isinstance(component, dict)
+        and component.get("name") == "torch"
+        and component.get("version") == advisory_version
+    ]
+    if len(matches) != 1:
+        raise SupplyChainError(
+            "Python CycloneDX does not contain exactly one advisory PyTorch component"
+        )
+    component = matches[0]
+    component["version"] = installed_version
+    purl = component.get("purl")
+    if isinstance(purl, str):
+        encoded_advisory = quote(advisory_version, safe="")
+        marker = f"@{encoded_advisory}"
+        if marker not in purl:
+            raise SupplyChainError("Python CycloneDX PyTorch purl is inconsistent")
+        component["purl"] = purl.replace(
+            marker,
+            f"@{quote(installed_version, safe='')}",
+            1,
+        )
+    properties = component.setdefault("properties", [])
+    if not isinstance(properties, list):
+        raise SupplyChainError("Python CycloneDX PyTorch properties must be a list")
+    properties.append(
+        {
+            "name": "contentflow:audit:advisory-version",
+            "value": advisory_version,
+        }
+    )
+    return restored
+
+
+def add_python_project_to_sbom(
+    document: dict[str, Any],
+    *,
+    project_version: str,
+) -> dict[str, Any]:
+    enriched = copy.deepcopy(document)
+    components = enriched.get("components")
+    dependencies = enriched.setdefault("dependencies", [])
+    if not isinstance(components, list) or not isinstance(dependencies, list):
+        raise SupplyChainError("Python CycloneDX inventory has an invalid shape")
+    if any(
+        isinstance(component, dict) and component.get("name") == "contentflow"
+        for component in components
+    ):
+        raise SupplyChainError(
+            "Python CycloneDX unexpectedly contains the local project"
+        )
+    project_ref = f"pkg:pypi/contentflow@{quote(project_version, safe='')}"
+    dependency_refs = [
+        component.get("bom-ref")
+        for component in components
+        if isinstance(component, dict) and isinstance(component.get("bom-ref"), str)
+    ]
+    if len(dependency_refs) != len(components):
+        raise SupplyChainError("Python CycloneDX dependency identity is incomplete")
+    components.append(
+        {
+            "bom-ref": project_ref,
+            "type": "application",
+            "name": "contentflow",
+            "version": project_version,
+            "purl": project_ref,
+        }
+    )
+    dependencies.append({"ref": project_ref, "dependsOn": sorted(dependency_refs)})
+    return enriched
+
+
+def audit_python_dependencies(
+    *,
+    repository_root: Path,
+    output: Path | None = None,
+) -> int:
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    with tempfile.TemporaryDirectory(prefix="contentflow-python-audit-") as temp_dir:
+        temp_root = Path(temp_dir)
+        requirements_path = temp_root / "requirements.txt"
+        export = subprocess.run(
+            [
+                "uv",
+                "export",
+                "--quiet",
+                "--locked",
+                "--all-extras",
+                "--no-hashes",
+                "--no-emit-project",
+                "--output-file",
+                str(requirements_path),
+            ],
+            cwd=repository_root,
+            env=environment,
+            check=False,
+        )
+        if export.returncode:
+            return export.returncode
+
+        try:
+            installed_torch_version = importlib.metadata.version("torch")
+        except importlib.metadata.PackageNotFoundError as error:
+            raise SupplyChainError(
+                "locked audit environment does not contain PyTorch"
+            ) from error
+        requirements, advisory_version = normalize_python_audit_requirements(
+            requirements_path.read_text(encoding="utf-8"),
+            installed_torch_version,
+        )
+        requirements_path.write_text(requirements, encoding="utf-8")
+
+        raw_sbom_path = temp_root / "python.raw.cdx.json"
+        command = [
+            sys.executable,
+            "-m",
+            "pip_audit",
+            "--strict",
+            "--no-deps",
+            "-r",
+            str(requirements_path),
+        ]
+        if output is not None:
+            command.extend(
+                [
+                    "--format",
+                    "cyclonedx-json",
+                    "--output",
+                    str(raw_sbom_path),
+                ]
+            )
+        audit = subprocess.run(
+            command,
+            cwd=repository_root,
+            env=environment,
+            check=False,
+        )
+        if audit.returncode or output is None:
+            return audit.returncode
+
+        document = _load_json(raw_sbom_path)
+        if advisory_version is not None:
+            document = restore_python_sbom_local_version(
+                document,
+                advisory_version=advisory_version,
+                installed_version=installed_torch_version,
+            )
+        project_version, _ = project_versions(repository_root)
+        document = add_python_project_to_sbom(
+            document,
+            project_version=project_version,
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return 0
+
+
 def _read_document(path: Path) -> dict[str, Any]:
     return _load_json(path)
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build and verify supply-chain evidence")
+    parser = argparse.ArgumentParser(
+        description="Build and verify supply-chain evidence"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    audit_python = subparsers.add_parser("audit-python")
+    audit_python.add_argument("--repository-root", type=Path, default=Path("."))
+    audit_python.add_argument("--output", type=Path)
 
     normalize = subparsers.add_parser("normalize")
     normalize.add_argument("--input", type=Path, required=True)
@@ -553,7 +775,16 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     arguments = _build_parser().parse_args()
     try:
-        if arguments.command == "normalize":
+        if arguments.command == "audit-python":
+            result = audit_python_dependencies(
+                repository_root=arguments.repository_root.resolve(),
+                output=arguments.output,
+            )
+            if result:
+                return result
+            if arguments.output is not None:
+                print(f"wrote audited Python CycloneDX: {arguments.output}")
+        elif arguments.command == "normalize":
             normalized = normalize_cyclonedx(
                 _read_document(arguments.input), root_name=arguments.root_name
             )
@@ -563,18 +794,14 @@ def main() -> int:
                 + "\n",
                 encoding="utf-8",
             )
-            print(
-                f"normalized CycloneDX: {len(normalized['components'])} components"
-            )
+            print(f"normalized CycloneDX: {len(normalized['components'])} components")
         elif arguments.command == "build":
             build_source_archive(
                 arguments.repository_root, arguments.expected_commit, arguments.output
             )
             print(f"built reproducible source archive: {arguments.output}")
         elif arguments.command == "manifest":
-            write_hash_manifest(
-                arguments.directory, arguments.file, arguments.output
-            )
+            write_hash_manifest(arguments.directory, arguments.file, arguments.output)
             print(f"wrote SHA-256 manifest: {arguments.directory / arguments.output}")
         else:
             result = verify_materials(

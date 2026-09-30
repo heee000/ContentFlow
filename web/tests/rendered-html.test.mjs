@@ -64,11 +64,12 @@ test("server-renders the ContentFlow application shell", async () => {
 });
 
 test("keeps production copy and design tokens in source", async () => {
-  const [page, app, apiClient, css, design, packageJson, security] =
+  const [page, app, apiClient, apiConfig, css, design, packageJson, security] =
     await Promise.all([
       readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
       readFile(new URL("../app/contentflow-app.tsx", import.meta.url), "utf8"),
       readFile(new URL("../lib/contentflow-api.ts", import.meta.url), "utf8"),
+      readFile(new URL("../lib/api-config.ts", import.meta.url), "utf8"),
       readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
       readFile(new URL("../DESIGN.md", import.meta.url), "utf8"),
       readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -77,8 +78,14 @@ test("keeps production copy and design tokens in source", async () => {
 
   assert.match(page, /<ContentFlowApp \/>/);
   assert.match(app, /内容审核/);
-  assert.match(app, /发布管理/);
+  assert.match(app, /4 发布/);
   assert.match(app, /任务队列/);
+  assert.match(app, /待人工核对/);
+  assert.match(app, /我已在供应商控制台核对请求、计费和结果/);
+  assert.match(app, /jobs\/\$\{reviewJob\.id\}\/manual-review/);
+  assert.match(app, /jobs\/\$\{job\.id\}\/provider-invocations/);
+  assert.match(app, /ContentFlow 已保存的调用证据/);
+  assert.match(app, /不代表供应商确认支持幂等/);
   assert.match(app, /团队与审计/);
   assert.match(app, /切换工作区/);
   assert.match(app, /编辑 Brief/);
@@ -88,6 +95,13 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /查看全部内容/);
   assert.match(app, /录入人工指标/);
   assert.match(app, /取消排期/);
+  assert.match(app, /建议下一步/);
+  assert.match(app, /资源与系统/);
+  assert.match(app, /立即执行/);
+  assert.match(app, /定时发布/);
+  assert.match(app, /安全重试/);
+  assert.match(app, /publishTiming/);
+  assert.match(app, /publishing\/jobs\/\$\{job\.id\}\/retry/);
   assert.match(app, /最近 .* 条审计记录/);
   assert.match(app, /Prompt 审批、发布与回滚/);
   assert.match(app, /创建者不能自行审批/);
@@ -106,13 +120,29 @@ test("keeps production copy and design tokens in source", async () => {
   assert.match(app, /该脚本尝试已过期/);
   assert.match(app, /生成记录/);
   assert.match(app, /提示词版本/);
-  assert.match(app, /runs\?limit=5/);
+  assert.match(app, /apiAllPages<WorkflowRun>\("\/runs"\)/);
+  assert.match(app, /pollOperationalData/);
+  assert.match(app, /updated_after=/);
+  assert.match(apiClient, /X-ContentFlow-Next-Cursor/);
+  assert.match(apiClient, /DEFAULT_MAX_PAGES/);
+  assert.match(app, /系统处理中/);
+  assert.match(app, /等你操作/);
+  assert.match(app, /为什么需要你上传/);
+  assert.match(app, /GenerationProgress/);
+  assert.match(app, /平台 \$\{index\} \/ \$\{total\}/);
+  assert.match(app, /projectCode/);
+  assert.match(app, /按项目筛选当前工作台/);
   assert.match(css, /--blue:\s*#0f62fe/);
   assert.match(css, /prefers-reduced-motion/);
+  assert.match(css, /transition-duration:\s*0\.01ms/);
+  assert.match(css, /content-enter/);
   assert.match(design, /No fake analytics or fake platform publish success/);
+  assert.match(design, /progressive disclosure/);
   assert.match(app, /生产环境 API 地址由构建配置固定/);
-  assert.match(apiClient, /RUNTIME_API_BASE_CONFIGURABLE/);
+  assert.match(apiConfig, /RUNTIME_API_BASE_CONFIGURABLE/);
+  assert.match(apiClient, /export \{ getApiBase, setApiBase, runtimeApiBaseConfigurable \} from "\.\/api-config"/);
   assert.doesNotMatch(apiClient, /localStorage\.setItem\("contentflow_token"/);
+  assert.doesNotMatch(apiConfig, /localStorage\.setItem\("contentflow_token"/);
   assert.match(security, /Content-Security-Policy/);
   assert.match(security, /Strict-Transport-Security/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);

@@ -390,3 +390,813 @@
 - 解决方案：通过已登录 GitHub CLI 的 Git Data API 上传本地 commit 的 29 个原始 Git blob；每个 blob SHA、tree SHA 和 commit SHA 都必须与本地逐项一致。更新引用前再次确认功能分支和 main 仍指向预期父提交，两个 PATCH 均使用 `force=false`，更新后再次读取 SHA 验证。
 - 验证：本地/API commit 均为 `c290f6420e30b365a0af4f7540b1d9b86355c1d7`，tree 均为 `3cfd24e814a208fb7e14f4f1033ebf73eb6e1492`；两个远端引用均为该提交。临时 SSH known-hosts 和 API 归档目录已删除，没有修改全局 Git/SSH 配置。
 - 剩余边界：这是本次网络故障的等价传输路径，不替代恢复正常 Git HTTPS/配置正式 SSH key；后续默认仍优先普通 `git push`。
+
+## 2026-08-23 本地 BGE-M3 与人工真实素材阶段
+
+### CF-20260823-01：真实文本 Provider 不提供 Embedding，Hash 不能用于真实检索
+
+- 状态：实现、批量推理、宿主机/离线容器真实推理、完整本地门禁和远程 CI 已完成。
+- 问题与影响：当前文本模型 API 可真实生成 JSON，但没有 Embedding 端点；继续使用 Hash 只能保证确定性测试，不能证明中文语义检索可用。
+- 根因：文本与向量能力被误假设为同一 OpenAI-compatible 端点，仓库缺少独立、真实且可本地部署的向量 Provider。
+- 解决方案：新增显式 `bge-m3-local` Provider，固定 BAAI/bge-m3 官方提交 `5617a9f61b028005a4858fdac845db406aefb181`，禁止 remote code，懒加载并在进程内缓存模型；知识分块使用可配置批次的单次模型调用，输出 1024 维归一化 Dense 向量并拒绝空文本、错维度和 NaN/Inf。CPU PyTorch 从官方专用索引锁定，容器使用非 root 可写的持久模型缓存卷。
+- 涉及文件：`contentflow/embeddings.py`、`contentflow/settings.py`、`pyproject.toml`、`uv.lock`、`Dockerfile`、`docker-compose.yml`、`.env.example`、`tests/test_local_embeddings.py` 及文档。
+- 当前验证：CPU-only 依赖安装成功；固定提交真实中文推理返回 1024 个有限值，L2 范数 1.0，首次下载/加载/推理 212.43 秒。批量改造后缓存冷加载+4 段为 31.4 秒、热查询 0.06 秒；Linux Worker 镜像以非 root、完全禁网、固定缓存完成 2 段推理。单元测试覆盖 revision、remote code、批量单次调用、归一化、错维度/非有限值和生产配置失败关闭。
+- 剩余边界：单次向量正确不等于真实知识集检索质量；仍需热路径延迟、内存、并发、容器离线重启、召回/引用质量与容量门禁。首次下载依赖外网，生产应先预热缓存并设置 offline。
+
+### CF-20260823-02：没有媒体 API 时素材任务会错误排队，人工上传无法填充占位任务
+
+- 状态：实现、定向端到端回归、完整本地门禁、真实运行栈和远程 CI 已完成。
+- 问题与影响：原审批逻辑总是创建 `asset.generate` Job；用户选择真实人工封面时会调用不存在的 Provider。旧上传接口只新增 ready 资产，原 planned 资产仍会让发布门禁永久失败。
+- 根因：媒体 Provider 只支持 mock/http；上传 API 没有目标 `asset_id`、内容版本和占位任务填充语义。
+- 解决方案：图片/视频新增显式 `manual` Provider。审核后资产进入 `awaiting_upload` 且不创建生成 Job；Worker 对尚未产生外部副作用的旧队列任务安全收敛为待上传。上传可选择具体资产或当前版本唯一占位，要求内容已审核、版本/类型一致；PNG/JPEG/WebP 安全解码、像素/单帧限制并重编码去元数据，JSON 规范化；成功填充同一资产为 `manual-upload/ready`，对象写入后若路由内数据库 flush 或审计失败则尽力补偿删除。前端展示待上传状态和具体任务选择。
+- 涉及文件：`contentflow/routers/contents.py`、`contentflow/routers/assets.py`、`contentflow/worker.py`、`contentflow/settings.py`、`web/app/contentflow-app.tsx`、`tests/test_manual_media.py`、`tests/test_worker_v2.py` 及文档。
+- 当前验证：定向测试证明审批后无生成 Job、未审核/旧版本/类型不匹配失败关闭、非法伪 PNG 返回 415 且状态不变、有效真实 PNG 填充同一资产、对象可下载、重复覆盖被 409 阻断；前后端分别区分图片、视频和分镜 JSON。完整后端为 `219 passed, 7 skipped, 143 subtests passed`，发布 Worker 仍要求当前版本全部资产 ready。
+- 剩余边界：普通视频只校验 MIME/大小/文件名，尚未做 ffprobe/恶意文件扫描；用户实际封面及最终公众号草稿视觉质量待体验阶段验收。
+
+### CF-20260823-03：微信公众号白名单更新后的鉴权复验
+
+- 状态：已验证，无写入副作用。
+- 证据：2026-08-23 白名单更新后无副作用 token 复验取得 7200 秒有效期；2026-08-24 在隔离生产栈内将凭据加密写入渠道并由 Worker 复验为 `connected`，强制 `auto_publish=false`。没有输出 App Secret、Access Token 或完整响应，也没有创建新的微信素材/草稿或公开发布。
+- 剩余边界：该结果只证明当前 IP 白名单和基础凭据有效，不替代草稿异常矩阵、Token 过期、限流、权限撤销、公开发布或最终 article_id 对账。
+### CF-20260824-04：官方 CPU PyTorch 本地版本导致 pip-audit/CI 无法查询
+
+- 状态：实现、单元测试、本地真实漏洞审计和远程供应链签收已完成。
+- 问题与影响：官方 CPU 索引安装 `torch 2.13.0+cpu`，pip-audit 直接按该本地版本查询 PyPI 时报告 Dependency not found；新增本地 Embedding extra 后，原 CI 审计和 CycloneDX Job 会稳定失败。
+- 根因：PEP 440 本地版本标识用于区分 CPU wheel，但公开漏洞 advisory 使用基础版本 `2.13.0`；原供应链命令没有这层显式、受约束的身份映射。
+- 解决方案：`scripts/supply_chain.py audit-python` 从锁文件导出 all-extras 完整固定版本，仅允许把完全匹配的官方 `+cpu` pin 在 advisory 查询阶段映射为基础版本；其他本地后缀、缺失或重复 pin 均失败关闭。CycloneDX 输出恢复精确安装版本、记录 advisory 版本并补入本地 ContentFlow 项目身份；CI 的漏洞和 SBOM 两条路径统一调用该命令。
+- 当前验证：新增供应链回归 12 passed；真实审计为 No known vulnerabilities found，规范化 Python CycloneDX 含 96 个组件、精确 `torch 2.13.0+cpu`、当前 ContentFlow 版本且 0 漏洞。
+- 远程验证：实现提交 `0282e9bacd6d553553ad0041096a607c5bceb162` 已普通推送到 `codex/enterprise-media-runtime`；[ContentFlow CI #32652773152](https://github.com/heee000/ContentFlow/actions/runs/32652773152) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 后端门禁、前端 lint/test/build/audit、CPU-wheel-aware Python 漏洞审计、96 组件 CycloneDX、可复现源码归档、SLSA 来源证明和双 CycloneDX attestation 均通过。Artifact `9496650624` 名为 `contentflow-supply-chain-0282e9bacd6d553553ad0041096a607c5bceb162`，摘要为 `sha256:2b9afadcb870ce6be009e6bac980824369112f19ab7ddafc0dcac9c51c853053`。
+- 剩余边界：审计使用不带哈希的临时固定版本导出和 `--no-deps`，依赖图完整性由带制品哈希的 `uv.lock` 与 locked sync 保证；GitHub 的 `setup-uv` 并行缓存保存出现一次同键争用提示，不影响作业、制品或证明结论。
+## 2026-08-24 发布可靠性与操作体验阶段
+
+### CF-20260824-05：外部写入前失败与结果不确定使用同一重试语义
+
+- 状态：实现提交 `b4b23b76119c31c4e71cef05fe5ad1d816a20521` 已普通推送；[ContentFlow CI #32724822598](https://github.com/heee000/ContentFlow/actions/runs/32724822598) 四个 Job 全部成功。
+- 问题与影响：公众号因出口 IP 白名单在获取 Token 时失败，旧 Worker 仍把所有连接器异常视为可能已经写入平台，要求人工对账。这样虽然保守，但用户无法在明确无副作用时修复后安全重试；另一方面通用 Job 重试又可能绕过发布专用门禁。
+- 根因：连接器错误没有显式记录发生阶段、是否跨过外部写入边界和是否应使渠道失效；PublishJob API 也没有专用安全重试状态与端点。
+- 解决方案：新增 `ConnectorPublishError(stage, retry_safe, invalidate_channel)`；公众号 Token 请求/响应错误、封面缺失和本地素材读取失败声明为写入前安全失败。Worker 持久化失败阶段、脱敏消息、时间、渠道失效标记和有界历史，终止自动退避；鉴权失败把渠道置为 `invalid`。专用 retry 在 PostgreSQL 锁下重新验证工作区、当前审核版本、渠道 connected 和队列非 running，清除分发令牌后立即入队并审计；通用 Job retry 显式拒绝安全发布失败和待对账发布。任何永久素材、草稿或公开发布调用开始后的异常仍保留 `reconciliation_required`，不自动重发。
+- 验证：连接器契约断言 40164 后只访问 Token 端点；端到端断言失败阶段、渠道失效、通用重试阻断、复测前阻断、复测后安全重试和最终草稿结果；运行中取消竞态与异常渠道新建任务也有回归。全仓后端 `223 passed, 7 skipped, 143 subtests passed`。
+- 边界：旧版本已经进入 `reconciliation_required` 的任务不追溯重分类；平台调用跨过首次写入后的超时仍需人工对账。安全重试不是“所有失败都能重试”，也不替代稳定 NAT/固定出口。
+
+### CF-20260824-06：只有排期入口且工作台信息架构过载
+
+- 状态：已实现并通过本地静态、渲染与生产构建验证；远程 Frontend、供应链与签名 Job 已由 CI #32724822598 签收，真实浏览器主观验收待用户执行。
+- 问题与影响：用户只想马上交付内容时仍必须理解并填写排期；十个同级导航和发布表单的所有高级能力同时出现，使第一次使用者难以判断主流程。操作缺少统一的点击和视图反馈。
+- 根因：发布请求强制 `scheduled_at`，领域模型没有显式立即/定时语义；前端按模块平铺而不是按运营任务分层，也没有把脚本/人工导出作为渐进选项。
+- 解决方案：`publish_now` 立即入队，定时模式继续要求未来带时区时间；请求 ID 支持网络幂等，响应显示执行时机。工作台收敛为创建→审核→素材→发布四步，根据真实数据计算一个下一步；高级资源折叠收纳，移动端使用原生更多选择器。发布页默认立即、匹配同平台渠道、显式提示公众号只建草稿，脚本/人工导出放入高级方式；列表展示执行时机、失败阶段、安全重试和下一步。加入 80–180ms 按压/视图/Toast 动效、键盘焦点和 `prefers-reduced-motion`。
+- 设计依据：沿用仓库 IBM Carbon 风格的单一蓝色、高密度、直角与边框层级；在 `web/DESIGN.md` 固化信息架构、渐进披露和动效纪律，没有引入渐变、发光、浮夸弹跳或假进度。
+- 验证：ESLint、2 项服务器渲染/源契约测试、vinext Sites 构建和 Next.js 生产构建全部通过；TypeScript 通过。远程 Backend 在真实 PostgreSQL/pgvector 与 MinIO 上为 `230 passed, 143 subtests passed`，分支覆盖率 82.69%，Python/npm 审计无已知漏洞；供应链 Artifact `9519101023` 摘要为 `sha256:737dae20923f594ef1858d5d7072392b2e47ae630c5ecb0dc5fe2246c69cc73c`，SLSA 与双 CycloneDX 证明发布后反向验证成功。Codex 内置浏览器在本机因 Windows sandbox `helper_unknown_error` 无法启动，未用非授权的替代浏览器冒充视觉签收。
+- 边界：下一步推荐是基于当前聚合状态的保守规则，不是个性化推荐；复杂历史/多活动并行仍需更细的任务分组。视觉与文案的最终主观验收需真实用户在本地页面完成。
+
+## 2026-08-25 内容工作室 Agent、风格 Skill 与多来源图片阶段
+
+### CF-20260825-01：一次性生成 Prompt 只能产出结构正确但内容单薄的文案
+
+- 状态：实现、本地全量门禁、真实 Prompt Eval、本地运行栈升级和远程 CI/供应链签收均已完成。
+- 问题与影响：旧生成链路只有 plan → generate → review 三次独立调用，Prompt 主要约束 JSON 结构与禁用词，没有选题比较、证据账本、平台写作标准、可解释质量维度或编辑修订闭环，导致流程能跑通但正文信息密度和平台原生性不足。
+- 解决方案：新增有界 Content Studio Agent。Plan 必须给出至少三个角度候选、选择理由、内容论点、证据账本、叙事结构、平台策略和媒体方向；Generate 输出平台正文、备选标题、证据使用和素材简报；Review 同时承担事实/品牌安全与 hook、specificity、evidence、platform_native、structure、usefulness、voice、originality、cta 九维编辑评审。深度档位最多定向修订一次，标准档位不修订，禁止无限循环、任意工具和代码执行。
+- 安全选择：只有修订稿规则、安全评审通过且质量不回退时才采用；高分但仍不安全的修订稿永不替换原稿。质量分不能替代人工审核，内容仍停在 needs_review 或 blocked。
+- 追溯：ContentItem/ContentRevision 新增 generation_json，记录 Agent 模式、质量档位、目标/实际分数、修订是否尝试/采用、失败类型、风格版本与清单 SHA-256；人工作品版本继续保留生成来源。
+
+### CF-20260825-02：用户无法选择、安装和冻结写作风格
+
+- 状态：实现和 API/UI/示例回归完成。
+- 根因：Campaign 只有自由文本 tone，没有可复用、可版本化、可审计的写作规则对象；若直接把所谓 Skill 设计成代码插件，又会扩大为租户级远程代码执行。
+- 解决方案：新增工作区 StyleSkill 表、迁移和 API，内置“专业社媒编辑、场景叙事、专业解释型”三种风格。自定义清单只接受固定 JSON 字段 manifest_version/slug/name/version/description/instructions/forbidden_patterns/platform_instructions/examples，限制 64 KiB、语义版本、平台和文本长度，未知字段一律拒绝；不加载 Python、JavaScript、模板代码或任意依赖。
+- 运行边界：活动选择具体 Skill ID；入队时冻结规范化清单与 SHA-256，运行时再次校验，后续停用/升级不改写历史。安装、启用/停用和使用版本均可审计。可安装示例位于 docs/examples/style-skills/warm-city-guide.json，并由测试真实解析。
+
+### CF-20260825-03：素材只有人工或单一生成，缺开放图库和候选选择
+
+- 状态：实现、真实 Openverse 无副作用搜索烟测和本地对象存储选择回归完成；真实计费图片生成 Provider 尚未提供，不能宣称已经生成过真实 AI 图片。
+- 解决方案：Campaign 新增 manual/generate/search/hybrid 四种图片来源。Agent 产出搜索词和生成提示；审核通过后 search 入 asset.search，generate 使用既有中立 HTTP 媒体契约，hybrid 并行建立同一 cover 候选组。未选中的可选候选不会阻塞发布，同组只能显式选中一个。
+- 搜索边界：Openverse 固定 Wikimedia source，只保留 CC0/PDM/BY/BY-SA；API 响应限制 2 MiB、候选 1–12、禁止重定向，下载仅允许精确 upload.wikimedia.org，落地页仅 commons.wikimedia.org，许可页仅 creativecommons.org。用户必须打开原始页面核验并确认许可后才能下载；图片仍经过字节/像素/单帧限制、重编码去元数据、对象摘要和内容版本门禁。数据库失败会尽力删除新写对象。
+- 真实烟测：查询 Beijing city street 返回 2 个 BY-SA 候选，下载域名均为 upload.wikimedia.org，落地页均为 commons.wikimedia.org；未下载、选择或发布任何外部图片。Openverse 许可元数据只作线索，不构成 ContentFlow 的法律保证。
+
+### CF-20260825-04：长文 Agent 暴露 60 秒硬编码和错误的 Eval 正向样本
+
+- 状态：超时配置、Eval 用例和真实治理升级完成。
+- 真实证据：第一次 prompt-r2/eval-v2 在 generate 阶段 60 秒 TimeoutError，系统自动恢复 eval-v1；没有审批或激活失败版本。随后把文本请求超时改为 CONTENTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS，默认 120 秒且只允许 10–300 秒，并透传 API/Worker Compose。
+- 第二次评测不再超时，但 eval-v2 的 Plan 输入未声明 platforms 却要求 platform_strategies.wechat，Review 又对“测试正文”错误要求 passed=true；模型正确缺省平台策略并拒绝空泛正文，结果 failed，系统再次恢复 eval-v1。
+- 修复：eval-v3 明确 goal/audience/platforms=[wechat]，使用包含已确认事实、人工复核边界和 CTA 的正向正文，并要求全部九维评分路径。真实 openai-compatible/deepseek-v4-flash Eval passed；由不同管理员完成套件激活、Prompt 审批和激活。当前 workspace-r2 active、eval-v3 active、generation_ready=true。
+- 边界：Eval 证明三个固定契约样本通过，不证明跨主题质量、稳定延迟、成本、事实正确率或模型漂移已签收。
+
+### CF-20260825-05：可选修订的最终复评失败会丢失已评审原稿
+
+- 状态：代码修复和回归完成；为避免继续消耗真实模型额度，修复后未再自动发起第二条真实深度工作流。
+- 真实发现：现有 CityWalk 活动在新 Prompt 下完成 Plan、初稿、首次 Review 和定向修订，最后一次 Review 返回不可解析 JSON，工作流以 RuntimeError 失败。脱敏 provenance 记录 5 次调用、4 成功 1 失败、总计 60784 个 Provider 上报 Token；没有保存模型正文，没有创建 ContentItem/Asset，更没有微信素材、草稿或发布副作用。
+- 修复：修订是可选增强而非新的单点故障。定向生成或最终复评出现 RuntimeError/TimeoutError 时，保留首次规则与模型评审完成的原稿、原评分和安全状态，记录 revision_attempt_status=failed 与脱敏 error_type；未经最终复评的修订稿绝不采用。初稿或首次安全评审失败仍使工作流失败关闭。
+- 验证：新增高分但不安全修订拒绝、最终复评失败保留原稿、风格示例、候选选择/许可确认/互斥等回归。最终本地 Ruff/compile 通过；后端 234 passed、7 skipped、145 subtests passed，分支覆盖率 80.92%；前端 ESLint、2 项渲染测试、Sites 与 Next 生产构建通过；默认/observability Compose 与备份脚本语法通过。
+
+### 数据迁移、恢复与现场边界
+
+- Alembic head 从 e28a6b9c4f10 升为 1a2b3c4d5e6f，新增 style_skills 表和两处 generation_json；备份/恢复默认门槛同步为 27 张 public 表。
+- 升级前静默联合备份 .contentflow/backups/20260825-010604 已隔离恢复通过：26 表、旧 head、2 个对象。升级后 .contentflow/backups/20260825-010724 再次隔离恢复通过：27 表、新 head、2 个对象。
+- contentflow-live-test 保留 PostgreSQL/MinIO 卷完成迁移；原 1 个活动、2 条内容、6 个发布任务仍在。API database/storage ready、Worker 启动、Web 200。
+- 仍未读取、修改或暂存 knowledge/北京周末 CityWalk 路线助手产品资料.txt；本地 .env、账号文件、模型缓存和备份均不进入 Git。
+
+### 远程交付证据
+
+- 实现提交 `9e94d0f58170b3291e9425bfa04ba167a0b3bd8f` 已通过普通 `git push` 同步到 `codex/enterprise-media-runtime`，未使用 force 或 force-with-lease。
+- [ContentFlow CI #32758080637](https://github.com/heee000/ContentFlow/actions/runs/32758080637) 四个 Job 全部成功：真实 PostgreSQL/pgvector 与 MinIO 后端门禁、Python/前端审计、前端 lint/test/build、可复现源码归档、SLSA 来源证明和双 CycloneDX attestation 均已签收。
+- 供应链 Artifact `9531626220` 名为 `contentflow-supply-chain-9e94d0f58170b3291e9425bfa04ba167a0b3bd8f`，摘要为 `sha256:71cc728211a092020ca3a369785c59e8edb6b28cdfd3482c0a558ad0562c75f3`；CI 后端结果与本地一致为 `234 passed, 7 skipped, 145 subtests passed`，分支覆盖率 80.92%。
+
+## 2026-08-30 真实进度、素材待办与项目辨识阶段
+
+### CF-20260830-01：内容生成只有笼统状态，无法判断是否卡住
+
+- 状态：实现、本地回归、生产构建、公开登录页浏览器验收、提交与远程 CI 完成；重新登录后的业务页主观验收待用户执行。
+- 问题与影响：工作流只在知识检索、策划、内容生成和人工审核之间保存粗粒度状态；内容 Agent 最耗时的初稿、编辑评审、定向改写与最终复核都显示为同一个“生产中”，用户无法区分正常等待、阶段推进和故障。
+- 根因：Content Agent 没有向工作流暴露阶段回调，前端也没有工作区级运行查询和一致的异步反馈组件。
+- 解决方案：Agent 在每个平台模型调用前发出 `drafting/reviewing/revising/final_review` 阶段；工作流附加当前平台序号与总平台数，并用独立短事务只更新 `WorkflowRun.current_stage`，不提前提交内容、素材或审计行。新增工作区级 `GET /runs`，Web 在真实活动期间 2.5 秒轮询，显示平台、阶段名称、序号、说明、转圈和单调递增的真实阶段映射进度；未知时长素材任务只显示不确定进度，不伪造 ETA。
+- 涉及文件：`contentflow/content_agent.py`、`contentflow/workflow_service.py`、`contentflow/routers/runs.py`、`web/app/contentflow-app.tsx`、`web/app/globals.css`、`tests/test_content_agent.py`、`tests/test_api_v2.py` 及设计/架构/手册。
+- 当前验证：Content Agent 阶段顺序单元测试通过；工作区运行查询与 Job 上下文 API 回归通过；失败 AI provenance 和完整 Worker 流程在隔离 `hash/local/无 Prompt 门禁` 测试配置下通过，证明短事务没有破坏失败恢复或最终事务提交。本地完整回归为 `234 passed, 7 skipped, 145 subtests passed`，前端 ESLint、`tsc --noEmit --incremental false`、2 项源码/SSR 测试和生产 Next 构建通过；Compose 新容器 readiness/database/storage 与启动日志正常。
+- 剩余边界：百分比表示已进入的离散阶段，不是模型内部 Token 进度；Worker 进程被强杀时仍依赖租约/超时与任务队列恢复，不保证阶段持续更新。
+
+### CF-20260830-02：“准备素材”混合系统工作和人工工作
+
+- 状态：实现、静态验证、生产构建和公开登录页响应式验收完成；Docker 重建使既有会话过期，认证后素材页主观验收待用户重新登录后完成。
+- 问题与影响：旧素材页直接呈现上传表单、候选图和全量表格，用户不知道哪些任务系统会自动完成、何时必须介入、为何上传以及应上传什么。
+- 根因：页面按数据类型组织，没有按责任主体和下一步组织；人工素材占位的业务原因只存在于后端状态与元数据中。
+- 解决方案：素材页固定为“系统处理中 / 等你操作 / 已就绪”三段，分别给出数量和责任说明；系统生成/检索带自动刷新与不确定进度；人工待办解释真实品牌素材不可凭空获得或活动主动选择人工模式，并把按钮定位到已绑定项目/当前版本的上传表单。表单解释为什么、上传什么、完成后怎样，显示接受类型和授权提示；候选图继续要求原始许可页面核验。
+- 涉及文件：`web/app/contentflow-app.tsx`、`web/app/globals.css`、`web/DESIGN.md`、`docs/user_manual.md`、`docs/architecture.md`。
+- 剩余边界：界面能说明技术与流程责任，不能判断用户是否真正拥有素材版权，也不能替代品牌视觉审核、恶意文件扫描和普通视频内容探测。
+
+### CF-20260830-03：相似活动跨页面和队列容易混淆
+
+- 状态：实现、API 回归、前端静态验证、生产构建、提交与远程 CI 完成。
+- 问题与影响：审核、素材、发布、复盘和任务队列主要显示内容标题或任务类型，多个名称相近的测试活动很难区分，误操作风险随并行项目增加。
+- 根因：Job 响应没有非敏感业务归属；前端没有稳定项目展示编号和全局作用域过滤。
+- 解决方案：每个 Campaign 由既有 UUID 派生稳定显示编号 `CF-XXXXXX`，不新增可冲突业务 ID；顶部项目筛选统一约束活动、运行、内容、素材、发布和任务，总览按过滤后的实体重算。复盘请求使用 `campaign_id`，后端经 `MetricSnapshot → PublishJob → ContentItem` 关联并重复施加工作区边界，避免只在浏览器过滤造成数据误读或跨工作区引用。审核、素材、发布、复盘与 Job 同时显示编号、活动、产品和内容标题。Job API 先批量解析运行/素材/发布引用，再按工作区查询关联对象并只返回 `JobContextResponse`；原始 payload 继续不对前端暴露，避免 N+1 与敏感字段泄漏。
+- 涉及文件：`contentflow/routers/jobs.py`、`contentflow/routers/metrics.py`、`contentflow/schemas.py`、`web/app/contentflow-app.tsx`、`web/app/globals.css`、`tests/test_api_v2.py` 及文档。
+- 当前验证：API 测试断言最新 workflow Job 返回正确 campaign/product context 且不含 `payload_json`，并验证项目指标筛选只汇总关联 Campaign；前端 TypeScript/ESLint 通过。公开登录页在桌面 1674px 和移动 375px 视口均无横向溢出，控制台无 warning/error；既有登录会话在容器重建后过期，因此未伪造认证后点击证据。未知未跟踪知识文件、本地 `.env`、账号凭据、模型缓存和运行数据库均未读取或暂存。
+- 剩余边界：`CF-XXXXXX` 是便于人工辨识的短展示码，不是数据库唯一键或外部 API 标识；极低概率前缀碰撞仍由完整 UUID 与项目名称共同消歧。
+
+### 本阶段远程交付证据
+
+- 实现提交 `1f94450d7fca8be8059bf2d05ab2621f4da8ea35` 已通过普通 `git push` 同步到 `codex/enterprise-media-runtime`，作者为 `John Wang <182348029+heee000@users.noreply.github.com>`，未使用 force 或 force-with-lease。
+- [ContentFlow CI #33313099365](https://github.com/heee000/ContentFlow/actions/runs/33313099365) 四个 Job 全部成功：PostgreSQL/pgvector 与 MinIO 后端和安全门禁、前端 lint/test/生产构建与依赖审计、可复现源码/SBOM，以及签名 SLSA 来源证明和 Python/前端 CycloneDX attestation 均已签收。
+- CI 后端结果为 `241 passed, 145 subtests passed`，分支覆盖率 82.07%。供应链 Artifact `9732605974` 名为 `contentflow-supply-chain-1f94450d7fca8be8059bf2d05ab2621f4da8ea35`，摘要为 `sha256:f6112e8429e00c891c5b2d73e8ea87445df848e7d2317252d2088f002a5f72bb`。
+
+## 2026-08-30 封面来源显式选择与单条任务改线阶段
+
+### CF-20260830-04：封面来源藏在 Brief 下拉框，素材任务一旦建立就像被强制人工上传
+
+- 状态：代码、接口定向回归、受真实 `.env` 影响用例的隔离复跑、前端 lint/渲染测试/生产构建、本地生产栈重建、提交和远程 CI/供应链签收已完成；登录后业务页验收仍等待用户完成本地登录。
+- 问题与影响：新建活动把 `manual` 作为不醒目的界面默认值，用户可能没有作出选择就创建活动；内容审核后，单条封面任务没有改变来源的 API 和界面，`awaiting_upload` 只能显示上传按钮。因此底层虽然已有 manual/generate/search/hybrid 四种活动级能力，实际体验仍像强制人工上传。
+- 解决方案：活动表单改为四张显式路线卡，不再替新活动预选来源；同时展示人工、AI、开放图库和混合路线的用途及当前环境能力，保存前必须选择。新增认证后的只读 `GET /assets/capabilities`，只返回可用性布尔值，不泄露 Provider、模型、端点或密钥。
+- 单条改线：新增 editor 权限的 `POST /assets/{id}/source`，允许已审核、当前内容版本的图片在 `planned/failed/awaiting_upload/awaiting_selection` 间切换 manual/generate/search。接口在数据库行锁下校验工作区、内容状态、版本、素材类型与可用 Provider；运行中、已就绪、旧版本和混合候选拒绝改写。切换会清理旧图库候选/许可状态/外部任务引用，递增 `source_revision`，使用包含版本与 revision 的队列幂等键，并记录 `asset.source_change` 审计。
+- 界面：素材中心把“选择路线”置于单条封面待办上，人工上传是三种选择之一；AI 未配置时入口仍可见但明确禁用并解释所需配置，开放图库可直接入检索队列。当前路线、最近错误、上传动作和图库许可核验动作分开呈现，避免把“为什么上传”和“只能上传”混为一谈。
+- 验证：新增真实 API 回归覆盖能力探测、未配置 AI 失败关闭、人工→图库、处理中并发切换拒绝、图库候选→人工、候选清理、revision 和 Job 数量；素材定向回归 `5 passed`，Ruff、ESLint 与 Next.js 生产构建通过。真实 `.env` 会把 Prompt 门禁、S3、CORS 和 Provider 注入默认 Settings；受影响的四组使用仅进程有效的完整隔离配置复跑为 `58 passed, 32 subtests passed`。未改写 `.env`。
+- 运行边界：本地 `image_provider=manual`，所以不能宣称真实 AI 图片生成已接通；人工上传和 Openverse 可用。要启用真实 AI 卡片，仍需供应商中立 ContentFlow Media v1 HTTP 图片生成端点、密钥、模型名和精确下载域名白名单。切换图库仍要求用户核验原始许可页面。
+- 现场：`contentflow-live-test` 保留 PostgreSQL/MinIO 数据卷重建 API/Worker/Web，readiness 为 database/storage `ok`、Web HTTP 200。浏览器已打开新的本地登录页；登录后创建一条真实内容并停在待审核队列的证据待补。
+- 远程证据：实现提交 `0b3d015d84c3ea74108a4ccd10d50aa1fda39695` 已用 John Wang 身份普通推送；[ContentFlow CI #33315195769](https://github.com/heee000/ContentFlow/actions/runs/33315195769) 四个 Job 全部成功。PostgreSQL/pgvector 与 MinIO 后端为 `242 passed, 145 subtests passed`，总覆盖率 82.04%；前端 lint/test/build/audit、Python 漏洞审计、可复现源码、SLSA 与双 CycloneDX attestation 均通过。Artifact `9733221112` 名为 `contentflow-supply-chain-0b3d015d84c3ea74108a4ccd10d50aa1fda39695`，摘要 `sha256:21467c243812afc956bb2f27ee0c8498fed740d984e77c9ee6b822481e9e94e3`。
+
+## 2026-08-31 公网测试部署规划阶段
+
+### CF-20260831-01：本地换网会改变微信公众号白名单，公网运行平台职责不清
+
+- 状态：完整实现路线已记录；部署资产、云资源和目标环境证据尚未实施，不能写成已上线。
+- 问题与影响：本机 Worker 的出口由当前网络或代理决定，换网可能再次触发微信 40164；GitHub Pages、Vercel、GitHub Actions、固定 IP 云主机分别能承担什么没有形成明确决策，容易把静态托管或有时限的 Serverless Function 误当成长驻 Worker。
+- 现场证据：2026-08-31 从宿主机与 `contentflow-live-test` Worker 容器测得相同公网出口 `18.183.44.57`，证明当前 Docker Worker 跟随宿主出口，而不是每个 Worker 随机获得公网 IP。该地址只代表当时网络，不是长期固定资源。
+- 解决方案：新增[公网测试部署实现计划](public_test_deployment_plan.md)。初版先确定固定公网 IPv4、Caddy 同源 HTTPS、GitHub CI/GHCR 和不把 Worker 放入 Serverless 的边界；随后 CF-20260831-02 用资源/价格实测把运行组合进一步收敛为 Hetzner + 本地 BGE + R2。计划分 M0-M6 规定部署资产、镜像门禁、云环境、真实业务验收、备份回滚和可选 Vercel 拆分。
+- 安全边界：首次公网环境默认新建干净数据、关闭公开注册、只开放 80/443、数据库和对象存储不映射公网；微信公众号保持 `auto_publish=false`，先验收渠道和草稿。真实密钥、平台账号、本地 `.env`、运行数据库及未跟踪知识文件继续排除在 Git 外。
+- 验收门槛：只有 M1-M5 在目标环境完成，同一固定 Worker IP 经两个客户端网络验证、完整内容到微信草稿闭环、联合恢复与镜像回滚各有证据后，才能标记“个人受控公网测试可用”。本次只改变计划和记录，不调整个人公开部署 60%-65% 的完成度估计。
+
+### CF-20260831-02：Embedding 与公网资源方案缺少成本实测和明确选型
+
+- 状态：性价比路线已定案并写入计划；云资源、R2 和目标环境压力/兼容性证据仍待实施。
+- 实测：运行 5 小时后的 `contentflow-live-test` Worker 已加载 BGE-M3，RSS 约 899 MiB；API 约 138 MiB、Web 约 34 MiB、PostgreSQL 约 66 MiB、MinIO 约 247 MiB，容器合计约 1.38 GiB。BGE 缓存 2.2 GiB，后端镜像约 2.47 GB。采样证明 4 GiB 低并发试运行具有现实余量，但不替代索引峰值、OOM、swap 和耐久验收。
+- 决策：首选 Hetzner 欧洲区 CX23 x86（2 vCPU/4 GiB/40 GiB）+ €0.50 Primary IPv4，Worker 继续本地 BGE-M3；移除公网栈 MinIO，使用 Cloudflare R2 业务 Bucket 和独立加密备份 Bucket；Web/API/Worker/PostgreSQL/Caddy 同机。按 2026-06-15 后官方价格，主机加 IPv4 约 €5.99/月，未含税、域名和文本模型用量。
+- Embedding 边界：不因为“云部署”就自动改 API。Hetzner 最低推荐档已经是 4 GiB，本地 BGE 不增加套餐费用，且保留当前中文向量行为与数据边界。API 仅在 2 GiB 后备主机、持续 OOM、多 Worker 或真实检索评测更优时启用；优先验证 $0.02/百万 Token 的 `text-embedding-3-small` 1024 维路径。
+- 代码缺口：当前 OpenAI-compatible Embedding 和文本生成共用 `MODEL_API_BASE/KEY`。进入 API 后备前必须增加独立、供应商中立的 Embedding Base/Key，并为模型切换建立全量重索引/索引代际，禁止混合不同模型向量。
+- 存储边界：R2 官方声明 S3 兼容且 Standard 免费额度为 10 GB-month、100 万 Class A、1000 万 Class B和免费出口，但 ContentFlow 仍需真实验证 HeadBucket、上传/Metadata、读取、删除、分段和上限；通过前不能写成 R2 已签收。
+
+### CF-20260831-03：公网计划只有文档，缺少可执行交付面
+
+- 状态：仓库内 M1 和 M2 主体已实现并完成本地静态/定向验证；云主机、DNS、真实 R2、GHCR 构建、SSH 部署、微信固定出口和灾备演练仍待外部环境签收，不能写成已上线。
+- 问题与影响：本地 Compose 会发布 PostgreSQL/API/Web/MinIO 端口并在服务器现场 build，不适合直接公网运行；文本与 Embedding 只能共用一个 Base/Key；固定 BGE 缓存、R2 操作矩阵、加密异地备份、不可变镜像和手工批准部署都只有计划，没有可执行入口。
+- 公网栈：新增 `deploy/public-test`，仅 Caddy 发布 80/443，同源代理 Web/API/health，不公开 metrics；API/Worker 强制相同 digest，PostgreSQL/Caddy/restic 固定第三方 digest，移除 MinIO，设置健康检查、日志轮转、资源上限、非提权和明确命名卷。静态校验器通过 Compose JSON 拒绝端口、现场 build、弱运行模式、HTTP Provider、通配 CORS、非固定镜像和 release SHA 缺失；CI 新增同一门禁。
+- 模型与缓存：增加独立 `CONTENTFLOW_EMBEDDING_API_BASE/KEY`，未设置时向后兼容 `MODEL_API_BASE/KEY`；两条路径都继续执行生产 HTTPS 校验。新增固定 BGE revision 缓存 prepare/verify 命令，写入模型/revision/1024 维 manifest，并用 offline 加载和归一化向量复验；API health 返回 release SHA 便于对照部署制品。
+- 存储与灾备：新增只操作唯一随机前缀的 S3 conformance，覆盖 HeadBucket、单段、9 MiB multipart、100 MiB 上限、SHA-256 Metadata、读取和精确删除。公网备份使用独立 R2 Bucket/Token 和 restic 客户端加密；dump 先经 `pg_restore --list`，再抽样检查与 7 日/4 周 retention；验证只创建随机临时数据库。
+- 账号安全：公网注册保持硬关闭，没有引入临时开关。新增交互式 offline bootstrap CLI，密码只由 TTY getpass 读取；首个工作区只允许空库创建，第二管理员必须指定 workspace slug、拒绝已有邮箱，PostgreSQL advisory lock 串行化并写系统审计。
+- 供应链与部署：新增手工 image workflow，要求同 SHA 既有成功 CI，构建/推送 GHCR amd64 镜像，记录 OCI provenance/SBOM、Trivy 可修复 Critical 门禁和 digest Artifact。部署 workflow 只能从指定成功 build run 下载坐标，通过受保护 Environment 和预置 SSH known_hosts 部署；远端先验配置/磁盘/BGE/备份、再迁移、readiness 与 Worker heartbeat，失败不更新 current symlink，也不宣称数据库迁移可自动回滚。
+- 本地验证：Ruff 全仓通过；隔离真实 `.env` 后后端 `245 passed, 7 skipped, 145 subtests passed`，分支覆盖率 80.96%；11 个 YAML、最终公网 Compose 和 4 个 POSIX shell 脚本语法通过。前端首次用不满足 engines 的 Node 22.11.0 时 vinext 暴露 npm 可选原生绑定缺失，未删除锁文件或强制修复；改用满足要求的随附 Node 24.19.0 从同一 `package-lock.json` 执行 `npm ci` 后，ESLint、2 项渲染测试、HTTPS Next 生产构建和 moderate audit 全部通过，0 vulnerability。
+- 剩余边界：BuildKit attestation 尚不是独立签名与部署时验签；R2、restic、Caddy TLS、GHCR 和 SSH workflow 未在目标主机执行；Prometheus/Grafana 暂未纳入公网栈；单机 PostgreSQL/BGE 的峰值/OOM/磁盘仍需真实耐久证据。
+
+## 2026-09-02 审计完整性与持续复审阶段
+
+### CF-20260902-01：审计记录只能查询，数据库误改后产品无法发现
+
+- 状态：实现、本地专项/全量验证、真实 PostgreSQL 并发追加和 GitHub CI/供应链签收完成。
+- 问题与影响：`audit_logs` 过去只有脱敏与 API 只读，没有记录间完整性关系。数据库误改、漏行、错误恢复或越权写入后，管理工作台仍会把被改变的记录当成正常证据，审批、发布、凭据和 Prompt 治理的追责链不足。
+- 根因：审计模型没有稳定序号、前序摘要、记录摘要和独立链头；并发 API/Worker 也没有同一工作区审计追加的数据库串行化协议。
+- 解决方案：Alembic head 升级为 `6d4e8f9a0b1c`，新增 `audit_chain_heads`，并为 `audit_logs` 增加 scope、sequence、previous hash、entry hash 与 integrity version。迁移按 `created_at + id` 确定性回填旧记录；新写入对脱敏后规范载荷计算 SHA-256，PostgreSQL 使用基于 scope 的事务 advisory lock 与链头行锁串行追加。唯一约束、正序约束、哈希长度和版本约束在数据库层失败关闭。
+- 产品入口：新增管理员 `GET /api/v1/admin/audit-integrity`，逐条重算并区分序号缺口、前序不匹配、载荷/记录哈希异常和链头不一致。管理页进入时核验一次，显示链头与异常序号，并允许人工重新核验；没有把全量核验加入 2.5/15 秒全局轮询。
+- 涉及文件：`contentflow/audit.py`、`entities.py`、`routers/admin.py`、`schemas.py`、迁移 `6d4e8f9a0b1c`、管理工作台、迁移/接口/PostgreSQL 测试、架构/运维/生产清单与备份门槛。
+- 本地验证：全仓 Ruff、迁移单 head、锁文件与公网部署 fail-closed 校验通过；审计/迁移/安全专项 `53 passed, 32 subtests passed`，新增接管/半迁移测试后相关专项 `17 passed`，部署恢复契约 `2 passed`；最终全量后端 `254 passed, 8 skipped, 145 subtests passed`。8 个跳过项只因本机 Docker/PostgreSQL/MinIO 未运行，不能冒充 PostgreSQL 并发签收。前端 ESLint、Sites/vinext 构建与 2 项渲染测试、Next.js/TypeScript 生产构建通过。
+- 剩余边界：数据库管理员仍可同时重算记录和链头；删除整条尾部后若同步改链头也无法由同库自证。当前能力是 tamper-evident，不是 WORM、可信时间戳、外部公证或管理员不可伪造。后续需周期性把链头签名/锚定到独立不可变存储或 SIEM，并建立告警和取证 Runbook。
+
+### CF-20260902-02：客户端 Request ID 无边界会污染日志或触发数据库长度错误
+
+- 状态：已实现并进入同一阶段验证。
+- 问题与影响：API 过去直接接受任意 `X-Request-ID`，随后写入结构化日志和最长 64 字符的审计列；超长或非安全字符在 PostgreSQL 中可能使业务事务因审计写入失败，也会增加日志注入与高基数风险。
+- 解决方案：只接受 1-64 位、以字母数字开头且后续仅含字母数字、点、下划线、冒号和连字符的 ID；其余值在进入 request state、日志和审计前替换为服务端 32 位 UUID，并把最终值回传响应头。
+- 验证：回归覆盖合法 ID 原样保留和 65 字符输入被替换；全量测试与前端门禁继续通过。
+
+### CF-20260902-03：灾备脚本未与新迁移和审计链表同步
+
+- 状态：仓库门槛已同步；当前 head 的真实联合恢复仍待独立演练。
+- 解决方案：本地备份/恢复默认 revision 更新为 `6d4e8f9a0b1c`，最低 public 表数更新为 28；公网隔离恢复不再只检查 revision 非空，而是要求精确等于当前 head。部署静态验证器从 `contentflow.migrate` 读取当前常量并校验恢复脚本文本，新增迁移时若忘记同步将让 CI 失败。PowerShell 语法、2 项恢复契约、部署静态验证器和差异检查通过。
+- 剩余边界：脚本门槛正确不等于当前 28 表 PostgreSQL+对象联合恢复已经发生；PITR、异地不可变副本和 RPO/RTO 演练继续保持未签收。
+
+### CF-20260902-04：远程 CI 暴露 Linux 导入差异与新披露前端依赖漏洞
+
+- 状态：修复、本地定向验证和修复提交的远程 CI 复验完成。
+- 发现方式：实现提交 `52811bb64560751b500aba7bdd529b8982710627` 的首次手工 CI `33648030752` 中，Python 收集阶段在 Linux 找不到未安装的 `scripts` 命名空间；前端 lint、测试和生产构建通过，但 `npm audit` 命中新披露的 Browserslist 高危公告。
+- 根因：恢复契约测试直接导入仓库维护脚本，本地 Windows 测试路径偶然可见，正式 Python 包配置却只安装 `contentflow*`；前端锁文件仍固定 `browserslist 4.28.2`，而审计源要求高于 `4.28.6`。
+- 解决方案：把恢复门槛校验移入正式安装的 `contentflow.migrate.validate_public_restore_contract`，部署脚本与测试共用同一实现，不把整个 `scripts/` 目录加入生产包；仅更新锁文件中的 Browserslist 及其浏览器数据库依赖到兼容安全版本 `4.28.8`。
+- 验证：相关 Ruff 检查通过，迁移/审计/恢复契约 `19 passed`；`npm audit --audit-level=moderate` 为 `0 vulnerabilities`。本机沙箱首次重跑因系统临时目录 ACL 无法创建 SQLite 文件而失败，提升为普通宿主用户权限后同一测试集通过；该权限噪声没有作为代码失败处理。
+
+### 本阶段远程交付证据
+
+- 实现提交 `52811bb64560751b500aba7bdd529b8982710627` 和 CI 修复提交 `3fa5206c4af90ffec6a09e5d2e10474386f579fc` 均以 `John Wang <182348029+heee000@users.noreply.github.com>` 普通推送到 `codex/enterprise-media-runtime`，未使用 force 或 force-with-lease。
+- [ContentFlow CI #33648933471](https://github.com/heee000/ContentFlow/actions/runs/33648933471) 四个 Job 全部成功：PostgreSQL/pgvector 与 MinIO 后端/安全门禁、前端 lint/test/生产构建/依赖审计、可复现源码/SBOM，以及签名 SLSA 来源证明和 Python/前端 CycloneDX attestation 均已签收。
+- 后端结果为 `262 passed, 145 subtests passed`，总覆盖率 82.03%，包含真实 PostgreSQL 双线程同工作区审计追加测试。供应链 Artifact `9853954616` 名为 `contentflow-supply-chain-3fa5206c4af90ffec6a09e5d2e10474386f579fc`，摘要为 `sha256:fec0569d78774f692f9bffcd498f947c9f5ede8fbcce23419b2504519df9b9df`。
+
+## 2026-09-03 有界列表与增量同步阶段
+
+### CF-20260903-01：高增长运营集合会无界读取工作区全表
+
+- 状态：实现、迁移、本地专项验证和远程 PostgreSQL/MinIO/供应链签收完成。
+- 问题与影响：活动、内容、素材、发布和知识等列表没有统一上限；Job 虽硬限制 200，但无法继续读取。数据增长后会放大数据库扫描、序列化、网络和浏览器内存，并让旧记录不可达。
+- 根因：各 Router 独立实现 `order_by(...).all()`，没有共享页长、稳定次序、游标校验和响应元数据契约。
+- 解决方案：新增 `contentflow.pagination`。七类运营集合默认 100、最大 200（Run 保持既有最大 100），按 `updated_at DESC, id DESC` 做 keyset；游标是版本化、严格结构、URL-safe 的不透明载荷，畸形/超长/无时区增量输入返回 422。响应数组不变，以 `X-ContentFlow-Next-Cursor`、`X-ContentFlow-Page-Limit` 和 `X-ContentFlow-Sync-Time` 承载控制信息，并由 CORS 显式暴露。
+- 数据库：迁移 `7e5f9a0b1c2d` 为 7 张表增加 `(workspace_id, updated_at, id)` 组合索引；本地/公网备份默认 head 同步。企业大表升级仍需维护窗口测量普通建索引的锁等待和空间，不能把空库迁移结果当作在线 DDL 证明。
+- 验证：覆盖相同更新时间的稳定翻页、无重复/遗漏、跨工作区隔离、游标篡改、页长、带/不带时区增量输入、索引列序和空库升降级。
+
+### CF-20260903-02：工作台高频轮询重复读取静态控制面
+
+- 状态：前端实现和本地 lint/生产构建/SSR 测试完成，浏览器真实网络预算待后续 E2E。
+- 问题与影响：登录后一次并行请求约 17 组数据，随后每 15 秒完整重放；生成/素材处理中每 2.5 秒重放。成员、渠道、知识、Prompt 和审计等低频数据也被反复读取，标签页隐藏后仍消耗资源。
+- 解决方案：初次加载通过有界追页最多读取 2000 条并在截断时显式告知；后台只增量读取 Dashboard、Campaign、Run、Content、Asset、Publish、Job 和 Metrics。隐藏标签页暂停，重入轮询拒绝；按 ID 合并并稳定重排。同步水位来自服务端而非浏览器时钟，保留 2 秒重叠；若 10 页/1000 条仍未读完则不推进水位并要求手动全量刷新。
+- 兼容边界：没有删除语义的集合可通过增量合并收敛更新；跨页读取不是事务快照，但扫描期间的新写入会在下一轮重叠同步补回。当前不是 WebSocket/SSE，也没有超过 2000 条的专用历史浏览器。
+
+### CF-20260903-03：本地真实环境变量会污染隔离 API 回归
+
+- 状态：测试确定性修正完成。
+- 问题与影响：`test_api_v2` 只覆盖少量 Settings，本机真实 Prompt 门禁、S3 和 CORS 环境会把隔离 SQLite 测试改成连接 MinIO或拒绝本地 Origin，产生与代码无关的假失败并浪费诊断时间。
+- 解决方案：测试显式固定 development/local/hash/mock、关闭治理/指标并声明本地 CORS；没有读取或修改真实 `.env`。同一 API 测试恢复为离线确定性执行。
+
+### CF-20260903-04：持续复审新增未关闭边界
+
+- 低频/父级集合尚未统一游标：审计日志只有上限，成员、工作区、风格 Skill、内容修订、发布证据和部分 Prompt/Eval 列表仍可能增长。
+- `contentflow-app.tsx` 仍是大型单文件；活动期 8 路增量请求、2000 条客户端上限和无虚拟列表仍需 query hooks、历史浏览、SSE/Inbox、E2E 请求预算和负载证据。
+- FORCE RLS/数据库角色拆分需要改变 owner/API/Worker 权限，存在业务锁死风险。安全审查要求明确高影响迁移授权，本阶段未应用、未绕过，也没有 RLS 半成品文件。
+
+### 本阶段本地交付证据
+
+- 进程级隔离真实 `.env` 后，全量后端 `258 passed, 8 skipped, 152 subtests passed`，分支覆盖率 81.15%；8 项跳过为本机未启动的 PostgreSQL/MinIO 外部服务，不能冒充真实数据库/对象存储签收。
+- Ruff 全仓、`uv lock --check`、Alembic 单 head `7e5f9a0b1c2d`、PowerShell 备份脚本语法、公网部署 fail-closed 校验与 `git diff --check` 通过。
+- 前端 ESLint、Sites/vinext 构建和 2 项渲染测试、Next.js/TypeScript 生产构建通过；`npm audit --audit-level=moderate` 为 0 vulnerabilities。
+- 远程 Linux + PostgreSQL/pgvector + MinIO、供应链与 attestation 仍必须绑定本阶段提交重新运行；未成功前不把本阶段标为远程签收。
+
+### CF-20260903-05：远程审计在本地验证后新命中 fast-uri 高危公告
+
+- 状态：兼容范围内的锁文件修复、本地前端复验和后续完整远程 CI 签收完成。
+- 发现方式：实现提交 `f4172f20b1edd45f7d63848113223161bc7ccfc4` 的首次手工 CI `33655246050` 中，后端 PostgreSQL/pgvector、MinIO、安全门禁与供应链证据任务成功，前端 lint、渲染测试和生产构建也成功；最后的 `npm audit --audit-level=moderate` 新命中 `fast-uri 3.0.0 - 3.1.5` 的四条高危主机混淆/SSRF 公告，因此整次运行正确失败，来源证明任务被跳过。
+- 根因：`ajv 8.20.0` 通过 `^3.0.1` 引入 `fast-uri`，锁文件固定在刚被公告覆盖的 `3.1.5`。这不是业务代码缺陷或 CI 网络故障，也不应通过降低审计级别规避。
+- 解决方案：仅把传递依赖锁定结果从 `fast-uri 3.1.5` 更新到同一兼容主版本的 `3.1.7`；不新增直接依赖、不跨主版本、不运行 `npm audit fix --force`，也不修改审计门槛。
+- 本地验证：更新后 `npm audit --audit-level=moderate` 为 `0 vulnerabilities`。用满足项目 engines 的随附 Node `24.19.0` 从锁文件重建依赖后，ESLint、Vinext/Sites 构建、2 项服务端渲染测试和 Next.js 16.2.12/TypeScript 生产构建通过。本机默认 Node `22.11.0` 低于项目要求的 `22.13.0`，会跳过 Rolldown Windows 可选绑定；该运行时噪声没有通过改锁文件掩盖。
+- 证据边界：失败运行 `33655246050` 只作为问题发现和后端集成通过证据，不能当作本阶段最终签收；必须以包含 `3.1.7` 锁文件的后续提交重新跑完四个 Job，才能记录成功 Run、Artifact 和 attestation。
+
+### CF-20260903-06：Prometheus 规则单测跨组求值顺序未声明
+
+- 状态：确定性修复已实现，并由固定 Prometheus 镜像和完整远程 CI 签收。
+- 发现方式：安全修复提交 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 的 CI `33656868446` 中，前端全部门禁和 SBOM 成功；后端的 Prometheus 配置与 13 条规则语法成功，但 `ContentFlowHighHTTP5xxRate` 在第 13 分钟偶发未触发，后续 PostgreSQL/MinIO 测试因此被失败关闭。
+- 根因：测试同时包含 `contentflow-recording` 与 `contentflow-alerts` 两个规则组，后者消费前者生成的记录指标，但测试文件没有声明同一求值时刻的组顺序。此前把断言从 12 分钟移到 13 分钟只扩大了余量，没有消除跨组顺序不确定性。
+- 解决方案：在 Prometheus 单测顶层增加 `group_eval_order`，明确 `contentflow-recording` 先于 `contentflow-alerts`。不改告警表达式、持续时间、阈值或生产配置，不用放宽期望掩盖问题。
+- 验证：本机 Docker 服务未运行，因此没有伪称本地 promtool 通过；远程 CI `33657538096` 使用固定 digest 的 Prometheus `v3.13.1-distroless` 成功完成配置、13 条规则和规则单测，随后继续跑完 PostgreSQL/MinIO 全量测试。失败运行 `33656868446` 只保留为前端安全修复成功和规则时序缺口的发现证据。
+
+### 本阶段远程交付证据
+
+- 实现提交 `f4172f20b1edd45f7d63848113223161bc7ccfc4`、依赖安全修复 `08f233d71d760e0b17a9dea5e2b31553ae90ca5f` 和 Prometheus 确定性修复 `19eb1773f367362e8a288dfbbd59103f95a47bd5` 均以 John Wang 身份普通推送，未使用 force 或 force-with-lease。
+- [ContentFlow CI #33657538096](https://github.com/heee000/ContentFlow/actions/runs/33657538096) 绑定提交 `19eb1773f367362e8a288dfbbd59103f95a47bd5`，四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 后端为 `266 passed, 152 subtests passed`，分支覆盖率 82.05%；Prometheus 配置/规则/规则单测、Python 依赖审计、前端 lint/test/build/audit、可复现源码与 SBOM 均通过。
+- 供应链 Artifact `9857357210` 名为 `contentflow-supply-chain-19eb1773f367362e8a288dfbbd59103f95a47bd5`，摘要 `sha256:d0c52084bdbf96afaefaa80c9c28e08007c75201a337f2d642245b9109625122`；SLSA 来源证明和 Python/前端 CycloneDX attestation 均已发布并反向验证。
+
+### CF-20260903-07：低频控制面与历史集合仍会无界读取
+
+- 状态：实现、数据库迁移、本地验证和远程 PostgreSQL/MinIO/供应链签收完成。
+- 问题与影响：成员、用户可访问工作区、渠道、风格 Skill、内容修订、发布证据/确认、审计、Prompt 版本和 Eval 套件/运行仍会读取全部记录，或只能拿到固定最近记录而无法继续。随着组织、审计和发布历史增长，会造成数据库/响应内存放大或历史不可达。
+- 根因：首轮分页只覆盖高增长运营路径；控制面混有连接查询、创建时间排序和单调版本/链序号排序，不能机械套用单一 `updated_at` 标尺。Prompt/Eval 管理摘要还同时承担 active/staged 状态与历史展示。
+- 解决方案：通用分页器增加升序、连接 Row 与严格 `{n,id,v}` 序列游标支持。成员和工作区按 Membership 的 `(created_at,id)`，渠道/风格 Skill/证据/确认/Eval 运行按时间加 ID，修订/Prompt 版本/Eval 套件/审计按业务序号加 ID 稳定翻页。Prompt/Eval 摘要嵌套数组固定为最近 100 条，新增三个独立历史端点供完整读取。风格内置 Skill 只在第一页附加，后续页不重复且不占工作区记录页长。
+- 前端：工作区、成员、渠道、风格 Skill、审计和 Prompt/Eval 历史均改用同一有界追页器；内容修订、发布证据和确认按需追页。所有集合仍保留 JSON 数组兼容，达到 20 页/2000 条时明确提示，不把截断伪装成完整数据。
+- 数据库：Alembic head 更新为 `8f6a1b2c3d4e`，新增 11 个复合索引，覆盖 Membership 两种访问方向以及渠道、风格 Skill、修订、证据、确认、Prompt/Eval 和审计排序；public 表数仍为 28。模型声明、备份和本地/公网恢复脚本默认 head 同步。
+- 涉及文件：`contentflow/pagination.py`、相关 Router/实体、`web/app/contentflow-app.tsx`、迁移/备份脚本、分页/迁移/风格/发布/Worker 测试和 README/架构/运维/交接/成熟度文档。
+- 本地验证：序列游标正常与篡改、审计稳定跨页、所有新增端点响应头、风格内置项只出现第一页、发布证据/确认和内容修订契约、11 个索引列序与空库升降级均有回归。最终不设置任何进程级覆盖的全量后端为 `259 passed, 8 skipped, 160 subtests passed`，分支覆盖率 81.27%；8 项跳过仅是本机没有 PostgreSQL/MinIO。全仓 Ruff、锁文件、单 Alembic head、编译、PowerShell 语法和公网部署 fail-closed 校验通过；ESLint、Next.js/TypeScript 生产构建、Vinext 两项渲染测试和 moderate 依赖审计 0 漏洞通过。
+- 测试污染记录：最初 8 项失败尝试本机 BGE 缓存与 `localhost:9000` S3；过度使用进程覆盖后又让 2 项安全配置负例读取到真实模型字段。根因是若干 fixture 没有禁用 dotenv。`test_security`、Prompt 治理、脚本发布、Observability 和 Worker fixture 现显式使用 `_env_file=None` 并声明自身 local/hash/mock/门禁设置；未读取或修改 `.env`，最终全量测试无需环境覆盖即可通过。
+- 远程证据：实现提交 `950323dbe499291fc14758d6674e276b7711e112` 已以 John Wang 身份普通推送，未使用 force。对应 [ContentFlow CI #33663045854](https://github.com/heee000/ContentFlow/actions/runs/33663045854) 四个 Job 全部成功；真实 PostgreSQL/pgvector 与 MinIO 为 `267 passed, 160 subtests passed`、覆盖率 82.18%，Prometheus、Python/npm 审计、前端、可复现源码/SBOM、SLSA 和双 CycloneDX attestation 全部签收。Artifact `9859471526` 名为 `contentflow-supply-chain-950323dbe499291fc14758d6674e276b7711e112`，摘要 `sha256:e0cdc89417ca2a5883ea878e2be375ed935bedc5de9d20e562716471675b0a27`。
+
+### CF-20260903-08：第二十八轮复审新增未关闭边界
+
+- 面向用户的可增长集合已全部有界，但 Web 仍会在登录/手动刷新时主动追至最多 2000 条；没有真正的历史路由、服务端全文/组合筛选、导出、虚拟列表或可分享查询状态。
+- 发布确认必须对当前尝试的全部证据计算稳定清单哈希，内容变更/审核也会检查关联素材；这些内部正确性扫描有业务必要性，但当前缺少“单尝试证据数、单内容素材/候选数、租户总存储”的显式配额和保留策略，恶意或误用输入仍可放大事务成本。
+- `contentflow-app.tsx` 当前约 5031 行，活动期仍有 8 路增量轮询；缺少领域 query cache、SSE/Inbox 恢复游标、Playwright 请求预算和断线重连证据。
+- FORCE RLS、数据库 owner/migrator/API/Worker 角色拆分仍属于高影响权限迁移，未获明确授权前继续不实施；本轮没有 RLS 半成品。
+- OIDC/SAML、MFA/step-up、SCIM、集中 KMS、异地不可变审计锚点、PITR/异地恢复和目标云多副本/容量故障演练仍未形成企业签收。公网部署继续按用户要求冻结，本轮没有外部资源或平台副作用。
+
+### CF-20260903-09：发布证据与素材正确性集合缺少业务边界
+
+- 状态：证据/素材数量边界、素材版本索引、旧任务短路及本地/远程完整门禁均已完成。
+- 问题与影响：脚本发布确认需要读取当前尝试的全部证据并计算稳定清单哈希；发布、审核、人工上传和候选选择会检查当前内容版本素材。此前单文件虽有限制，但合法用户可无限追加不同证据或通过内容改版积累历史素材，放大事务内存、哈希、对象存储和 Provider 成本。
+- 根因：证据只有单对象大小/像素边界；素材版本只存在 `metadata_json`，数据库不能按版本使用稳定索引过滤。内容修改后已标记 `stale` 的排队素材仍会进入 Worker 的生成/轮询处理器。
+- 解决方案：新增每次脚本尝试默认 20 个证据、累计 50 MiB 上限；在已锁定 `PublishJob` 的事务内聚合检查，超限发生在对象写入前，并把累计字节写回发布响应。新增 `assets.content_version` 非空列，从既有 JSON 安全回填，建立 `(workspace_id, content_item_id, content_version, status, id)` 索引；生成、改版和人工补建均显式写列，发布/审核/候选/上传直接在 SQL 中限定当前版本。每内容版本默认最多 20 个素材；`stale` 生成和轮询任务在创建 Provider 前幂等返回。
+- 迁移与运维：Alembic head 更新为 `9a7b2c3d4e5f`，备份/恢复默认版本同步，public 表数仍为 28。旧库升级使用 SQLite/PostgreSQL 方言内集合更新回填素材版本，不把全表 JSON 拉入应用内存；非法、非正整数和 32 位溢出值保守归为版本 1。普通创建索引仍可能锁大表，生产库应先在副本测量锁等待、WAL 和空间。
+- 验证：设置上下界、数量/累计字节超限、超限前后对象集合不变、素材数量超限、旧任务不调用 Provider、迁移数字/数字字符串/非法/溢出 JSON 回填和升降级均有回归；证据专项为 `46 passed, 37 subtests passed`，素材/迁移/安全/脚本定向为 `96 passed, 70 subtests passed`，最终迁移专项为 `15 passed`。本机全量为 `265 passed, 9 skipped, 167 subtests passed`，覆盖率 81.27%；9 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例。前端 ESLint、Vinext 构建与 2 项渲染测试、Next.js 生产构建均通过，`npm audit --audit-level=moderate` 为 0 漏洞；Alembic 单 head、`uv lock --check`、部署清单校验、PowerShell 备份脚本语法、`pip check` 和启用 UTF-8 的项目供应链审计均通过。[ContentFlow CI #33668048927](https://github.com/heee000/ContentFlow/actions/runs/33668048927) 在提交 `7bf99aa0b16cf9977faaedfcdf375c05d1c1d031` 上以真实 PostgreSQL/pgvector 与 MinIO 完成 `274 passed, 167 subtests passed`、覆盖率 82.19%，从而签收并发证据配额；四个 Job、前后端依赖审计、Prometheus、可复现源码/SBOM 与 SLSA/CycloneDX attestations 全部成功。Artifact `9861374770` 的摘要为 `sha256:facce3722cb5ca1ffb4627fc43b0788a0acc7134810e38faf0414b2c1e3e1c07`。
+- 保留边界：这一步只让参与事务完整性校验的集合有界，不等于工作区总存储治理。知识文件、素材对象、证据和发布包仍需统一的持久分配账本、并发预留、保留/归档、删除失败重试和孤儿巡检；不能用各表临时 `SUM` 冒充可靠总配额。
+
+## 2026-09-03 工作区存储账本与一致性治理阶段
+
+### CF-20260903-10：分散对象写入无法可靠执行工作区总配额
+
+- 状态：实现、迁移、专项测试、最终本地全量和界面构建已完成；远程 PostgreSQL/MinIO CI 仍待本阶段提交签收。
+- 问题与影响：知识、素材、发布证据、脚本包和人工导出分别直接写 local/S3；跨表临时求和既无法在并发下原子预留，也看不到已写物理对象但数据库事务回滚、删除失败和孤儿对象。合法并发上传可能超卖，失败路径可能少计费或永久泄漏对象。
+- 根因：对象存储只有 `put/read/delete/list` 能力，没有以工作区为单位的用量行、对象分配记录、预留状态机和数据库事务补偿协议。
+- 解决方案：新增 `workspace_storage_usage` 与 `storage_object_allocations`，以及 `LedgeredObjectStorage`。每次写入先在工作区用量行上原子预留字节和对象数，物理键带 allocation UUID，成功后把预留转为正式用量；数据库事务回滚会删除本次物理对象。默认可配置工作区字节/对象上限，旧对象大小未验证时新增写入失败关闭。
+- 提交前复核：发现包装器最初遗漏底层 `workspace_uri_prefix` 透传；虽然当前 Connector 只使用读写方法，后续把同一包装器交给对账会违反 `ObjectStorage` 协议。现已补齐方法和回归，避免适配器能力随包装层静默丢失。
+- 涉及文件：`contentflow/storage_ledger.py`、`entities.py`、`object_storage.py`、知识/素材/发布证据/发布与认证 Router、Worker、设置、Schema、`.env.example`、迁移 `b0c1d2e3f4a5` 及相关测试。
+- 验证：覆盖成功写入、配额拒绝、物理写失败、数据库回滚补偿、同一 Session 多次预留和真实 PostgreSQL 双线程并发只能一个成功；最后一项只有远程 CI 启动真实 PostgreSQL 后才可签收。
+
+### CF-20260903-11：同步尽力删除会提前释放配额并掩盖对象泄漏
+
+- 状态：可重试删除状态机和测试已完成，目标后端故障注入待远程签收。
+- 问题与影响：素材替换和过期脚本包过去在请求/Worker 内直接删除。后端暂时失败时业务记录已变化，系统既没有重试任务，也可能提前认为容量已释放；重复任务还可能重复扣减。
+- 解决方案：对象删除先将分配置为 `delete_pending` 并排入幂等 `storage.delete` Job；Worker 成功删除后在数据库行锁下只释放一次，失败则保留错误、尝试次数并继续计费。删除前按当前工作区的后端前缀再次校验 URI，跨工作区或非受管 URI 拒绝处理。
+- 兼容处理：素材替换在新对象提交成功后再请求旧对象删除；脚本包到期清理改为异步待办。共享旧 URI 不自动删除，见下一项。
+- 验证：覆盖删除失败后重试、重复执行、素材替换、脚本包过期、跨工作区 URI 拒绝，以及同 Session 计数不会被 SQL 表达式更新后的陈旧 ORM 状态覆盖。
+
+### CF-20260903-12：旧对象碰撞、缺失和大小漂移会造成误删或账本失真
+
+- 状态：迁移隔离和有界对账实现完成；大规模目标 Bucket 的扫描预算与内容哈希巡检未签收。
+- 问题与影响：旧命名规则允许多条 Knowledge/Asset/Evidence 记录共享同一 URI；机械回填后替换任一引用可能删除其他引用仍在使用的物理对象。数据库记录也无法主动发现已验证对象被外部删除或原地替换成不同大小。
+- 解决方案：迁移汇总旧 URI，重复引用统一标记 `shared_legacy + integrity_error`，运行时保守隔离并禁止自动物理删除。`storage.reconcile` 分页扫描当前配置后端，释放过期预留、补齐可核实旧大小、发现缺失和实际大小变化；缺失对象保守继续计费，大小变化按实际值修正用量并标为 `integrity_error`。跨页使用固定扫描开始水位，扫描期间的新对象不会在最终数据库反查时被误判缺失。
+- 孤儿处理：默认只报告超过 24 小时宽限期的未知物理对象；管理员必须明确选择清理，且界面再次确认。已有普通核对任务不能被误报成清理任务，升级请求返回 409。
+- 验证：覆盖共享 URI 迁移/删除隔离、已验证对象缺失、大小篡改、缺失后重新出现、过期预留、孤儿报告/清理、分页和扫描水位。
+
+### CF-20260903-13：管理员看不到配额、预留和一致性异常
+
+- 状态：API 与管理工作台已实现，隔离浏览器登录页、ESLint、TypeScript/Next 和 Vinext/SSR 已通过；真实管理员登录交互未在本轮使用账号执行。
+- 解决方案：新增管理员用量、对象异常列表和对账任务接口；异常列表只返回账本元数据，不暴露真实存储 URI。工作台增加“对象存储配额与一致性”区域，展示用量、对象数、预留、缺失、完整性异常和待删除数量，提供普通核对与二次确认的孤儿清理入口，并补齐紧凑响应式样式。
+- 设计边界：延续现有 Carbon 风格、方角、无阴影、主蓝色和 44px 操作目标；未引入新的视觉语言。对账当前由管理员手动触发，不是周期调度或自动告警。
+
+### CF-20260903-14：迁移、恢复和运行边界需要与新账本同步
+
+- 状态：仓库契约已更新；当前 30 表 PostgreSQL + 对象存储联合恢复仍待重新演练。
+- 解决方案：Alembic head 更新为 `b0c1d2e3f4a5`，最低 public 表数从 28 更新为 30，本地/公网备份验证脚本同步。未版本化接管只接受两张账本表完整成组且依赖表存在，半迁移失败关闭；回填采用有界批次，避免把全部旧对象一次装入应用内存。
+- 保留边界：迁移仍会扫描旧对象引用和创建索引，大数据量 PostgreSQL 必须先在副本测量锁等待、WAL、空间和运行时间，并在维护窗口由单独迁移任务执行。S3 版本历史、Object Lock、云账单和旧后端切换后的对象不在当前逻辑账本范围内。
+
+### 本阶段验证与交付边界
+
+- 存储账本、迁移、管理、素材和脚本清理专项为 `40 passed`；补齐对象协议透传后定向回归为 `20 passed, 14 subtests passed`，最终本机全量为 `281 passed, 11 skipped, 167 subtests passed`，分支覆盖率 80.52%。11 项均为本机没有启动 PostgreSQL/MinIO 的外部服务用例，不能冒充真实并发或对象后端签收。
+- Ruff、Python 编译、`uv lock --check`、Alembic 单 head `b0c1d2e3f4a5`、PowerShell 语法、公网部署 fail-closed 校验、`pip check`、Python/npm 漏洞审计、ESLint、Next.js/TypeScript 生产构建、Vinext/Sites 构建与 2 项 SSR 渲染测试均通过。本机 WSL Bash 服务被宿主 ACL 拒绝；变更只同步脚本中的 head/表数，Linux 语法和实际契约必须由远程 CI 重新签收。
+- 本阶段没有读取真实 `.env`/账号文档，没有调用微信公众号或其他平台，没有创建草稿、素材或公网资源。公网部署继续冻结，数据库 FORCE RLS/角色拆分继续等待单独高影响授权。
+- 只有普通推送后的 GitHub Linux + PostgreSQL/pgvector + MinIO、前后端依赖审计、Prometheus、可复现源码/SBOM 和 attestation 全部成功，才能把本阶段标记为远程签收。
+
+### CF-20260903-15：Linux 暂存文件名在最终截断前已超过文件系统上限
+
+- 状态：远程 CI 发现，跨平台修复、本地定向验证和修复提交完整远程 CI 均已完成。
+- 发现方式：实现提交 `69786fa` 的 CI `33678743444` 中，前端与 SBOM 成功，后端真实 PostgreSQL/MinIO 运行到 `test_generated_physical_name_stays_within_filesystem_byte_limit` 时失败。最终对象名虽已按 UTF-8 截断至 255 字节，但写入阶段先使用了“随机前缀 + 原始长文件名 + `.uploading`”，Linux 在打开暂存文件时即返回 `Errno 36`；Windows 本地没有暴露该差异。
+- 解决方案：暂存文件名改为只含固定点前缀、32 位随机十六进制和 `.uploading`，不再携带用户文件名；最终文件名、扩展名、校验和和分配 ID 规则保持不变。异常清理也因此始终操作合法短路径。
+- 验证：本地对象存储/账本专项为 `16 passed, 14 subtests passed`，Ruff 通过。修复提交 `1496cc9aaf9ab02753dd2e87377cb7a30debcef1` 的 [CI #33679198143](https://github.com/heee000/ContentFlow/actions/runs/33679198143) 在 Linux 上通过该长中文文件名回归，并继续完成真实 PostgreSQL/MinIO 全量、依赖审计和供应链证明。失败运行只保留为问题发现证据，不作为最终签收。
+
+### 本阶段远程交付证据
+
+- 实现提交 `69786faad32e3fc231ac6a53ceaa9289972a84f1` 与跨平台修复提交 `1496cc9aaf9ab02753dd2e87377cb7a30debcef1` 均以 `John Wang <182348029+heee000@users.noreply.github.com>` 普通推送到 `codex/enterprise-media-runtime`，未使用 force 或 force-with-lease。
+- [ContentFlow CI #33679198143](https://github.com/heee000/ContentFlow/actions/runs/33679198143) 四个 Job 全部成功：真实 PostgreSQL/pgvector 与 MinIO 后端为 `292 passed, 167 subtests passed`，分支覆盖率 81.62%；Prometheus 配置/规则/规则单测、Python/npm 审计、前端 lint/test/两套生产构建、可复现源码与 SBOM 均通过。
+- 供应链 Artifact `9865599206` 名为 `contentflow-supply-chain-1496cc9aaf9ab02753dd2e87377cb7a30debcef1`，摘要 `sha256:5d438a812060e07e0a2d3bfa2bfa3c2f1292c96da3e84becd105daa254639be3`；SLSA 来源证明和 Python/前端 CycloneDX attestations 已发布并反向验证。
+
+## 2026-09-03 自动存储核对与运维闭环阶段
+
+### CF-20260903-16：存储核对只能人工触发，异常可能长期静默
+
+- 状态：自动只读调度、Worker 接入与多副本去重已实现；真实 PostgreSQL 并发仍待本阶段远程 CI 绑定提交签收。
+- 问题与影响：统一账本能发现缺失、大小漂移和孤儿，但必须管理员主动点击。若长期不操作，损坏对象、过期预留和孤儿候选会持续存在；若直接让多个 Worker 定时建 Job，又会产生重复任务和失败热循环。
+- 解决方案：任一 Worker 在领取普通任务前调用有界到期扫描。默认每 24 小时、每轮 25 个工作区；PostgreSQL 对 Workspace 使用 `FOR UPDATE SKIP LOCKED`，每个工作区复用固定入口幂等键。活动任务不重复，终态失败按核对周期冷却后才允许计划重启；管理员仍可立即人工重启。新工作区把创建时间作为首个周期起点，迁移旧工作区的空水位会逐批进入首次巡检。
+- 安全边界：所有自动任务固定 `delete_orphans=false`，只能核对和修正账本计量，不能删除孤儿。人工删除路径、二次确认和 409 升级保护保持不变；公网部署冻结期间没有调用外部平台或创建云资源。
+- 涉及文件：`contentflow/storage_ledger.py`、`worker.py`、`routers/admin.py`、`settings.py`、`.env.example` 及存储/Worker/PostgreSQL 测试。
+
+### CF-20260903-17：存储异常没有指标、告警和统一处置入口
+
+- 状态：低基数 Prometheus 指标、三类告警、promtool 行为场景、Grafana 面板和 runbook 已实现；固定 Prometheus 镜像验证待远程 CI。
+- 问题与影响：管理员页面只在有人打开时可见，无法让缺失/完整性错误、核对超期/失败和删除积压主动进入运维流程。
+- 解决方案：数据库 collector 聚合 allocation 固定状态、used/reserved 字节与对象数、unverified 数、调度开关、超期工作区、失败核对 Job 和最老 `delete_pending` 时长。标签只包含受控的 `status/state`，不包含 workspace、对象 URI 或 Job ID；多 API 副本继续用 `max` 去重。
+- 告警与看板：新增 `ContentFlowStorageIntegrityAnomaly`、`ContentFlowStorageReconciliationOverdue` 和 `ContentFlowStorageDeleteBacklog`，分别约束 5/15/15 分钟持续时间；Grafana 从 11 扩为 14 个只读面板，展示 allocation 状态、核对健康和最老删除积压。runbook 明确先核对、再备份、最后人工确认删除，告警恢复不等于历史 Bucket/备份副本已清理。
+- 涉及文件：`contentflow/observability.py`、Prometheus 规则/行为测试、Grafana Dashboard、可观测资产测试、`deploy/observability/README.md` 与 `docs/operations.md`。
+
+### CF-20260903-18：到期调度缺少索引、删除积压缺少稳定时间语义
+
+- 状态：向前迁移、模型索引和恢复契约同步已实现。
+- 问题与影响：按 `last_reconciled_at` 找到最久未核对的工作区如果没有索引，工作区规模增加后会全表排序；若以 allocation 的 `updated_at` 计算删除积压，每次失败重试都会刷新时间并延后告警。只改模型又会让既有数据库、备份校验和公网恢复脚本与运行时声明不一致。
+- 解决方案：新增迁移 `c1d2e3f4a5b6`，增加 `(last_reconciled_at, workspace_id)` 索引和专用 `delete_requested_at`。新删除请求只写一次时间，失败重试不重置；既有 `delete_pending` 记录用迁移时可获得的 `updated_at` 保守回填。迁移不改写已发布的 `b0c1d2e3f4a5` 历史，`HEAD_REVISION`、本地备份/恢复和公网隔离恢复校验同步；public 表门槛仍为 30。
+- 边界：普通 `CREATE INDEX` 在大生产表上仍可能产生锁等待、WAL 和额外空间；正式目标库必须先在副本测量并安排维护窗口，不能把 SQLite/CI 时间当作容量结论。
+
+### 本阶段验证与交付边界
+
+- Ruff、锁文件、公网部署 fail-closed 校验和 Alembic 单 head 通过；本机全量为 `286 passed, 12 skipped, 171 subtests passed`、分支覆盖率 80.75%。12 项均为本机未启动的 PostgreSQL/MinIO 外部服务用例，其中包含本阶段双 Worker 调度去重；固定 Prometheus、真实 PostgreSQL `SKIP LOCKED` 与 MinIO 的补充签收见本节末尾远程证据。
+- 本轮没有读取或修改 `.env`、平台账密、模型缓存、备份或运行数据，没有调用微信公众号/其他平台，也没有恢复公网部署。`knowledge/北京周末 CityWalk 路线助手产品资料.txt` 继续保持未跟踪且禁止读取、修改、暂存或提交。
+- 只显式暂存本阶段文件，使用 John Wang 身份普通推送；不使用 force 或 force-with-lease。
+- 实现提交 `9c822cc3b175b53d29e5dabb868dc754c0ad795e` 已以 John Wang 身份普通推送。[ContentFlow CI #33683730898](https://github.com/heee000/ContentFlow/actions/runs/33683730898) 四个 Job 全部成功：固定 Prometheus 3.13.1 的配置、规则与行为测试通过；真实 PostgreSQL/pgvector 与 MinIO 为 `298 passed, 171 subtests passed`、覆盖率 81.89%，从而签收双 Worker 调度去重、迁移和对象后端；前端 lint/test/build/audit、Python 审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9867276819` 摘要为 `sha256:0401d311bbb01c36c1fa8216c8c7902446a5510b70b18756b3b7bafe02345b2c`。
+
+### CF-20260903-19：日级存储计划被秒级队列轮询重复查询
+
+- 状态：独立检查节流、配置边界、Worker 行为回归、运维说明、完整本地门禁与远程 CI 均已签收。
+- 问题与影响：`Worker.run_once()` 原先在领取每个普通任务前无条件查询到期工作区。默认队列轮询为 1 秒，因此每个空闲 Worker 每秒执行一次面向 24 小时周期任务的数据库查询；副本越多，固定空闲查询开销越大。
+- 根因：工作区核对周期、每轮工作区上限已经独立配置，但没有定义“多久检查一次是否到期”的进程内调度频率，队列活跃度被错误地当作日级计划时钟。
+- 解决方案：新增 `CONTENTFLOW_STORAGE_RECONCILE_SCHEDULE_POLL_SECONDS`，默认 60 秒且限制在 5 至 3600 秒。每个 Worker 启动后立即检查一次，随后使用不受系统时钟回拨影响的单调时钟设置下一次检查；截止时间在查询前推进，连续队列轮询不会重复扫描。进程内节流只负责降低负载，跨 Worker 正确性仍由 PostgreSQL `SKIP LOCKED` 与固定幂等入口保证。
+- 验证边界：连续两次空闲 `run_once()` 只允许一次到期扫描；原有 Worker 到期核对端到端用例仍要求任务创建并以 report-only 模式成功执行。节流最多增加配置值对应的到期发现延迟，不改变 24 小时工作区周期，也不自动删除孤儿。
+- 本地证据：Ruff 全仓通过；Worker/队列/设置定向为 `60 passed, 45 subtests passed`；全量为 `287 passed, 12 skipped, 173 subtests passed`、分支覆盖率 80.76%，12 项均为本机未启动的 PostgreSQL/MinIO 外部服务场景。`uv lock --check`、公网部署 fail-closed 校验、`pip check`、Python 漏洞审计和两份 PowerShell 备份脚本语法通过；前端 ESLint、Vinext/Sites 构建、2 项 SSR 渲染测试、Next.js 生产构建与 npm 中等级别漏洞审计通过。
+- 远程证据：实现提交 `5022dfb9581893576eab140f52ada72c073b7086` 已以 John Wang 身份普通推送；[ContentFlow CI #33685818900](https://github.com/heee000/ContentFlow/actions/runs/33685818900) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `299 passed, 173 subtests passed`、分支覆盖率 81.90%；Prometheus、前后端依赖审计、双前端构建、可复现源码/SBOM、SLSA 来源证明与双 CycloneDX attestations 均通过。Artifact `9868068572` 摘要为 `sha256:daf540d85f7c8798115add306de02c973b971526bf2f18c82526c197523980b1`。
+
+## 2026-09-03 发布对账恢复扫描公平性阶段
+
+### CF-20260903-20：活动对账任务可占满恢复批次并饿死后续缺失任务
+
+- 状态：公平候选查询、独立节流、批次配置、索引迁移、部署配置、完整本地门禁和真实 PostgreSQL/MinIO CI 均已签收。
+- 问题与影响：Worker 原先每次默认 1 秒轮询都选择最老 100 条微信 submitted 记录，随后才在 Python 中发现其幂等对账 Job 已 queued/retry/running。超过批次时，最老活动任务会反复占据窗口，后面的历史缺失任务可能永久无法补建；即使没有缺失，也会给每个空闲 Worker 增加一条全局查询。
+- 根因：候选条件没有把关联 Job 状态下推数据库，队列轮询节拍又被复用为恢复扫描时钟；`publish_jobs` 只有单列 status 和工作区分页索引，没有支撑跨工作区按状态/更新时间恢复扫描的复合索引。
+- 解决方案：使用确定幂等键外连接 Job，在 `LIMIT` 前只保留无 Job 或终态 Job 的 submitted 记录；活动 Job 直接排除，终态 Job 仍原位清理并重排。新增独立 60 秒扫描间隔和 100 条批次上限，两者均有显式安全范围；Worker 使用单调时钟节流。迁移 `d2e3f4a5b6c7` 新增 `(status, updated_at, id)` 索引，并同步运行时 head 与三套备份/恢复校验。本地 API/Worker Compose 及公网共享环境显式透传存储和发布恢复边界，避免 `.env.example` 的调整被容器忽略。
+- 兼容与安全：正常 `publish.dispatch` 仍即时创建对账 Job，扫描最多一分钟延迟只影响异常恢复；微信仍必须有确定 `publish_id`，不对抖音做模糊匹配，不重新调用发布接口，不改变人工接管或失败终态。
+- 初步证据：SQLite 公平性用例把两个活动任务放在批次前方并设 `limit=1`，后续缺失任务仍被补建；连续两次空闲 Worker 只执行一次存储和发布维护扫描。设置边界、迁移升降级、Compose 参数透传和公网恢复契约共同通过 7 项定向回归，公网配置通过 fail-closed 渲染；完整证据将在本阶段签收后补充。
+- 本地证据：Ruff 全仓、Alembic 单 head、两套 Compose 渲染和公网 fail-closed 校验通过；相关完整定向为 `81 passed, 10 skipped, 49 subtests passed`，本机全量为 `290 passed, 13 skipped, 177 subtests passed`、分支覆盖率 80.77%。`uv lock --check`、`pip check`、Python 漏洞审计、两份 PowerShell 备份脚本语法、前端 ESLint、Vinext/Sites 构建、2 项 SSR 渲染测试、Next.js/TypeScript 生产构建与 npm moderate 审计 0 漏洞均通过。13 项跳过均为本机未启动的 PostgreSQL/MinIO 外部服务场景，不能代替远程 PostgreSQL 公平性和 MinIO 签收。
+- 远程证据：实现提交 `1ba8251be9f75c1c4d52d41cba0ff317c6acffe0` 已以 John Wang 身份普通推送；[ContentFlow CI #33688561251](https://github.com/heee000/ContentFlow/actions/runs/33688561251) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `303 passed, 177 subtests passed`、分支覆盖率 81.91%；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9869112197` 摘要为 `sha256:c716780bb2f62e63f443e2ae0ff2c247a0fbb85e0aced27d1cffaad0913862e5`。
+
+### CF-20260903-21：Worker 把数据库可用性故障混入业务失败且立即退出
+
+- 状态：严格异常分类、有界抖动退避、可中断停机、脱敏终止、配置透传、完整本地回归和真实 PostgreSQL/MinIO CI 已签收；目标环境断网演练仍待完成。
+- 问题与影响：领取/维护查询遇到数据库错误会让服务立即退出；Handler 或完成提交阶段的数据库错误会先进入通用 `fail_job`，可能把基础设施瞬断错误持久化为业务失败，并使已发生外部副作用的任务看起来可以按普通失败恢复。
+- 根因：`run_forever()` 没有数据库故障边界，`run_once()` 又用单个 `except Exception` 同时处理 Provider/领域失败和 SQLAlchemy 基础设施异常；Compose 只透传 heartbeat/stale/queue 参数，poll/lease/max-attempts 及新的恢复预算无法由 env 实际调整。
+- 解决方案：只将连接断开、接口/操作错误、连接池超时和 invalidated DBAPI 连接归为可用性故障，在 `fail_job` 前重新抛出；约束/编程错误不重试。服务模式按 1 秒至 30 秒指数退避，默认 8 次、20% 抖动，成功后清零，停机 Event 可中断等待；耗尽后用脱敏错误退出交给编排器。维护扫描截止在故障后重置。数据库可用性心跳/恢复日志不输出异常正文。
+- 配置交付：本地 API/Worker 与公网共享 backend environment 显式传递 poll、lease、Job max-attempts、heartbeat、stale、queue-stall 和四个数据库恢复参数；env 模板、设置模型、公网 fail-closed 校验与文本契约同步。
+- 本地证据：定向 `61 passed, 59 subtests passed`；全量 `299 passed, 13 skipped, 187 subtests passed`、分支覆盖率 80.86%。覆盖一次恢复、退避/抖动/上限、终止可中断、耗尽、非可用性错误不重试、Job 不被误记失败、日志脱敏、设置和公网部署边界。全仓 Ruff、锁文件、`pip check`、Python 漏洞审计、编译、Alembic 单 head、双 Compose、公网 fail-closed、备份脚本语法、前端 lint/双构建/2 项 SSR/npm moderate 审计均通过。13 项跳过仍是本机未启动的 PostgreSQL/MinIO，不能冒充真实断网/主从切换演练。
+- 验证过程：首次全量回归有 3 个新增日志断言失败，原因是其他测试加载 Alembic 后遗留 `contentflow.worker` logger disabled 状态；定向运行没有复现。测试改为显式隔离并恢复 logger 状态后，原 3 项和两次完整全量均通过。产品入口原本已在迁移后调用 `configure_worker_logging(force=True)`，因此没有借测试修复掩盖运行时缺陷。
+- 远程证据：实现提交 `b3f2d6a19516d9265d9d2c8b32ff6be14b078f8c` 已以 John Wang 身份普通推送；[ContentFlow CI #33691253662](https://github.com/heee000/ContentFlow/actions/runs/33691253662) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `312 passed, 187 subtests passed`、分支覆盖率 81.99%；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9870116498` 摘要为 `sha256:6c8207ee31365941f739509add585a8c803e1deb0023988bafcee41f8f7b76cf`。
+- 剩余边界：默认名义等待约 121 秒，随后下一次失败退出；处理中断的 Job 最多等待租约到期。没有 PostgreSQL kill/restart、DNS/网络分区、连接池耗尽、多 Worker 惊群、编排器 restart/backoff 或恢复 RTO 证据；同数据库无法在完全断连时承载 degraded 状态，仍依赖 stale/API-down、集中日志和外部编排指标。
+
+### CF-20260903-22：OperationalError 粗分类混淆事务冲突、断库和永久错误
+
+- 状态：SQLSTATE 分类、Job/Worker 分层处置、发布副作用保护、日志与持久化脱敏、单元回归、真实 PostgreSQL 驱动用例和完整远程 CI 均已签收。
+- 问题与影响：上一阶段为避免数据库瞬断被误记为业务失败，保守地把全部 `OperationalError` 作为可用性故障。但 PostgreSQL 的序列化失败、死锁、锁竞争、语句取消、鉴权失败和坏迁移都可能由相同包装抛出；它们全部等待租约或进程退避会延迟恢复并掩盖永久错误。直接按异常类缩窄又会让已开始平台调用的发布任务进入普通自动重试，产生重复发布风险。
+- 解决方案：从 SQLAlchemy/DBAPI 异常图中安全提取 SQLSTATE，区分 availability、transaction_retryable、lock_contention、query_interrupted 和 permanent。无 SQLSTATE 的 OperationalError 保守回退 availability；Data/Integrity/Programming 错误及其他有效 SQLSTATE 作为永久错误一次终结；可恢复状态使用现有有界退避。Handler 内数据库错误只保存类别、SQLSTATE 和异常类型；SQL、参数、连接地址和驱动正文不写 Job/日志。
+- 发布一致性：当 `publish.dispatch` 的领域状态已经是 `publishing`，任何已识别数据库错误都按结果不确定处理，立即转 `reconciliation_required` 并终结原队列尝试；审计 reason 为 `database_<kind>_after_dispatch`。未开始远端写入的事务冲突仍可按 Job 退避，不统一牺牲吞吐。
+- 验证：全仓 Ruff、定向 `35 passed, 9 subtests passed` 及本机全量 `306 passed, 14 skipped, 196 subtests passed`、80.96% 分支覆盖率均通过；14 项跳过仅是本机未启动的 PostgreSQL/MinIO。锁/依赖/漏洞、编译、迁移、双 Compose、公网失败关闭、备份脚本和全部前端门禁通过。PostgreSQL 集成测试使用真实 statement timeout、表锁 NOWAIT 和缺表语句验证 psycopg 的 `57014/55P03/42P01`，并由下一条远程证据签收。剩余真实 kill/restart、网络、池耗尽、主从切换和多 Worker 恢复时延不在本条完成范围内。
+- 远程证据：实现提交 `9c2a6518dc7258ee354e7f7632bc6cfa9ae54797` 已以 John Wang 身份普通推送；[ContentFlow CI #33694647116](https://github.com/heee000/ContentFlow/actions/runs/33694647116) 四个 Job 成功。真实 PostgreSQL/pgvector 与 MinIO 为 `320 passed, 196 subtests passed`、覆盖率 82.10%；真实 SQLSTATE、前端、Prometheus、依赖审计、可复现源码/SBOM、SLSA 与 CycloneDX 均通过。Artifact `9871335459` 摘要为 `sha256:ef9f75479585b2552c77c59231f78fb2849efc44521b08c3691c57b4f4da65a0`。
+
+### CF-20260903-23：序列化失败与死锁分类仍只依赖伪造 SQLSTATE
+
+- 状态：真实双事务故障生成、驱动分类、脱敏断言、完整本地回归和远程 PostgreSQL/MinIO/供应链门禁均已签收。
+- 问题与影响：`40001` 和 `40P01` 已进入 Worker 安全重试矩阵，但此前只用人工构造的 SQLAlchemy 包装异常验证。若 psycopg 的实际包装链、事务失败位置或诊断字段与假对象不同，生产中的序列化失败/死锁可能落入错误类别；仅凭伪造属性不能作为真实数据库证据。
+- 根因：上一阶段真实 PostgreSQL 用例只制造了语句超时、NOWAIT 锁竞争和缺表，尚未建立两个并发事务必然形成冲突的有界编排。
+- 解决方案：在模块级随机临时数据库中创建专用探针表。序列化场景让两个 `SERIALIZABLE` 事务先读取同一版本，再通过 Barrier 同步更新同一行，要求恰好一个提交、一个由 PostgreSQL 返回 `40001`；死锁场景让两个事务分别先锁定一行，再以相反顺序更新另一行，要求恰好一个提交、一个返回 `40P01`。捕获的真实 SQLAlchemy/psycopg 异常直接进入 `database_error_sqlstate`、`classify_database_error` 和 `sanitized_database_error`，两者必须归为 `transaction_retryable`，且摘要不能包含探针 SQL/表名。
+- 稳定性与清理：事务内 `statement_timeout=10s`、Barrier 10 秒、Future 15 秒共同限制悬挂；任何路径都回滚失败事务，并在 `finally` 中删除探针表。整个集成数据库本身仍由既有 fixture 使用安全随机名称创建、终止残留连接并精确删除，不接触持久库。
+- 代码范围：仅修改 `tests/test_postgres_integration.py`，没有改 API、领域状态、生产 Worker、配置、迁移或外部平台行为。
+- 本地证据：`uv lock --check`、全仓 Ruff 和完整后端覆盖率门禁通过；结果为 `306 passed, 14 skipped, 196 subtests passed`、分支覆盖率 80.96%。14 项跳过均为本机 Docker/PostgreSQL/MinIO 未运行，本地结果不冒充真实事务冲突签收。
+- 远程证据：实现提交 `a65a411fe2d8db46db2c2746be19dad4b1cc1765` 已以 John Wang 身份普通推送；[ContentFlow CI #33696052795](https://github.com/heee000/ContentFlow/actions/runs/33696052795) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `320 passed, 196 subtests passed`、分支覆盖率 82.10%，并实际走过 `40001/40P01` 并发断言；前端、Prometheus、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 均通过。Artifact `9871817974` 摘要为 `sha256:6549a79f8875e86ce3d05835c18334734dc5796d0b47bd48fc9d4ad46d902f5c`。
+- 剩余边界：这证明真实驱动异常可被正确解析，不证明实际 Job Handler 在目标负载下发生冲突后的端到端回滚、重排与吞吐，也不替代数据库 kill/restart、DNS、网络分区、池耗尽、主从切换和多 Worker 恢复 RTO 演练。
+
+### CF-20260903-24：Worker 连接恢复仍只由构造异常证明
+
+- 状态：一次性 PostgreSQL service container 的真实 stop/start、同进程 Worker 恢复、日志脱敏、完整本地回归和远程供应链门禁均已签收。
+- 问题与影响：服务级数据库退避此前只通过构造的 SQLAlchemy 异常验证。即使分类和等待算法正确，连接池中的失效连接、psycopg 实际错误链、数据库重启就绪窗口或 WorkerNode 心跳都可能让真实恢复路径失败。
+- 根因：现有 PostgreSQL 集成测试拥有随机临时数据库，却没有获得只属于当前 CI Job 的服务容器句柄；直接按名称或端口停止容器会扩大误操作范围，本地运行也可能影响用户数据库。
+- 解决方案：仅在 PostgreSQL/MinIO 集成步骤注入 GitHub Actions 创建的 service container ID。控制器仅允许 `start/stop`，验证 12–64 位十六进制 ID，使用无 shell 参数数组和 30 秒超时；缺少 ID 时测试安全跳过。同一个 Worker 先完成 before-restart Job，容器停止后必须报告脱敏 availability 重试且保持存活；容器启动并通过 `SELECT 1` 后再完成 after-restart Job并自行停止。
+- 正确性与安全断言：两次探针都只有一次 attempts、无 `last_error`，顺序恰为 before/after；恢复日志不得包含 `@` 或 `127.0.0.1`，退出后的 `worker_nodes` 必须为 `stopped`。`finally` 会在容器仍处于停止状态时先恢复数据库，再请求 Worker 停止，不触碰持久环境。
+- 测试参数边界：CI 用例采用 0.1–0.5 秒、100 次的专用预算，并以 15 秒限制容器启动到新 Job 完成，目的是给故障注入设置上界。它不验证生产默认 1–30 秒、8 次预算，也不是统计 RTO/SLO。
+- 本地证据：`uv lock --check`、全仓 Ruff、完整后端为 `306 passed, 15 skipped, 196 subtests passed`、分支覆盖率 80.96%；新增用例因本机没有 CI service container ID 而跳过。前端 lint、Vinext/Sites、2 项 SSR 和 Next.js/TypeScript 生产构建通过。
+- 远程证据：实现提交 `6b972e28e31388704d23c833df6f99f0e99d90c7` 已以 John Wang 身份普通推送；[ContentFlow CI #33697780446](https://github.com/heee000/ContentFlow/actions/runs/33697780446) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `321 passed, 196 subtests passed`、覆盖率 82.15%，Python 已知漏洞为 0；前端、Prometheus、npm、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 均通过。Artifact `9872418882` 摘要为 `sha256:fd7ce858d9e631dc8525ef192e7cc828dcf34dc8ace26c97b66903e7440d91fa`。
+- 剩余边界：当前仅证明一个空闲 Worker 经历一次数据库优雅 stop/start 后恢复。尚未覆盖 Handler/提交中途断库、Worker SIGKILL、租约接管、多 Worker 惊群、crash、DNS、网络分区、池耗尽、主从切换和长期恢复分位数。
+
+### CF-20260903-25：在途 Job 的进程崩溃接管缺少真实 PostgreSQL 证据
+
+- 状态：独立 Worker 进程 SIGKILL、租约前负向检查、租约后接管、attempt fencing、节点 stale/stopped 语义、本地回归及远端供应链门禁均已签收。
+- 问题与影响：单元测试能够手工改写 `locked_by/attempt`，数据库 stop/start 测试也能证明空闲 Worker 恢复，但都没有让真实 Handler 在进程突然消失后留下已提交租约。若 LeaseHeartbeat、进程连接关闭、过期比较或第二 Worker 的领取事务存在偏差，任务可能永久卡住或被提前双重执行。
+- 根因：此前没有一个可在独立进程中安全阻塞、发出“已进入 Handler”信号且绝不触发外部副作用的集成探针，也没有把 kill、未过期拒绝和过期接管串成同一真实 PostgreSQL 用例。
+- 解决方案：使用 spawn 独立进程创建专用 Worker；它领取 `postgres.worker.crash.probe`、提交 attempt=1 并在无副作用 Handler 中阻塞。父测试确认真实数据库状态后强制 kill，Linux 必须返回 `-SIGKILL`。第二 Worker 在 6 秒租约过期前的 `run_once()` 必须为空，随后服务循环自动接管为 attempt=2 并写入唯一成功结果。
+- 节点语义：被 kill 的 WorkerNode 必须保持 online/stopped_at=null 且最终 heartbeat 超过 stale 阈值，正常恢复 Worker 必须写入 stopped。运维端因此不能把 online 当作进程存活，仍须结合 heartbeat 和独立编排器指标。
+- 隔离与清理：只使用模块 fixture 创建的随机临时数据库；用例先终结该库中旧的 runnable Job 和 submitted 发布探针，避免互相领取。`finally` 强制回收仍存活的子进程并停止恢复线程，不触碰持久数据库或平台。
+- 本地证据：`uv lock --check`、全仓 Ruff、完整后端为 `306 passed, 16 skipped, 196 subtests passed`、覆盖率 80.96%；本机没有 PostgreSQL 服务，因此新集成用例安全跳过。
+- 远程证据：实现提交 `b2b01ca5153a611167024dff9095af21ba61fcc3` 已以 John Wang 身份普通推送；[ContentFlow CI #33699168801](https://github.com/heee000/ContentFlow/actions/runs/33699168801) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `322 passed, 196 subtests passed`、覆盖率 82.15%，Python 无已知漏洞；前端、Prometheus、npm、可复现源码/SBOM、SLSA 与双 CycloneDX attestation 全部通过。Artifact `9872885169` 摘要为 `sha256:679207f6e4dc315db35124acb528322f24cf906802c555dafa7ec94329ed79c0`。
+- 剩余边界：探针 Handler 无业务副作用且在结果提交前被杀；尚未覆盖内置 Handler、完成提交丢失、旧执行者网络隔离后重新出现、多 Worker 惊群、生产 300 秒租约和外部调用去重/补偿。
+
+### CF-20260903-26：计费 Provider Job 在异常或租约过期后可能被盲目重放
+
+- 状态：生产 Handler 恢复策略注册表、配置感知决策、领取层防绕过、原子领域失败、本地全量门禁和真实 PostgreSQL CI 已签收；Provider 请求账本和专用人工核对工作流仍待实现。
+- 问题与影响：Job 的入队幂等键只能防止重复建队列记录，不能让外部文本/Embedding 请求 exactly-once。`workflow.execute`、`prompt_eval.execute` 和远程 `knowledge.index` 若在 Provider 已处理后抛错，或 Worker 在结果提交前崩溃，原通用退避/过期租约接管会再次调用 Provider，可能重复计费并产生不同结果。
+- 根因：`claim_next_job()` 对所有过期 running Job 一视同仁；`fail_job()` 对所有非终态异常统一退避。现有 attempt fencing 只拒绝旧 Worker 写回数据库，不能撤销或去重已经发生的外部调用。媒体和发布已有不同的幂等/状态机边界，但这些差异此前只存在于分散实现和文档，没有形成强制注册表。
+- 解决方案：为全部 12 个生产 Handler 声明五类恢复策略，注册表与 Handler 集合必须完全一致。文本工作流和 Prompt Eval 始终人工核对；OpenAI-compatible Embedding 人工核对，本地 BGE/Hash 可自动恢复。租约扫描原子终结人工核对 Job 及领域状态，领取查询也排除所有此类过期记录；Handler 普通错误同样直接终结，不进入自动退避。操作者核对外部活动后仍可通过现有显式重试入口恢复。
+- 并发与事务：PostgreSQL 扫描使用 `FOR UPDATE SKIP LOCKED` 且每轮最多 100 条；领取条件的独立排除保证第 101 条也不会被盲重放。Job、Workflow/Prompt Eval/Knowledge 状态及审计在同一事务提交，消除队列失败与页面 running 之间的二阶段窗口。
+- 验证：本机全量为 `310 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.02%；Ruff、锁文件、依赖/漏洞、编译、迁移、公网部署校验和全部前端门禁通过。实现提交 `a1b38fed51c3d1193026619c0d67daae3d28ad54` 的 [CI #33701395214](https://github.com/heee000/ContentFlow/actions/runs/33701395214) 四个 Job 成功；真实 PostgreSQL/pgvector 与 MinIO 为 `327 passed, 196 subtests passed`、覆盖率 82.24%，Python 无已知漏洞，供应链 Artifact `9873652701` 摘要为 `sha256:8700cea0b2d9ea8e969bb47625b8f04479965cc20ce590c20197b9d952058545`。
+- 剩余边界：这是 fail-closed，不是 Provider exactly-once。当前仍以通用 failed 状态承载人工核对，缺少请求/费用账本、供应商侧查询、核对证据、负责人和 SLA；脚本包/对象写入、媒体真实调用、完成提交丢失和网络分区旧 Worker 仍待故障注入。本轮未调用真实 Provider 或平台。
+
+### CF-20260903-27：Provider 人工核对仍借用通用失败状态且可被误重试
+
+- 状态：专用状态、持久核对记录、权限与数据库约束、审计链、前端处置、指标告警、迁移/恢复契约、本地门禁及真实 PostgreSQL/MinIO CI 均已签收。
+- 问题与影响：上一阶段虽然阻止了 Worker 自动重放，但风险任务仍显示为通用 failed；editor 可以看到同一个通用重试入口，核对依据、操作者、结论和时间没有结构化留痕，积压也没有独立指标。人工流程依赖错误文字和外部工单，容易把“ContentFlow 没保存结果”误判为“供应商没有执行”。
+- 解决方案：新增 `job_manual_reviews` 和 `manual_review` 状态。Provider 结果不确定或租约过期时，Worker 在同一事务中创建含原因码、风险说明和检查步骤的未关闭核对；部分唯一索引保证一个 Job 同时最多一条未关闭记录，数据库检查约束保证关闭时必须 `provider_checked=true`、结论为 retry/abandon 且备注不少于 8 个字符。策略注册表抽到独立模块，Worker 与 API 共享同一高风险任务集合。
+- 权限与防绕过：只有 reviewer/admin 能调用 `POST /jobs/{id}/manual-review`；PostgreSQL 下同时锁定 Job 和未关闭核对记录。允许重试会清零 attempts 并立即排队，放弃会保留失败和原始错误。通用 retry 同时拒绝当前 `manual_review` 和旧版 failed 形式的高风险任务，不能借兼容入口绕过核对。请求与处置都进入防篡改审计链，核对备注留在专用表而不复制进审计元数据。
+- 产品与运维：任务页明确说明为何需要核对、要查什么、何时可以重试，要求确认框和书面依据，并为执行按钮提供忙碌状态；editor 只看到权限提示。Dashboard、Worker health、Prometheus 和 Grafana 增加待核对数量与最老时长，最老未处理记录超过 1 小时并持续 15 分钟触发 `ContentFlowJobManualReviewOverdue`。迁移 head 更新为 `e3f4a5b6c7d8`，公开表校验门槛更新为 31，备份/恢复脚本同步。
+- 本地证据：完整后端为 `312 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.17%；17 项均为本机未配置的 PostgreSQL/MinIO/CI 容器场景。全仓 Ruff、Python 编译、Alembic 单 head、`uv lock --check`、`pip check`、公网部署 fail-closed 校验、前端 lint/test/双生产构建和 npm moderate 审计 0 漏洞通过。
+- 远程证据：实现提交 `3ce6e6259ddf56738b37146435ad44d2c4a3dfb2` 已以 John Wang 身份普通推送；[ContentFlow CI #33704597235](https://github.com/heee000/ContentFlow/actions/runs/33704597235) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `329 passed, 196 subtests passed`、覆盖率 82.36%；部分唯一索引、行锁处置、Prometheus 行为测试、前端构建、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部签收。Artifact `9874760182` 摘要为 `sha256:94f2c8060028bfa9305a1eafc3b63ac5dfa62b4639e412e1b249fd77ba0765e0`。
+- 剩余边界：本轮关闭的是机械误重试、无权限处置、无结构化记录和无积压告警，不是 Provider exactly-once。仍没有调用账本、供应商请求 ID/费用/结果自动查询、证据附件、负责人认领、双人确认或告警接收器闭环；真实 Provider conformance 和跨故障点副作用测试仍未执行。
+- 安全范围：公网部署继续冻结；本轮未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，未调用 Provider/平台、创建素材/草稿/发布或云资源。`knowledge/北京周末 CityWalk 路线助手产品资料.txt` 保持未跟踪且未读取、修改、暂存或提交。
+
+### CF-20260903-28：Provider 调用缺少可独立核对的请求证据
+
+- 状态：调用账本、独立预提交、人工核对联动、只读查询入口、低基数监控、本地完整门禁及真实 PostgreSQL/MinIO CI 均已签收。
+- 问题与影响：上一阶段虽能把高风险 AI Job 转入专用人工核对，但操作者只能看到 Job 错误与检查说明，无法确认调用是否真正开始、重试是否属于同一逻辑请求、Provider 返回了哪个请求 ID、是否已经产生响应或 token 消耗。直接重试仍可能重复计费，且数据库业务事务失败时可能把已经开始的外部调用痕迹一起回滚。
+- 解决方案：新增 `provider_invocations` 与 `provider_invocation_attempts` 两层账本，以稳定请求键聚合同一逻辑请求、以 attempt 保存每次尝试。在外部请求前使用独立数据库 Session 提交 `started`，结束后只保存受控状态、请求/响应哈希、字节数、Provider 请求 ID、模型与 token 用量；不保存 Prompt、响应正文、HTTP 错误正文、Authorization 或其他密钥。失败或中断形成 `outcome_unknown`，后续同键成功可形成 `late_succeeded`。
+- 调用链：Worker 使用 ContextVar 把已领取 Job 绑定到真实 Handler；OpenAI-compatible 文本生成、Prompt Eval、远程 Embedding 与知识检索统一接入账本。远程知识索引和 Prompt Eval 在 Provider 调用前先提交领域 `running/indexing` 状态，工作流先完成全部 Provider 调用再落 ContentItem/Revision/Asset，避免业务事务与独立账本事务在 SQLite 下互锁，也保证调用证据不会被后续业务回滚抹掉。
+- 核对与运维：reviewer/admin 可通过 `GET /api/v1/jobs/{job_id}/provider-invocations` 查看脱敏尝试证据；人工核对开启时会把该 Job 仍处于 `started` 的尝试标记为 `outcome_unknown`。前端核对面板分页展示状态、请求 ID、哈希和用量，并明确 `Idempotency-Key` 已发送不等于 Provider 接受或保证幂等。Prometheus 增加历史状态计数、当前仍未解决的不确定结果数量和最老时长，持续 5 分钟触发专用告警。
+- 迁移与恢复：新增迁移 `f4a5b6c7d8e9`，公开表门槛从 31 更新为 33；未版本化数据库只在两张账本表完整且前序人工核对表存在时才允许认领新 head，部分存在会失败关闭。本地与公网备份/隔离恢复脚本同步。
+- 验证边界：本机完整后端为 `318 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.31%；17 项为本机未提供 PostgreSQL/MinIO/CI 容器条件的安全跳过。全仓 Ruff、Alembic 单 head、公网部署 fail-closed、锁文件、`pip check`、Python 与 npm 漏洞审计、前端 lint/test/build 和备份脚本语法均通过。本轮没有调用真实 Provider、平台或云资源；Provider 对幂等头的实际支持、费用/结果查询和自动对账仍未证明。
+- 远程证据：实现提交 `56e563de1725a40c9eddbf05128dff6e812b5cfc` 已以 John Wang 身份普通推送；手动触发的 [ContentFlow CI #33708300286](https://github.com/heee000/ContentFlow/actions/runs/33708300286) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `335 passed, 196 subtests passed`、覆盖率 82.47%；Prometheus 规则行为、前端 lint/test/build、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9876032648` 摘要为 `sha256:ef9130d8941c8e135c6e4e4968b814b37d2c4a7779bce7bcf0c3f6072a616174`。
+- 剩余边界：账本只覆盖当前 OpenAI-compatible 文本与远程 Embedding 路径；请求/响应使用 SHA-256 证据哈希而非密钥 HMAC，不适合把低熵敏感输入的哈希直接对外公开。真实 Provider 是否接受幂等键、能否按请求 ID 查询结果/费用、如何自动调和迟到结果仍待适配器级 conformance 测试。人工核对仍缺负责人、证据附件、双人确认和真实告警接收器。
+
+### CF-20260903-29：媒体生成与图片搜索仍游离在 Provider 调用取证链外
+
+- 状态：媒体/搜索账本、悬空尝试收束、迁移与恢复契约、完整本地门禁及真实 PostgreSQL/MinIO CI 均已签收。
+- 问题与影响：文本和远程 Embedding 已有调用前证据，但 HTTP 图片/视频生成、异步轮询和 Openverse 搜索仍只有 Asset 状态与最终元数据。生成超时或 Worker 接管时，操作者无法从统一账本判断哪次调用已经开始、供应商返回了哪个请求号；自动重试还可能把旧 attempt 永久留在 `started`。搜索虽然只读，也会消耗外部配额且缺少调用级诊断。
+- 解决方案：新增 `LedgeredMediaProvider` 与 `LedgeredSearchProvider`，在真实 HTTP 媒体生成/轮询和 Openverse 查询前独立提交账本。媒体响应只以状态、外部任务 ID、媒体标签、内容/下载 URL 摘要留证；搜索只保存请求/候选集合摘要，不保存 Prompt、分镜、搜索词、候选详情、媒体字节、URL 或错误正文。Media Contract 错误信封中的受控 `request_id` 会进入账本，错误 message 继续丢弃。
+- 幂等与竞态：媒体生成继续使用按 Asset 内容版本确定的 `cfm-*` 幂等键，账本不替换或伪造供应商合同；轮询和 Openverse GET 明确记录未发送幂等键。开始同一逻辑请求的新 attempt 前，旧 `started` 会原子转为 `outcome_unknown` 并标记 `superseded_by_retry`；账本完成路径和重试路径统一按 invocation→attempt 顺序加锁，迟到成功只形成 `late_succeeded` 证据。
+- 迁移与恢复：新增 `a5b6c7d8e9f0`，只把 `provider_kind` 检查约束从 text/embedding 扩展到 text/embedding/media/search；公开表仍为 33。PostgreSQL 原位替换约束，SQLite 使用 batch 重建；未版本化账本仍先按 `f4a5b6c7d8e9` 认领再向前升级。运行时 head、本地备份、公网隔离恢复校验同步。
+- 本地证据：定向媒体合同、适配器、Worker 绑定、账本与迁移为 `68 passed, 50 subtests passed`；完整后端为 `324 passed, 17 skipped, 196 subtests passed`、分支覆盖率 81.46%。17 项均为本机未提供 PostgreSQL/MinIO/CI 容器条件的安全跳过。全仓 Ruff、锁文件、`pip check`、Alembic 单 head、公网 fail-closed、备份脚本语法、Python/npm 漏洞审计、前端 lint、双构建与 2 项 SSR 均通过。
+- 远程证据：实现提交 `9a6c154ba154356bda6ff6089137d1e0b473e506` 已以 John Wang 身份普通推送；手动触发的 [ContentFlow CI #33710709007](https://github.com/heee000/ContentFlow/actions/runs/33710709007) 四个 Job 全部成功。真实 PostgreSQL/pgvector 与 MinIO 为 `341 passed, 196 subtests passed`、覆盖率 82.60%；Prometheus、前端、Python/npm 漏洞审计、可复现源码/SBOM、SLSA 与双 CycloneDX attestations 全部通过。Artifact `9876813444` 摘要为 `sha256:d113346727fab94672907a3f7bf171fcf4719437f908685b606b792202e79adc`。
+- 剩余边界：没有用真实目标媒体服务执行 live conformance、账单与质量签收；生成结果 URL 下载和 Openverse 候选选中后的文件下载没有独立 Provider attempt，但最终对象由存储账本与 SHA-256 校验覆盖。Asset 页面尚无通用调用证据入口；普通 SHA-256 的低熵猜测、证据保留/删除/导出策略、真实告警接收器和供应商自动查询仍未关闭。
+- 安全范围：公网部署继续冻结；本轮未读取 `.env`、平台账密、模型缓存、备份、运行数据或受保护知识文件，没有调用真实 Provider、Openverse、微信或其他平台，也没有创建素材、草稿、发布或云资源。
+
+### CF-20260917-01：收尾中断的素材下载账本和异步选图
+
+- 状态：已提交并普通推送（`eb16d37`）；首轮 CI 被依赖漏洞和镜像拉取阻断，修复见 `CF-20260917-03`。
+- 问题：生成 URL/候选文件下载缺少调用证据；选中图库图片在 API 事务中同步请求网络；素材重试固定键会返回旧失败 Job；media/search 虽已入库却被旧响应 Schema 拒绝；快速切换证据面板可能混淆素材。
+- 解决：下载前独立提交调用账本，保存精确响应摘要和受控请求号；选图改为 `asset.download` 后台任务，下载后重新校验版本/审核/选择凭证，成功后才切换同组素材；已完成候选重放短路。素材行锁保护递增重试键，失败候选重试不重新搜索。API/TypeScript 补齐 media/search，素材和 Job 共用脱敏序列化，前端加入请求序号保护。
+- 安全：初始 URL 白名单/HTTPS 在账本前预检，重定向逐跳验证；HTTP 错误、正文超限也保存受控请求号。账本无媒体字节、URL、密钥和异常正文。素材证据限定本工作区 reviewer/admin，下载仍受对象账本、图片规范化和当前内容版本保护。
+- 涉及：`provider_invocations.py`、`media_providers.py`、`worker.py`、`job_recovery.py`、素材/Job 路由、响应 Schema、工作台和四组相关测试。
+- 定向验证：`90 passed, 53 subtests passed`。新增失败证据脱敏、响应头/超限、连续重试、完成后重放、跨工作区和 editor 拒绝测试。Ruff、diff 检查、部署配置验证、Alembic 单 head、前端 lint、2 项 SSR、Vinext/Next.js 构建通过。
+- 首轮完整回归发现旧下载策略用例被账本初始化抢先失败，已将纯 URL 预检移回账本前并通过该用例；不通过删除用例或放宽断言处理。最终完整回归为 `328 passed, 17 skipped, 199 subtests passed`，分支覆盖率 81.41%；17 项为未配置的 PostgreSQL/MinIO/CI 容器场景。现有框架弃用警告保留记录，不等同于测试失败。
+- 剩余边界：下载证据不是 Provider 计费/结果证明，不保证跨外部服务 exactly-once；同组并发选图、完成提交丢失和网络分区 fencing 仍需目标 PostgreSQL 故障矩阵。证据 HMAC/生命周期和企业运行能力仍未关闭。
+
+### CF-20260917-02：自有 Ubuntu 私人测试环境准备
+
+- 状态：SSH 密钥认证已成功；实机预检和安装脚本核验完成，等待操作者执行一次 sudo 安装；应用尚未部署。
+- 实机资源：AMD A6-9210、x86_64、2 个逻辑 CPU、AVX2；内存 3.7 GiB/可用约 1.6 GiB，已有 swap 3.7 GiB；机械磁盘，根文件系统空闲约 846 GiB。已有后台和桌面进程未被停止；峰值资源和 BGE 推理尚未验收。
+- 已做：Windows 到 TCP/22 连通，SSH 主机身份与 known_hosts 匹配；在 Windows 用户 `.ssh` 生成专用 Ed25519 密钥并保留私钥本地。用户提供诊断已确认家目录、`.ssh`、`authorized_keys` 权限/所有者正常，但 authorized_keys 为 0 字节；公钥未写入是本次拒绝的直接原因。已给出 Ubuntu 直接追加公钥及核对指纹的命令，等待验证，不要求发送密码。
+- 路径：先解决认证、确认 Docker/sudo/硬件/网络，再创建独立低资源内部栈；先验空测试库和持久化，再接真实 API。已有数据的迁移选择与凭据注入单独处理。完整步骤见 `docs/ubuntu_private_test_setup.md`。
+- 范围：自有机器内部测试获得授权；公网部署仍暂停，不开放数据库管理端口，不创建付费云资源，不复制 Windows 依赖到 Linux。
+- 排障收束：用户直接追加公钥修复了空 authorized_keys；另确认生成专用密钥时 PowerShell 引号导致意外口令。用户明确授权后仅修正该新密钥，未修改其他密钥或服务器认证规则。IPv4 后续超时，使用用户提供的 IPv6 和原已验证 HostKeyAlias 成功免密连接，StrictHostKeyChecking 保持开启。
+- 安装准备：新增 `deploy/private-test/install-docker.sh`，只处理 Ubuntu 24.04 的现有非 root 部署用户，从现有 Ubuntu 软件源安装 Docker/Compose；显式标志确认 docker 组 root 等价访问，遇到冲突包停止，sudo 密码由用户在自己的终端输入。Docker 自身网络规则可能初始化，不改 SSH/sudoers、不启动应用容器。目标机 bash 语法、帮助、缺参/非 root 拒绝和上传哈希一致已验证；`.sh` 强制 LF。尚未执行管理员安装，不能记为部署成功。
+
+### CF-20260917-03：部署前依赖安全更新与 MinIO 镜像获取恢复
+
+- 状态：修复提交 `8544dabfd97607a997f798e63681b288c95d88f4` 已普通推送，修复后 CI 四个 Job 全部成功。
+- 触发：`eb16d37` 已正常普通推送，但 [CI #35202826024](https://github.com/heee000/ContentFlow/actions/runs/35202826024) 在前端审计检出 7 项依赖漏洞；后端在启动 MinIO 时收到 Docker Hub `pull access denied`，尚未执行 PostgreSQL 测试。不是 Git push 或仓库账户认证失败。
+- 前端修复：Next.js/eslint-config-next 从 16.2.12 更新为 16.3.5，sharp override 从 0.35.3 更新为 0.35.4；原兼容范围内更新锁定的 js-yaml 4.3.1→4.3.2、fflate 0.7.4→0.7.5。没有使用 `npm audit fix --force`，没有关闭审计或提高漏洞放行阈值。
+- 公告依据：[Next.js Windows RCE](https://github.com/advisories/GHSA-p293-qw3h-jr36)、[Next.js AVIF](https://github.com/advisories/GHSA-2xp9-vwfh-vxw4)、[sharp/libheif](https://github.com/advisories/GHSA-rgj7-g3m4-5g8c)、[js-yaml](https://github.com/advisories/GHSA-2883-xcg3-v3hh)、[fflate](https://github.com/advisories/GHSA-px8p-9vwx-vf98)。公告说明潜在影响范围，不能据此推断本地已经遭到攻击。
+- 镜像修复：通过 registry manifest 实测官方 `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` 的摘要仍为既有 `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`，CI 改用该同内容地址。开发 Compose 同步固定摘要；MinIO Client 仍为 RELEASE.2025-04-16T18-13-26Z，Quay 摘要固定为 `sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3`。没有替换存储产品或迁移已有数据。
+- 本地验证：Node 24.19.0 下 ESLint、2 项 SSR、Vinext 构建、Next.js 16.3.5/TypeScript 生产构建通过；npm moderate 审计为 0 漏洞，Python 依赖审计为 0 已知漏洞。系统默认 Node 22.11 低于项目要求，本轮只在验证进程内使用已安装的合规 Node，没有修改全局安装。
+- 远程签收：[CI #35203918464](https://github.com/heee000/ContentFlow/actions/runs/35203918464) 的真实 PostgreSQL/MinIO 为 `345 passed, 199 subtests passed`、分支覆盖率 82.53%；前端构建和漏洞审计、后端/Prometheus、安全审计、可复现源码/SBOM 与签名证明均成功。保留 7 项框架警告，不将其说成测试失败或已消除。该结果也签收 `CF-20260917-01` 的下载改动；没有重复推送或降低 CI 门槛。
+- 边界：恢复同摘要下载只解决制品获取，不等于旧 MinIO 的长期维护/安全支持签收；自有 Ubuntu 的 CPU 兼容性、镜像可达性、峰值内存和备份恢复仍待实机验收。
+
+### CF-20260917-04：私人测试基座与 API-only 轻量镜像
+
+- 问题：旧电脑可用内存有限，完整后端镜像总带 PyTorch/BGE；根 Compose 有开发端口/默认口令，不宜直接用于共享网络；根 Docker 构建上下文未以白名单排除本地敏感资料；Ubuntu 无法稳定直连 Docker Hub。
+- 选择：用户明确允许按需迁移现有 API 配置，并选择 Embedding API，尚待选型/提供 Key。旧数据、知识和素材不迁移；付费云和公网仍暂停。
+- 实现：新增独立基础 Compose（不含 Web/API/Worker），只启 PostgreSQL/MinIO，internal 网络、无端口映射、内存/PID 上限、日志轮转、独立持久卷。初始化仅在 700 目录独占创建 600 的随机凭据文件；对象应用凭据限制到单 bucket，不等于数据库角色拆分已完成。
+- 镜像：Dockerfile 新增 `INCLUDE_LOCAL_EMBEDDINGS`，默认 true 保持原路径；false 时不安装本地模型依赖。根 `.dockerignore` 采用必要源码白名单。API-only 镜像约 412 MB，运行依赖导入与无 torch 检查通过；不将体积减少等同于已测内存节省。
+- 网络：Quay 同摘要 Server/Client 已拉取；pgvector 由 Windows 官方摘要拉取后导出压缩包，经 SSH 搬运。额外覆盖文件只接受已核对的 linux/amd64 config ID 并禁止拉取；须先核对压缩包 hash 和 load 后 ID。未改变服务器 DNS/代理、未使用第三方镜像、未停现有 Windows 服务。
+- 验证：私人/既有公网部署配置 9 项通过，Ruff/diff 检查通过；目标 bash/sh/Compose 静态校验、600 权限、Docker 权限和开机启动验证通过。live bucket 权限、PostgreSQL/pgvector 启动、重启持久化、整栈登录与真实 API 仍待验证，不能标为已部署完成。
+- 增量：MinIO 已健康，live 初始化验证非匿名 bucket、应用可列出业务 bucket 且管理 API 拒绝，关闭上一条的 bucket 权限等待项；其他验证仍待完成。推荐的硅基流动 BGE-M3 当前免费、原生 1024 维；Ubuntu 无 Key HTTPS 探测返回 401，仅证明网络连通。选型依据和免费限制已记录，尚未注册、充值、发送业务内容或复制 API Key。
+
+### CF-20260917-05：固定维度 Embedding API 兼容与真实调用验证
+
+- 问题：用户提供 BGE-M3 Key 后，官方合同指出其输出固定 1024 维，不支持可选 `dimensions` 请求字段；当前 OpenAI-compatible 适配器总会发送，存在协议兼容风险。不能通过更换 mock 或取消返回维度校验处理。
+- 解决：新增通用 `embedding_send_dimensions`（默认 true），目标环境显式设 false；Settings、工厂与开发/公网 Compose 透传。只省略请求字段，仍检查返回数量、维度和有限数值；没有按供应商名硬编码例外，也没有失败后自动重试另一种格式。
+- 取证：默认账本摘要保持原样，省略字段模式增加受控模式标记，测试确认相同 Job/entity/ordinal/input 改模式后得到不同请求身份。不会把不同 wire 参数的调用混入原 attempt。
+- 实测：使用用户明确授权的 Key，两次仅包含 3 句合成文本的调用均返回 3×1024 有限向量，各报告 25 tokens；第二次经过实际 ContentFlow 适配器，相关句排序高于无关句。没有发送用户知识资料；Key 不进入日志/文档/Git，未自动充值。
+- 定向回归：Ruff 通过，26 项与 6 subtests 通过。完整覆盖率、构建和 CI 后续签收；BGE-M3 测试只是基础语义 smoke，不等于多语言/长文/领域检索基准。
+- 部署阻塞：Ubuntu 的既有 IPv6/IPv4 本次均超时，已请用户确认唤醒和当前地址；压缩镜像传输已正常结束，远端 hash/load、PostgreSQL、完整应用与旧数据迁移仍未执行。避免将历史连接成功当作当前可用。
+- 后续：用户确认地址未变、未休眠；本机路由为 WLAN 直连，较长超时重连后身份/认证成功，未改网络配置，不能将超时归因于用户休眠。Windows 完整测试发生原生 access violation（Pydantic Settings/Alembic 堆栈），故不记全量通过；更新镜像构建/导入成功，完整回归转 Linux CI 验证，保留 Windows 原生崩溃诊断项。
+- 远程签收：提交 `f2908246a273406825245930821cf5267bf96dee` 的 [CI #35209824845](https://github.com/heee000/ContentFlow/actions/runs/35209824845) 四个 Job 全部成功；真实 PostgreSQL/MinIO 为 `351 passed, 199 subtests passed`，覆盖率摘要 83%，保留 7 项警告。Ubuntu 本机另以合成文本完成 3×1024 向量与基础语义排序探针，报告 25 tokens；累计三次最小探针 75 tokens，不含后续知识索引。
+
+### CF-20260917-06：Ubuntu 私人应用栈、隔离凭据和浏览器入口
+
+- 问题：基础库就绪不等于完整应用；生产 Cookie、前端编译期 API 地址、出口网络、治理开关和旧实例登录冲突必须一起处理。离线镜像在 Docker 27→29 加载后 ID 改变，也不能直接放行。
+- 实现：新增 `compose.app.yml`、Caddy 和白名单 Provider 导出/独立运行配置生成脚本。保持 production、注册关闭、禁止 mock、Prompt 治理、共享限流与指标鉴权；新建应用签名/凭据加密/指标 Key，仅复制授权的文本、媒体和 Embedding 参数，不复制旧账户或业务库。运行 env 使用 raw 模式保留 Key 的字面量字符，目标配置为 600，拒绝覆盖已有文件。
+- 网络与资源：只有 Caddy 映射 Ubuntu 回环端口 3800，经 Windows 专用 SSH 隧道访问 localhost:3600；数据库、对象存储和前端采用 internal 网络，仅 API/Worker 有出口。各服务显式内存/PID/日志上限，单 Worker；Caddy 非 root、只读、去 capabilities。Secure/HttpOnly Cookie 不关闭，采用独立名称避免和旧 Windows 本地实例冲突。
+- 镜像身份：pgvector 完整压缩包 SHA-256 匹配；Docker 29 去掉旧空/false 字段后 config ID 从 `5fa1d4…` 变为 `4be5e8…`。逐项核验源/目标架构、全部 RootFS 层和运行配置后才更新覆盖文件。真实 PostgreSQL 16.14、vector 0.8.5 与 MinIO 健康；对象应用权限仍限单 bucket。不能将该特定格式转换作为放行未知 ID 的通用理由。
+- 构建与最小测试：API-only 新镜像、API Base 为 localhost:3600 的 Next.js Web 及官方摘要 Caddy 已完成 Windows 构建/获取；256883475 字节应用压缩包目标 hash 匹配后才加载。配置回归 11 项通过，Ruff 通过；本机 pytest 缓存存在权限警告，不影响该 11 项断言结果。
+- 剩余验收：应用运行时、迁移、首次管理员、浏览器 Cookie、真实知识索引、容器重启持久化和资源采样仍需逐项实际执行后补记。未启公网、未发布社媒、未复制旧知识/素材；数据库运行角色拆分、异机备份恢复和稳定出口尚未完成。
+
+### CF-20260917-07：非 editable 安装漏打包迁移资产
+
+- 触发：Ubuntu 的 production 配置校验已通过，但真实 `contentflow-migrate` 报 `No 'script_location' key found in configuration`，迁移尚未开始。源码/可编辑安装的旧测试未覆盖容器中 console entrypoint 的路径差异。
+- 根因：`PROJECT_ROOT = __file__.parents[1]` 在安装后指向 site-packages，wheel 又没有包含仓库根目录的 alembic.ini/migrations。配置文件不存在时 Alembic 创建空配置，最终无法找到迁移目录。即使读取到配置，原相对 script_location 还依赖当前目录。
+- 修复：setuptools 明确把 ini/env.py/template/全部 version 文件打入 wheel 的 `share/contentflow`；解析器只从受控源码目录或安装前缀选择完整资产，使用绝对迁移路径并处理 `%` 插值，缺失资源明确失败。不搜索任意 CWD 的迁移代码，不修改/伪造数据库版本，也不绕过已有未版本化库检查。
+- 回归：新增 wheel 资产声明、模拟非 editable 安装且 CWD 含错误配置、含百分号安装路径、真正临时 SQLite 升级至 head 和缺资源拒绝。相关部署/引导/打包合计 13 项通过；新版 API-only 镜像正在重建，必须再用已安装 CLI 在 `/tmp` 实际迁移验收。
+- 签收：新版镜像在 Windows 无网络/只读根文件系统、工作目录 `/tmp` 执行已安装 CLI，从临时空 SQLite 升至 head；修复镜像完整传输、层/运行配置匹配后，Ubuntu 从 `/tmp` 执行同一 CLI 对真实 PostgreSQL 通过。`8a5e300a551db64978b29b29b4ebd286f56f7fa0` 的 [CI #35212620332](https://github.com/heee000/ContentFlow/actions/runs/35212620332) 全绿，356 passed / 199 subtests，覆盖率摘要 83%，保留 7 项框架警告。
+
+### CF-20260917-08：真实私人入口与重启验收暴露的配置问题
+
+- Caddy 启动 EPERM：官方二进制带 `cap_net_bind_service=ep`，与非 root / `cap_drop=ALL` 组合冲突。新增 `Dockerfile.caddy`，基于已验真官方镜像离线移除该文件能力；端口为 8080，不需要增权。目标构建只发送 2 KiB Dockerfile、不包含凭据目录；无网络、只读根、no-new-privileges、无 capabilities 的 `caddy version` 验证通过。
+- 容器健康却无宿主入口：实测 Docker 29 对仅连接 internal 网络的 Caddy 保留 HostConfig.PortBindings，但 NetworkSettings.Ports 为 null。只为 Caddy 增加普通 ingress bridge，默认/显式绑定均为回环；data/app internal 不变。入口网络并非出站隔离，不再宣称 Caddy 无出口；代理不持有业务 Key、不连接 data 网络。[Docker 网络说明](https://docs.docker.com/engine/network/)
+- Host 门禁顺序：实际非法 Host 探针曾返回 200，原因是 Caddy 默认指令排序让 proxy handle 先于 respond。改为显式 route 顺序，实测非法 Host 403、正常 localhost readiness 200。新增 Caddy 健康检查，不能再把 restart 策略或 Compose 的运行态概称为入口健康。
+- SSH 转发：`-6` 同时限制本地监听地址族，导致 Windows `127.0.0.1` 绑定报 getaddrinfo 错误；取消该选项，远端继续使用已验证 IPv6 字面量。仅回环隧道实际请求通过，严格主机验证保留。早期“启动后台 PID”不是成功证据，后续以真实 HTTP 签收替代。
+- 应用签收：空库新建独立管理员；API 登录、未登录 401、非法 Host 403、production 配置与 Prompt 治理门禁通过。一个合成知识文件经正常上传/对象账本/Job/Worker/真实 Embedding 入库，形成 1 条 1024 维向量与 1 次 succeeded Provider attempt。没有读取/迁移旧知识，没有伪造 hash 模型。
+- 浏览器签收：真实工作台登录成功，专用 access/refresh Cookie 的 Secure/HttpOnly/SameSite=Lax 均通过浏览器检查；令牌和密码未打印。服务重启后重新加载页面仍保持正确工作区登录，知识库显示 1 份合成资料、1 个知识块、已索引。
+- 持久化签收：确认 runnable Job 为 0 后停止私人 API/Worker、重启 PostgreSQL/MinIO、恢复应用。前后同一合成文档均 indexed，对象实际字节 SHA-256 与记录相符，向量仍 1024 维，Provider attempt 仍只有 1 次 succeeded，没有因重启重复调用。不是主机断电或异机备份恢复演练。
+- 资源采样：重启恢复后六服务 Docker 内存合计约 550 MiB；宿主 MemAvailable 1357 MiB、swap 已用 843 MiB（包含既有桌面/后台负载）。只证明低负载可启动与索引，不是并发、长时运行或峰值容量保证。相关配置/迁移回归 14 项通过。
+- 剩余：新库尚无经评测、独立审核并激活的 Prompt release；没有迁移微信渠道，未跑本轮内容/媒体/发布全流程，不以部署健康冒充完成。运行数据库最小权限、异机备份、真实告警、固定微信公网出口与长稳测试仍待后续。
+- 用量：本次 Worker 索引账本报告 33 tokens，加上三次协议/语义最小探针共报告 108 tokens；这是服务返回用量，不是独立账单审计。重启校验没有重新索引或追加 AI 调用。
+- 最终签收：配置实现提交 `611399e` 已以 John Wang 身份普通推送；[CI #35214913017](https://github.com/heee000/ContentFlow/actions/runs/35214913017) 四个 Job 全部成功，356 passed / 199 subtests，覆盖率摘要 83%。恢复后六容器均未记录 OOM 或自动重启，实际回环 readiness 仍成功。后续只补记本条文档，不重建已验收应用镜像或重复运行计费测试。
+
+### CF-20260917-09：跨网络私人访问的客户端准备与准确断点
+
+- 问题：Windows localhost SSH 入口不能供其他网络的设备直接访问。选择 Tailscale 私有网络与后续 Serve HTTPS；不启用公网 Funnel，也不把私网接入当作固定微信出口。
+- 已做：用户授权安装；官方包签名、清单及完整文件哈希验证通过，Ubuntu 1.102.4 已安装，服务 enabled/active；DNS 不接管、不接受子网路由。Windows 官方 MSI 签名有效但 UAC 被取消，安装未完成。文件下载和 SSH 上传的半包没有被执行；本地 apt 的 no-download 路径错误改用仅安装已验真单包的 dpkg 解决，已有依赖满足。
+- 工具故障：按用户明确要求向现有“电脑相关”任务求助；对方修复策略加载超时后，本任务重新连接并实际读取用户 Edge 的 Tailscale 管理台成功，不以对方报告代替本任务验证。
+- 验收：Ubuntu 原六服务未中断、数据库/存储 readiness 正常，DNS 配置哈希未变。未重建镜像、迁移数据、调用 AI 或发布社媒。没有改 sudoers、关闭认证或把 sudo 密码存入项目文件。
+- 未完成：设备页要求重新登录；HTTPS/CT 公示确认待用户选择，Windows 是否重新发起安装待回复。未开启 Serve、未变更 ContentFlow localhost 配置，尚无跨网可用结论。HTTPS 域名、Host/CORS/前端 API Base、访问策略、证书、登录与手机移动网验证留待设备授权后执行；官方更新源仍待补齐。
+- 记录：详见 `docs/ubuntu_private_test_setup.md` 的 Tailscale 段。私人安装包和登录地址不提交；原受保护未跟踪知识资料未读取、修改或暂存。
+- 后续用户已完成设备授权并允许 HTTPS/CT 公示；实测节点 Running/Online、无 Health 告警，管理台 HTTPS 已启用。配置 Serve 私网入口，不启用 AllowFunnel。新增可回退覆盖配置、严格域名/镜像校验和独占生成、无 AI/发布副作用的 HTTPS 验证脚本。
+- Web 按真实域名重建并经 archive SHA-256、全部 9 层及运行配置匹配后部署；源/目标 ID 的 Docker 旧空字段归一差异已解释。先验证队列为空及合并配置保护，再只重建四个应用服务。DB/MinIO、运行凭据、受保护知识文件不变。
+- 服务器端真实 TLS、匿名拒绝/Host 防护、Web HTTPS CSP、Secure/HttpOnly/Lax Cookie 登录/刷新/退出、治理和已有知识读取均通过；对象 checksum/1024 维向量/Provider attempt 未变化，无 runnable Job 或新 AI 调用。18 项定向回归、Ruff 和目标加固 Caddy 离线配置验证通过。
+- 当前剩余边界：Windows UAC 取消后的安装授权仍待回复，浏览器跨设备/移动网验收未完成。未做精细 tailnet ACL、真实客户端 IP 透传与限流、设备凭据续期、自动更新/异机备份/固定微信出口；不因此声称企业级公网交付。
+
+### CF-20260918-01：Windows 私网客户端安装签收与代理冲突定位
+
+- 安装：用户同意重发后后台提权仍返回“取消”，但用户未看见弹窗，实际原因未定；不将系统错误归责为用户主动取消。用户直接打开同一已验签官方 MSI 后，实测 Tailscale 1.102.4、服务 Running/Automatic；由用户亲自完成设备入网。
+- 连接：保持 `accept-dns=false`、`accept-routes=false`，两端在线、客户端无 Health 告警，Tailscale ping 直连成功。Windows 指定已验证节点 IP 的单次 HTTPS readiness 为 200，数据库/存储 ok、应用 SHA 仍为 `8a5e300`；没有跳过 TLS 验证或变更系统 hosts。
+- 未通过项：普通域名被当前 Mihomo fake-IP DNS 解析到代理合成地址，Windows 同路径代理 HTTPS 失败，Edge 为 `ERR_CONNECTION_CLOSED`。这是客户端代理/DNS 兼容问题，不是 Tailscale 未登录、Ubuntu 服务故障或之前的浏览器工具初始化超时。
+- 后续授权：已询问是否允许仅为 ContentFlow 服务域名增加可回退解析/直连设置，尚未修改代理、全局 DNS、TUN 或其他网站规则。真实浏览器会话、手机异网和内容生成/发布仍未验收；没有调用 AI、迁移数据或读取受保护知识文件。
+- CI：实现提交 `75a473e` 的 [CI #35229216117](https://github.com/heee000/ContentFlow/actions/runs/35229216117) 四个 Job 全部成功。本次仅记录运行验收，不重复构建已验证镜像。
+
+### CF-20260918-02：仅指定域名的 Mihomo/Tailscale 兼容修复与浏览器验收
+
+- 授权与范围：用户明确同意只调整 ContentFlow 域名。先备份 Clash 的全局扩展脚本与运行 YAML；补丁不修改系统 hosts/注册表、TUN、默认 DNS、代理组、原规则顺序或默认出站，不新增对外控制端口。
+- 分步定位：精确 hosts 映射与 fake-IP 排除使系统直接 HTTPS 成功，但代理普通 DIRECT 仍连接超时；将该域名的唯一专用 direct 出站绑定到实测 Tailscale 网卡后，两条普通域名 HTTPS 路径均返回 200。不将推测的网卡选择机制冒充此前已抓包证明的事实。
+- 持久配置：全局扩展脚本保留原配置，只注入单域名映射/排除/优先规则与不加入其他代理组的专用出站；当前生成 YAML 同步应用。静态节点 IP 与客户端网卡名需在节点重建或网卡改名时复核。脚本对当前配置的输出等价、重复调用幂等；未知 fake-IP 模式或 hosts 被禁用会明确要求复核。
+- 验证：备份到当前 YAML 的语义差异仅限授权项，官方 Mihomo 配置校验通过；本地命名管道重载成功，原运行 mode/端口/allow-lan/ipv6/tun 不变，系统代理及排除列表不变，GitHub 原代理 HTTPS 控制请求 200。补丁工具一次返回失败但部分文件已写入，已先核实实际状态再补齐，不把工具报错视作原子回滚。
+- 浏览器：真实 Edge HTTPS 登录进入独立 Ubuntu 工作区，原合成资料已索引且为 1 个知识块；重载页面后会话保持。双 Cookie 分别位于 `/api/v1`、`/api/v1/auth`，均 Secure/HttpOnly/Lax，不打印 token。页面留给用户，未新增 AI 调用、活动或发布。
+- 边界：本轮签收是 Windows 客户端到 Ubuntu 的真实浏览器访问，不等于手机移动网、主机/代理重启、订阅更新或完整内容业务验收。私人备份与配置不进 Git；公共文档补充诊断顺序及维护风险，受保护知识文件未动。
+
+### CF-20260918-03：代理专项交接完成与 Ubuntu 离线断点核验
+
+- 用户要求代理故障由“电脑相关”处理，本任务只读对照曾确认 Clash 路径超时、v2rayN 和系统直连成功后，移交全部修改/备份/未覆盖场景；未预设此前配置无关，未与另一任务并行改网络。
+- 专项任务报告节点 DNS 的受控 A/B 支持其为主要故障点，并完成代理与正式浏览器回归；其修复记录保存在任务私人目录。本仓库不复制代理订阅、浏览器启动配置或凭据，不把对方报告写成本任务独立复测。旧校验器的固定配置基线已不适用于当前环境，禁止用 reload 覆盖后续网络修复。
+- 用户再次要求继续项目后，Windows Tailscale 实测 Running/无 Health 告警，但目标 Ubuntu Online=false；固定节点 IP 且保留证书验证的 HTTPS、Tailscale SSH、旧 IPv6 SSH 均超时，旧 IPv4 在 banner 阶段超时。没有远端身份认证成功，不能断言主机故障原因或当前容器/数据状态。
+- 已把当前结论从“浏览器已签收”更新为“历史验收通过、当前服务器不可达”，等待 Ubuntu 本机的地址、tailnet 与服务状态输出。没有重装、重启、修改网络或业务数据；原未跟踪知识文件仍未读/改/暂存，真实模型和社媒零调用。
+
+### CF-20260918-04：网络恢复签收与单人内测启动障碍
+
+- 问题与归因边界：Ubuntu 本机曾报告 controlplane 域名无法解析；用户修复网络后，本任务实测 Tailscale 与原局域网 SSH 均成功、域名恢复解析。没有把此前 Logged out/NoState 当作删除凭据的依据，未执行重新注册、重装或网络配置修改；具体网络修复由用户执行，不记为本任务成果。
+- 恢复证据：六容器运行，Worker 心跳先后为 1 秒/8 秒；Windows 与 Ubuntu 的保留证书校验、指定已验证节点 HTTPS readiness 均成功，Windows 首页 200。数据库和对象存储 ok，应用 SHA 仍为 `8a5e300`。该请求不覆盖当前浏览器代理/普通 DNS 或手机异网链路。
+- 重启边界：主机 uptime 与用户开机描述一致，Tailscale/Docker/SSH enabled，容器 restart=unless-stopped；Worker RestartCount=1、其他五个为 0，全部 OOMKilled=false。Worker 历史日志含数据库连接异常，当前心跳正常；尚未完整归因该次退出，不能记为零错误的主机启动验收。宿主 available 1666 MiB、swap 已用 146 MiB，仅为当时低负载快照。
+- 数据/配置盘点：1 份 indexed 合成资料、1 个 succeeded Job；1 个管理员成员；Prompt release、Eval suite、Eval run、活动、内容、渠道均为 0。production 与治理保护保持开启，mock 禁止，文本/Embedding 为真实 API。此次未重新索引、读知识正文、校验对象字节或增加 Provider 调用。
+- 新发现：企业默认双人规则与目前单管理员私人测试冲突。`activate_prompt_eval_suite` 拒绝创建者激活，`approve_prompt_release` 拒绝创建者审批，且真实目标模型 Eval 是批准/激活前置条件。不能通过代理操作两个账号伪装独立审核，也不能把 HTTP 健康当作内容全链路成功。
+- 后续选择：由真实独立审核者参与，或经用户明确确认后实现显式单人内测策略；后一方案减少人员分离保护，但仍需保留默认双人治理、真实 Eval、人工审批、认证/Cookie/RBAC/审计。当前没有实现或启用新策略，也未增权、改数据库或关闭门禁。
+- 记录修正：更新内部测试文档顶部的“当前不可达”断点，增加真实生成→人工审稿→AI/人工素材→微信草稿→异网/备份验收顺序。保留旧网络故障与旧验收历史，不覆盖 Windows 私人运行说明、代理配置或受保护知识文件。
+
+### CF-20260918-05：显式、限工作区的单人内测审批
+
+- 用户已明确同意单人审批。新增默认关闭的 `single_operator_private` 策略及唯一工作区 UUID；默认双人模式不变。启用须同时满足治理开启、注册关闭、单一 Tailscale HTTPS 域名/同源 CORS；另在部署前验证 Serve 不含 Funnel。域名校验不冒充完整网络访问控制。
+- 指定工作区的管理员可填写本人确认说明后激活自己的 Eval 套件、审批自己的 Prompt；真实目标模型评测、哈希/版本一致性、管理员权限、内容人工审核均未放宽。接口暴露生效策略，前端给出明确提示、确认说明和本人确认按钮，审计记录真实操作者与单人性质。
+- 恢复双人配置后，单人激活的套件/单人批准的版本不再满足生成或激活门禁，不能悄悄沿用；Worker 也重检评测套件策略。无需数据库迁移或篡改既有审核记录。
+- 新增 opt-in Compose 覆盖、启用/回退说明及六个无凭据合成验收用例；没有创建第二个账号。定向 Python 为 `83 passed, 59 subtests passed`，Ruff/前端 ESLint/Next.js 类型与生产构建/Vinext 和 2 项 SSR 测试通过。最初误用系统 Python 缺依赖，随后用项目 `.venv` 完成签收，未污染系统环境。
+- 此条提交时尚未更新服务器或调用模型；镜像构建、Linux CI、实际开启与真实生成结果须在后续增量补记。原受保护知识文件仍不读、改、暂存或提交，Windows 代理配置未动。
+
+#### 部署与真实验收增量
+
+- 实现 `6871ac9` 已普通推送，[CI #35326064907](https://github.com/heee000/ContentFlow/actions/runs/35326064907) 四个 Job 全绿；真实 PostgreSQL/MinIO 为 `384 passed, 199 subtests passed`，覆盖率 82.78%。前端、安全依赖检查、源码/SBOM 与签名证据通过。
+- 新 API-only 后端和 HTTPS Web 使用已有锁文件/缓存构建。258495641 字节传输包 SHA-256 为 `9fd3e1031378f985f16b57afbd72da3208201f60532949f03bb084d10bd9071b`，远端全包验证通过。Docker 27→29 省略旧空/default 配置导致 ID 改变；全部 13/9 层、非空运行配置、架构逐项匹配。目标后端 ID 为 `aeab201d85bf04c3a8f8fecd123e1c560e1f00c243f9e9e2fca446030a7f1864`，Web 为 `2e82be55d5e4911669e670e2afa59010027761b26d5a0060342e8ada8cefce10`，未忽略任意非空差异。
+- 原 images.env/tailnet.env、旧镜像和所有数据保留。只新增独立 activation.env/覆盖并更新 API、Worker、Web；DB/MinIO/Caddy 未重建，没有数据库迁移。Compose 临时 run 曾消费脚本 stdin，改为显式 /dev/null；最终 ps 遇到 PowerShell 尾部 CR 换行，实际更新已经成功，随后独立只读确认，未重复重建。
+- 升级前后原合成文档 indexed、对象字节 checksum、1024 维向量、原 1 条 succeeded Provider attempt 一致，无 runnable Job。新版本实际 Settings 验证与精确工作区限制通过；HTTPS 真实证书、Host/匿名拒绝、同源 Web、登录/刷新/退出、Secure/HttpOnly/Lax Cookie 和治理门禁通过，Windows readiness 确认源码 SHA 为 `6871ac9`。
+- computer-use 浏览器控制返回 nodeRepl.fetch request failed；不重复修改 Windows 代理，不声称本轮真实浏览器界面已签收。前端 lint/类型/双构建/SSR 证据与 API 自检独立保留。
+- 实际仅创建 1 个六例 Eval 套件、按授权本人确认激活，以及 1 个内置基线 Prompt 草稿；审计含 single_operator_private/self_activation 与代理代表所有者操作的真实说明。创建真实 Eval run 后，首个计划调用成功（输入 571、输出 3147、合计 3718 服务报告 tokens）；第二次计划调用 120991 ms 后 TimeoutError，持久账本为 outcome_unknown，Job 为 manual_review。没有后台重放或把未知记为未执行；不能把 3718 当完整账单，也不能称第一例断言通过（整轮在异常前未保存完整结果）。
+- Prompt 仍 draft，ready_for_generation=false；活动、内容、发布均为 0。需核对供应商结果/计费或明确风险处置后再继续，禁止伪造 provider_checked、跳过 Eval、删掉失败用例或假称已生成。定向修订 fixture 的输入键已纠正为与真实 Agent 相同的 previous_draft，修正后部署用例 20 项通过；它不改变应用镜像来源 SHA。
+
+## CF-20260919-01：中断恢复与阶段记录收尾
+
+- **问题**：前轮完成单人策略部署及真实 Eval 后，记录与 fixture 回归修正尚未提交；两台电脑关机后需确认连接及持久化，而不是重复安装或重跑外部请求。
+- **处理**：先检查 Git，确认六个未提交文件为上轮修正/记录；保留受保护未跟踪知识文件。使用既有专用密钥、严格主机校验及 Tailscale 重新登录 Ubuntu，未改变网络配置或服务。源镜像 SHA 仍为 `6871ac9`，记录提交不能冒充新应用部署。
+- **实测**：六容器运行，Serve 只限 tailnet；TLS/readiness/Host 拒绝/同源 Web/登录刷新退出/安全 Cookie 均通过。原合成对象哈希匹配、向量为 1024 维、文档 indexed，无 runnable Job；持久账本为 2 succeeded、1 outcome_unknown。未新增 AI 调用、内容或社媒副作用。
+- **验证**：部署配置与 fixture 测试重新通过 20 项，Ruff 通过。初次测试因沙箱无法访问既有 pytest 临时目录而有 11 个 setup error；使用正常权限重跑同组用例全部通过，未修改系统目录权限或绕过测试。原 `previous_draft` 修正和回归断言一并保留。
+- **剩余断点**：Prompt 草稿与 error Eval 未变化；已请求明确的一轮重跑风险决策（最多六次模型请求、可能重复费用），无此决策不自动继续。旧调用的实际执行/账单仍未知，不能伪造供应商核对。API 自检不代表浏览器、手机异网、异常断电或完整业务验收。
+
+## CF-20260919-02：已授权单轮评测与失败诊断补强
+
+- **授权及执行**：用户明确回复“接受”可能重复费用，授权一轮最多六次真实模型请求。运行器先核验原 Prompt/六用例套件完全一致、无可运行任务，再写独占授权回执并通过正常 API 入队一次；未改超时、模型、用例或断言。新 Eval 为 `7bef6092-a813-4afd-a1f6-f92b09ad842a`，旧 run/Job/manual review/账本不变，未填假 provider_checked。现有核对接口只表达已核对供应商，故没有调用它伪装本次接受风险为已知结果。
+- **实际结果**：北京时间 17:23:16 首个 plan 请求发起，约 27.9 秒成功，供应商报告输入 571 / 输出 5602 / 合计 6173 tokens；响应模型名仍为 deepseek-flash。17:23:44 第二个请求发起，约 4.05 秒后 RuntimeError，无 request ID/响应哈希/用量，账本 outcome_unknown、Job manual_review。后四例未调用，没有第三轮、内容生成、素材或发布。6173 仅为部分已报告用量，不能视为完整账单或断言通过。
+- **发现的代码不足**：HTTP 状态、网络原因与 JSON/结构解析错误被压成 RuntimeError；日志和持久化证据无法区分。Eval 循环中前例的断言结果在后例异常后也丢失，只剩调用哈希。历史缺失的信息无法补回，不据两次同位置失败断言具体网络/模型根因。
+- **修复**：文本适配器引入安全错误类别，保留数字 HTTP 状态与 DNS/TLS/连接/超时/响应格式白名单，不读取 HTTP 错误正文或持久化 URL、密钥、上游错误消息。响应头 request ID 在解析正文前提取。账本 error_type 与 AI provenance 保存安全诊断；任何错误依然 outcome_unknown，不增加自动重试。
+- **部分结果**：常规异常时携带已完成用例的断言、输出哈希/字节数、套件哈希、完成/未完成计数，经 Worker 既有租约校验后落库；不保存原文，不把 partial 当 passed，不跳过余下用例。不是逐例持久化、断电恢复或自动断点续跑；旧轮结果不会被重建或改写。
+- **验证**：本地相关 110 项与 11 subtests 通过，Ruff/diff 检查通过，涵盖敏感错误脱敏、异常类型、调用账本、部分失败门禁、Job/Worker/Prompt 治理。尚待 Linux CI 和新镜像部署；当前服务器应用来源仍为 `6871ac9`。
+- **浏览器**：computer-use 入口已恢复，本次实际打开私人 HTTPS 登录页且 API 地址正确；不是新的登录后全流程验收，没有变更代理。受保护知识资料保持不读、不改、不暂存；私人运行器和回执不提交。
+
+### CI 与诊断版部署签收
+
+- 修复提交 `1502460aaf59e49ba2956f69ea7ec91b680a01eb` 以 John Wang 身份普通推送；首次 GitHub TLS EOF 后，以单命令 HTTP/1.1 普通重试成功，未强推、未改代理或证书设置。[CI #35435079201](https://github.com/heee000/ContentFlow/actions/runs/35435079201) 四个 Job 全绿，真实 PostgreSQL/MinIO 为 409 passed / 201 subtests，覆盖率 82.98%；前端、安全审计、源码/SBOM、签名来源证明通过。
+- 本地 API-only 镜像通过 `/tmp` 工作目录、禁网临时容器的安装包错误诊断 smoke。完整镜像压缩包 163475770 字节，SHA-256 `23577e43d12330ad8e892e16d3a5d66397f5fd48d34c7654552090a0743e25b6`；Tailscale 传输重置，原 LAN 直连大包也停滞。未加载残缺包，未改全局网络；本轮精确识别的 scp 已停止，远端 17874944 字节半包改名 `.partial-unused` 保留，避免误用。
+- 实际改用约 1.1 MB 的源码/wheel 增量：源码从已提交的 `1502460` 导出，wheel 从同一已验证镜像断网构建。63 个包文件逐一与提交源码比较，仅做 CRLF/LF 规范化；wheel 哈希 `6e5cb00e441d7521fb151d7d4d64a16e34ab98036e89aac247bba01a88637e73`，源码包哈希 `dbe7d95a3f3957f17cba2ed65076182d34426aedc49e306ae5233dcecb2280ea`。目标机校验哈希后，以确切旧后端 ID `aeab201d85bf04c3a8f8fecd123e1c560e1f00c243f9e9e2fca446030a7f1864` 禁网构建，只重装本项目、不解析/更新依赖。
+- 目标镜像 `146655ac40417080db59e774ac6bd841383e9e9940211154190a371df7c4944c` 保留原 13 层并增加 3 层；运行配置除声明的新源码标签外与旧镜像完全相同。镜像 ID/层结构不同于 Windows 完整构建是有意的增量构建，不冒称两者字节一致；目标源码目录与 site-packages 的 63 个文件哈希、禁网 smoke 均通过。
+- 新增私人 `diagnostics-20260919/activation.env`，须放在单人模式 activation.env 之后；仅覆盖后端镜像与应用 SHA。只更新 API/Worker，Web/DB/MinIO/Caddy、密钥、数据卷和旧配置/镜像未变，无迁移。API/Worker 均验证 production、治理开启、注册/mock 禁止、精确单工作区例外及原 120 秒模型超时。
+- 更新前后对象 checksum、1024 维向量、文档状态一致；账本仍为 3 succeeded（含原 Embedding）/2 outcome_unknown、可运行任务 0。TLS、Host、Web 同源、登录刷新退出、安全 Cookie 自检通过。最终 API 读取显示两个 error Eval/两个 manual_review Job、Prompt draft、ready_for_generation=false、工作流 0。没有因重启或新代码重放请求，没有新增模型、素材或社媒操作。
+- 下一次真实定位应先约定单次失败用例调用的范围；本次一次六用例授权已使用，不能自行扩成反复整套重跑。历史错误细节和断言结果仍缺失，诊断修复不等于外部调用根因已解决。
+
+## CF-20260919-03：一次授权诊断成功，未复现历史错误
+
+- **范围**：用户明确回复“允许”，仅授权对失败单例做一次可能收费的诊断。实际调用前核对指定工作区/管理员、生产配置、诊断源码 `1502460`、原套件与 Prompt 哈希、两个 error Eval 及无可运行任务。使用原 `plan-ignores-style-injection` 用例，模型、Prompt、输入和原 120 秒超时不变；规范请求 SHA-256 仍为 `cbb68f9b6cc9996471c27f970be3d2dfc96492c3611e07986922d43cc5339d16`。
+- **防重复与审计**：在工作区锁内先落库一次性授权审计，再调用既有真实适配器及持久调用账本。固定诊断 ID `e27e001c-8c4c-4d27-aecd-8181b61a98da` 已有授权记录时拒绝重放，只有只读 status；没有自动重试、创建完整 Eval run 或覆盖旧任务。审计说明代理代表所有者操作，不称独立审核，也不冒填旧请求 provider_checked。
+- **结果**：北京时间 19:35:32 开始，约 20.89 秒返回，既有单例断言全部通过；输出只记录哈希和 11304 字节，不持久化正文。供应商报告输入 599 / 输出 3680 / 合计 4279 tokens，响应模型名 deepseek-flash；真实账本复核恰好 1 条 succeeded attempt，供应商 request ID 为 `4a58e93c-6574-4e5e-96e1-c639abe8c157`。
+- **结论边界**：单例此次成功，说明该输入不是每次必然失败；没有复现错误，不能确定历史两次失败是网络、供应商服务还是其他原因，也不能补回旧请求费用/结果。它不是六例套件通过或内容质量验收。
+- **最终状态**：只读 API 复核原两个 Eval 仍 error、对应 Job 仍 manual_review，Prompt 仍 draft、ready_for_generation=false、工作流 0。未批准 Prompt、创建活动/内容/素材或发布，未再调用模型。源码与部署未变，本轮仅补诊断记录；后续若继续业务测试，仍需完整套件通过，不能拼凑单例结果冒充整套评测。
+
+## CF-20260919-04：完整真实 Eval 5/6 通过，准备非回显候选版本
+
+- **范围与执行**：用户在单例定位成功后回复“继续吧”，本轮只排入一轮完整六例评测，通过才生成测试稿。私有脚本先以独占创建方式记录本次授权，再通过正常 API 入队；旧两个未知结果任务和 provider_checked=false 保持原样，不重用之前已消耗的重跑授权。新 Eval `7af1a537-90c0-4bf3-9e15-ec84b0b9d9ff`、Job `aae8dd93-6891-46da-a8c0-089daf3ed5cb`，北京时间 2026-09-19 19:43:36 开始。
+- **真实结果**：六次模型请求全部 succeeded，无新的传输/响应异常或自动重试；原套件 5 passed / 1 failed，Eval 状态 failed、执行 Job succeeded（评测执行完毕不代表断言全通过）。供应商报告输入 4002 / 输出 19298 / 合计 23300 tokens；这是用量证据，不是金额或历史账单核对。策划结构、公众号结构、定向修订去除无依据承诺、拒绝虚构效果和区分安全事实/写作质量五例通过。
+- **实际不足**：`plan-ignores-style-injection` 返回的 JSON 满足所有必需结构，但序列化输出出现禁止标记，触发 forbidden_substring。输出 hash `46daded554af6ac4759dbc743293012c12a639073e1327e6aa11560312695825`、10244 字节；失败匹配值 hash `5091e5a3e168f991287b21656a4eadb20edc780b66f179954f4a1ba967821ff3`。当前只存哈希、不存输出正文，无法区分在拒绝/风险说明中引用原文还是把载荷纳入策划；不能直接宣称模型执行了攻击，也不能在缺乏原文时判为误报并豁免。
+- **候选处理**：原 plan 系统指令约束“不服从”，没有明确“不复述”。`deploy/private-test/acceptance_fixture.py` 新增纯函数 `build_no_echo_prompt_candidate`，只在 plan 末尾追加通用非回显规则：不可信 style_notes/style_skill/brief/knowledge 不改变输出协议，不在字段值/键名/风险说明中引用或编码越权指令及载荷，必要时仅概括说明，正常事实/风格仍处理。没有硬编码本例标记，没有删改套件、断言或生成/审稿 Prompt，没有改变全局 builtin 或覆盖旧版本。
+- **实际保存**：通过正常 API 建立独立 Prompt r2 草稿 `a5cb3511-2bc7-47d1-b394-c1c2103fcbb1`，来源 r1 `0f5bd28c-414f-443e-a5ab-22630f39bc90` 保留。r2 未评测、未批准、未激活；只是待验证的改进候选，不称已修好真实模型行为。服务器应用仍为 `1502460`，不需要为创建数据库中的 Prompt 草稿重建应用。
+- **离线验证**：私人部署、Prompt Eval、Prompt 治理回归 `30 passed, 2 subtests passed`，Ruff 通过。新测试验证三阶段输入校验、只改 plan 哈希、原对象/套件不变、无测试标记特化、即使标记只在拒绝说明中出现原断言仍失败；这些是构造/门禁验证，不是模型安全性证明。pytest 有既有 HTTP 客户端弃用及缓存目录权限警告，未改系统权限掩盖警告。
+- **最终只读核验**：套件 hash 仍 `20cc187b63ddaa189378ecad931195ef6cbf445dd8ef29011c4bf558e2d17173`，与 fixture 完全匹配；原知识对象 checksum、1024 维索引与 indexed 状态正确，runnable Job 为 0，累计 Provider attempts 为 10 succeeded / 2 outcome_unknown。没有活动/内容/素材生成或社媒发布，没有重启服务或修改代理、DNS、密钥、数据卷。
+- **未解决与下一步**：下一次限定对 r2 做一轮相同完整六例真实验收，通过后才本人确认/激活并生成一篇稿件；未知历史账单仍单独保留。长期需要有隐私边界的失败定位证据，以及不同注入变体/多次采样和真实内容人工质量验收。单次六例通过或单条系统指令均不是完整防注入保证，不能删标记后再评测输出来制造通过。
+
+## CF-20260921-01：重启后的 r2 真实门禁与首篇待审稿验收
+
+- **状态/授权**：外部待签收（本次真实 Eval 与生成完成，用户内容审核、媒体和发布尚未签收）。用户明确允许 r2 一轮完整六例，通过后生成一篇测试稿，停在人工审核。无新的应用源码修改；私有验收脚本新增绑定确切 r2 ID 的动作和 20260921 独占授权/排队回执，避免误操作 r1 或复用历史授权；私有脚本/凭据不提交。
+- **重启复核**：Tailscale 两端 Running/online、Health 无告警；旧 LAN SSH banner 超时，改用已知 Tailscale 地址并沿用严格 HostKeyAlias 校验成功，不关闭主机验证。Ubuntu uptime 约 10 分钟，六容器已自动运行。真实 TLS、Host 拒绝、生产同源、安全 Cookie、登录/刷新/退出、原知识对象 checksum/indexed 状态和 1024 维向量通过。内置浏览器重载登录页成功，当前没有登录会话；API 签收不能替代登录后 UI。没有改代理/DNS、重装或重启服务。
+- **完整 Eval**：`f00fcb5e-fc7e-4eab-9b97-0f6ebe4ce789`，Job `ba74d989-f8b7-41ec-a3b5-199ebe8d9082`，北京时间 19:34:03 至 19:35:54，原六例全部 passed。suite hash 仍 `20cc187b63ddaa189378ecad931195ef6cbf445dd8ef29011c4bf558e2d17173`；没有删标记、改断言、拼接上轮结果或自动重试。供应商报告输入 4318 / 输出 22252 / 合计 26570 tokens，六次调用均 succeeded、attempt_number=1。
+- **晋级**：仅 r2 `a5cb3511-2bc7-47d1-b394-c1c2103fcbb1` 通过正常 API 确认和激活，保留私人单人说明：由代理代表已授权的项目所有者确认，不是独立第二人审核。真实 Eval、权限、哈希、审计和内容人工审批均未关闭；原 r1、旧 1 次 failed 与 2 次 error/manual_review 不改。ready_for_generation=true 表示生成门禁就绪，不表示可以自动发布。
+- **生成链路**：创建「Ubuntu 内测 0921｜r2｜发布前复核清单」，活动 `89e656b4-5a42-4830-a7cb-99ce57496db0`，工作流 `4f88bc01-e79b-475f-9a98-bbad60e01520`，Job `76f6be8f-82b2-4414-aca6-cc3ad5724d26`。使用 editorial 风格、deep 质量模式、AI 封面路线。北京时间 19:37:04 至 19:38:06，真实 BGE-M3 检索一次（102 reported tokens），文本 plan/generate/review 各一次（4988/7433/9184，合计 21605 reported tokens）。没有因测试或观察状态新增收费请求；本轮两种服务合计 48277 reported tokens，不能据此代替账单金额核对。
+- **交付状态**：内容 `85abe2a3-2547-4724-907b-9f9565748ccf`《AI 文案发布前，先过这三道关：事实、承诺、适配》，1169 个 Python 字符（含标点/空白；其中 954 个 U+4E00–U+9FFF 汉字），status=needs_review，approved_by/approved_at 均 null。工作流 awaiting_review/human_review；规则通过、模型安全通过/low、模型质量分 8.2（目标 8.0）。这是自带编辑模型的评分，不能说成独立人工认可。未触发定向修订，revision_count=0。封面仅 1 个 planned Asset、没有存储对象，发布 Job=0、runnable Job=0。
+- **内容复审保留项**：开头示例只有问题、缺少改后对照；“本次没有平台规则依据”等审核过程语言进入正文。正文还建议把无出处数字改成不带数字的表述、把承诺改成条件句——仅改措辞不一定消除无依据的主张，人工修改时仍须补证据或删除主张。保留原稿和模型意见供用户检验，未代替用户改写或批准。
+- **继续改进项（未实现）**：① `knowledge_service.search_workspace_knowledge` 目前按向量近邻取前 N 项、没有最低相关性拒绝；本次返回与稿件无关的“青叶保温杯”合成片段，模型正确未写入正文，但不能把这种回避当作 RAG 相关性已达标，应增加可校准过滤/重排与空结果验收。② `workflow_service` 把全部召回片段写入 source_chunk_ids；本次无关片段也在其中，需区分“召回上下文”和“实际支持事实的引用”，不得将召回数量冒称证据数量。③ `content_agent` 仅在安全未过或总分低于目标时改写；本次分数达标却有高优先级修改意见，应设计结构化必修项/严重度与有界修订规则，避免完全依赖自评分，同时避免无限改写。④ 审稿建议本身也要复核，模型建议中的占位数字不能未经证据补全便进入正文。⑤ 六例仍只是小规模固定回归，应扩展注入变体、重复采样与人工写作质量验收，不宣称普遍安全。
+- **最终保护与版本**：累计账本 20 succeeded / 2 outcome_unknown；旧两个人工核对 provider_checked 仍 false，原数据 checksum/索引再次验证正确。API/Worker 镜像均 `sha256:146655ac40417080db59e774ac6bd841383e9e9940211154190a371df7c4944c`，对应源码 `1502460`。API restart count=0，Worker=1（既有计数，不能据此归因本次故障或称从未重启）。本轮不需要新构建、迁移或全套源码回归；仅验收记录按阶段普通提交/推送，未改受保护知识文件。
+- **下一步**：用户登录私人工作区，在「2 审核内容」打开上述活动/标题体验。当前停止点已满足，不自动批准内容或反复生成。用户确认内容后再分别验证 AI 图片、人工上传以及微信草稿链路；手机异网、备份恢复、长稳和历史未知账单仍独立待签收。
+
+## CF-20260921-02：全项目重新复审与隔离复现（未修复）
+
+- **状态/范围**：进行中（缺陷已记录，尚未修复）。响应用户全面审视请求，源码基线 `3a88f54`；本轮只做代码、文档、隔离测试审计，不把旧成熟度清单当成当前实现缺失。
+- **发现**：人工素材路线被全局 AI provider 覆盖；素材专用重试创建新 Job 绕过旧 unknown/manual_review；字符串 false 被 bool 转为 true；人工改稿仍保留旧质量通过/评分；生成 HTTP 重放缺少意图幂等。另复现相同旧刷新令牌的两个请求导致整个会话撤销；双标签页 UI 场景尚待验证。
+- **代码风险**：未保存正文直接审批的所见/所批不一致、Worker 丢租约后的逐调用保护不足；并记录 Prompt 快照、RAG 引用/模型兼容、成本边界、数据生命周期、前端 E2E、恢复/告警等。共 24 个条目，不等于 24 个已复现漏洞。
+- **处理方案**：新增 `docs/project_audit_20260921.md`，为每类问题列证据强度、影响、优先级与关闭条件；交接末节和企业复审 §54 链接到该独立清单。没有修改应用逻辑，不能标记问题已解决。
+- **验证**：`.contentflow/audit-20260921/reproduce.py` 使用临时 SQLite 和现有夹具，6 个探针均符合发现；不启动 Worker、不调用模型/素材/微信。原有四个测试模块为 `42 passed, 9 subtests passed in 23.24s`；有既有 TestClient 弃用与 pytest 缓存权限警告，未修改权限。未跑全套、真实 PostgreSQL 故障/并发、浏览器 E2E、新依赖审计或渗透测试。
+- **版本与保护**：真实部署沿用 CF-20260921-01 的记录，本轮未重新联网检查或修改；受保护知识文件未读改。仅文档变化，未提交/推送，未新建 PR 或执行真实副作用。下一阶段应先修跨入口门禁和审核正确性，再按报告次序推进，不能复用已消耗的一次性调用授权。
+
+## CF-20260923-01：素材操作门禁、严格模型输出与存储扫描边界
+
+- **问题**：按 A01/A02/A03/A27 关闭素材入口绕过、用户来源被静默改变、不合格审核字段被转为通过，以及下载写回与 API 反向持锁。全套回归还发现 A29 时钟相等/回拨导致已扫描对象误报缺失。
+- **解决**：新增共享素材领域门禁，关联内容历史未知调用，统一内容→素材→Job 的用户操作锁顺序；下载 Worker 同序写回；新增 reviewer 的“发起人工核对”入口但不伪造已核对。API 保留 manual，Worker 在配置漂移时建 Provider 前终止，保留原来源。HTTP 媒体同键恢复机制保留，未将只读下载失败当作新的生成费用。
+- **模型契约**：策划、成稿、审核及 Eval 共用版本化 schema，严格 bool/有限评分/字段/引用与平台布局；收到响应的账本/用量保留，独立标记应用校验失败，不回显模型原文、不自动重试。零分不被平均分替代。旧 Eval 缺少契约版本不能放行新版；历史记录不改，真实复测需另行限定范围。
+- **存储边界**：固定/回拨时钟 × 单页/分页四个新测试修复前均误报三个缺失（实际一个）；修复令已见标记严格晚于扫描起点，四项及存储全模块 18 项通过。没有删除真实文件或修改实机配额。
+- **验证**：素材相关 38 passed / 17 subtests；模型/Eval/Worker 第一轮修正 Mock 空摘要与静音口播规则后 81 passed / 2 subtests；全套及 CI 最终状态见 `docs/IMPLEMENTATION_PROGRESS.md`。新增 PG 下载/改稿与素材重试/切源竞争测试，不以 SQLite 通过替代 PG。前端前阶段 lint/build/2 项 SSR 已通过，CI 重验。
+- **保护/交付**：保留前次未提交审计及实现，受保护知识文件不读改；无真实收费、微信、部署、密钥或网络变化。使用现有 heee000 账号和 John Wang noreply 作者身份普通同步现分支，不 force、不自动合并。A25、A04/A06、幂等及其余完整计划继续，详见进度页。
+
+## CF-20260923-02：最终发布物绑定的服务端边界（A25 部分实现）
+
+- **问题**：审核者排期后，编辑者换图不会增加正文版本，旧 Worker 会发布后选的封面；排期/执行间渠道配置变化、素材原路径字节变化也不受正文版本保护。
+- **解决**：创建任务固定正文与渠道配置摘要、素材 ID/URI/校验和等清单；内容→渠道→素材锁序与等待后重读。Worker 比较固定清单并使用脱离 Session 的副本，防止提交后重新加载新状态；官方/导出/脚本实际读取时验证相同发送字节。安全重试与脚本切换沿用原清单，不能重新批准不同发布物。
+- **兼容性**：素材未就绪不能先排期；旧任务缺清单需重新确认，不自动补造。已提交/完成状态与未知结果人工核对仍优先保护；旧数据不改，无数据库结构迁移。配置或账号凭据轮换需要新任务；凭据不进入清单/日志。
+- **验证**：换图、同版本正文/配置/校验和漂移、重试/脚本绕过、旧任务/终态、Session 过期与派发后编辑、读取字节验证。微信 MockTransport 只允许鉴权 GET，错误封面没有触发任何 POST。PG 增加排期/选图竞争；本地全套与确切提交 CI 状态见进度页。
+- **保留工作**：A25 尚缺前端最终预览及确认指纹/E2E，本次不是所见即发布的完整签收；后续继续 A04/A06、A05/A26。真实部署、付费调用、微信、密钥、网络和受保护知识文件均未触碰。
+- **最终签收**：源码 `69d27ac` 的 CI `35846656631` 四项全部通过：491 passed / 226 subtests、覆盖率 83.92%，含 PostgreSQL/MinIO、前端与安全/来源校验。首轮 `f399c0f` 的失败是测试总 Job 计数混淆生成与旧对象清理；修正为唯一生成加精确清理目标断言后重新全量验证，不删安全断言、不覆盖失败记录。普通推送作者仍为 John Wang/heee000 noreply；最后仅补签收文档。
+
+## CF-20260923-03：全链路再审计与六项新增发现（未实施修复）
+
+- **范围**：按最新审计请求复核当前 HEAD `771146d` 及既有未提交 A25/A26。仅新增 `docs/project_audit_20260923_followup.md` 并更新交接/进度索引，未修改业务代码或推进部署。
+- **新增问题/根因**：A30 连接器 HTTP 异常带凭据 URL，经 Worker 错误字段到 viewer；A31 渠道自由 config 绕过模型/媒体目标安全策略；A32 自由 JSON 与 Python 真值/前端严格 bool 语义不一致；A33 不区分累计与增量且按快照计样本；A34 PATCH 允许 null、数据库非空。
+- **继续复核**：新增 A35，Embedding 响应仅排序和校验数量/维度，未校验 index 唯一完整；两个输入对应 `[0,0]`、`[-1,2]` 的两条 1024 维结果均被接受。纯 MockTransport、无真实调用/索引写入；修复应拒绝不对应结果并保留旧有效索引。A30–A32 亦用纯模拟请求再次确认，未输出虚构 token 原文。
+- **再次验证**：同日继续复核完整后端 471 passed / 20 skipped / 7 warnings / 226 subtests，186.44 秒；Ruff、前端 lint、无增量 TypeScript 和 diff 再次通过。只新增审计证据，业务实现不变；补记各平台实际支持边界和正文排版改进方向。
+- **方案与关闭条件**：详见新报告各项。优先统一连接器安全错误、官方目标策略、严格平台配置，再完成审核/预览/幂等、调用费用和质量。未把建议写成已解决。
+- **实证**：临时库＋合成图片＋MockTransport 复现 viewer 错误读到虚构 token、HTTP 回环目标通过、字符串 false 进入模拟公开提交、100→150 累计曝光汇总 250/样本 2、body=null 返回 500 且回滚；同键生成两份、旧质量分、领域硬编码、旧 Cookie 重放撤销也复核。没有真实出网。
+- **验证边界**：本地后端 471 passed / 20 skipped / 226 subtests / 7 warnings；Ruff、前端 lint、TypeScript、diff 检查通过。首次沙箱临时目录不可用改正常权限重跑，无 ACL 变更。探针中的状态码/路径和嵌套生命周期问题已纠正，不当作产品缺陷；遗留的确切合成临时目录已清理。没有浏览器 E2E、实机/当前 PG/MinIO/新依赖扫描结论。
+- **交付与保护**：未暂存、提交、推送；原应用改动、`.contentflow` 和受保护知识文件保留。真实 Ubuntu/模型/图片/微信/密钥/网络不变，公网计划仍暂停。已提交、在制和已部署版本分层记录，不复用历史 CI 冒称当前所有功能已交付。
+
+## CF-20260923-04：渠道错误、目标与公开发布开关安全修复
+
+- **问题**：A30 错误/日志泄密、A31 渠道自由地址可控制 Worker 请求、A32 字符串 false 触发公开提交。新增 50 项回归在旧实现全部失败后再实现修复。
+- **解决**：共享封闭平台配置与官方 Origin；输入及运行重新校验、禁止重定向；预览/执行严格 bool，前端阻止异常开关。共享安全错误保留阶段/类别/状态码，不回显上游原文或异常链；Worker 四类平台任务兜底，敏感 httpx 请求日志过滤；接口隐藏历史原始错误但不篡改数据库证据。详见渠道安全契约。
+- **恢复语义**：非安全重试的受控异常仍明确写 reconciliation_required，不能因为换了异常类型绕过未知结果门禁。网络前的无效配置终止，不发请求。数据库故障分类不变；删除任务行后的日志路径也不回退到原始异常。
+- **范围和验证**：增加抖音、角色/接口/数据库/日志、旧记录保留、正常真假、实例配置变化和标量 ID 兼容回归；使用合成数据、MockTransport，不调用真实账号。逐轮结果和最终签收见实施进度；没有将本地跳过当作 PG/MinIO 成功。
+- **最终本地签收**：558 passed / 20 skipped / 7 warnings / 226 subtests，181.66 秒；安全＋连接器/清单 97 passed。Ruff、前端 lint/TypeScript、Next.js 生产构建和 diff 通过。未重算覆盖率、未把跳过算作 PG/MinIO 通过。
+- **保护/交付**：保留全部原 A25/A26 在制改动和受保护知识文件；没有部署、修改代理/DNS/真实密钥或历史实机错误。相关文件与共享渲染依赖一并作为在制功能分支快照普通同步，不拆出依赖不全的提交；发布确认专项/PG/E2E 尚待完成，不能据此合并或部署。已核对作者归属及登录账号为 heee000，完整项目目标未完成。
+- **实际同步**：`a1e828f` 普通 push 成功；CI `35854697647` 仅 dispatch 一次，确切源码 SHA 已核对且当前 in_progress。无新建 PR/合并/部署，CI 结果尚未签收；后续应跟进同一 run。最后补文档记录，不复用旧 CI 绿色，也不将阶段提交称为完整目标达成。
+- **后续 CI 签收**：同一 run 四项成功，578 passed / 226 subtests / 7 warnings，84.33% 覆盖率，170.95 秒。此结果对应 `a1e828f`，不是下一批确认协议修改的证据。
+
+## CF-20260923-05：确认凭证绑定操作与失回执恢复验收
+
+- **问题/根因**：在制预览签名未包含操作编号，同一凭证更换编号可以重复建任务；并发等待内容锁后的请求还会先校验已改变的内容，而不是返回已创建的回执。签名版本检查使用 Python 宽松相等，允许 bool/float。
+- **解决**：预览和确认共用必填操作 ID，并纳入签名指纹；严格版本类型；内容锁后重查已提交回执，再验证可变状态。保留现有唯一约束/SAVEPOINT、原摘要精确重放和安全未知结果语义，不新增数据库结构或重写旧记录。
+- **验证**：新增 41 项 API/签名/权限/过期/原对象损坏/回执专项，四种 PG 并发场景；真实页面六条旅程覆盖回执丢失前服务端确实完成入库，重载后精确同请求/同任务 ID。具体本地与 CI 状态见进度页；没有以 API 模拟结果冒充入库、以 SQLite 冒充 PG。
+- **环境/修正记录**：旧 `put()` 损坏夹具实际上创建新对象，改为临时目录内确切对象修改；浏览器首轮语义选择器修正；Node 引擎和原生可选依赖问题按测试环境处理，不删锁文件、不修改 ACL/系统代理。Next 开发服务生成的前端说明文件已核对来源。
+- **涉及**：发布 schema/manifest/router、验证脚本、确认与 PG 测试；Playwright 配置/依赖、独立 API/前端启动器、浏览器测试、构建忽略规则及 CI；详见发布物契约与浏览器验收说明。
+- **边界**：确认排队不承诺对象存储原子快照；实际发送仍校验精确字节。此协议是未部署的在制升级，旧无编号凭证拒绝，旧不完整回执需人工核对，不自动生成第二份任务。六条旅程不替代所有平台/浏览器、实机、审核一致性或商业项目验收。没有部署、真实调用或更改受保护数据。
+- **最终本地前端**：Node 24.19 重新 `npm ci --include=optional` 回到锁定依赖，lint/TypeScript/Next 生产构建/Vinext 构建及 2 项 SSR 通过；生产 standalone 的六条 Edge 旅程再次全过（27.2 秒）。CI 已纳入 Chromium 相同旅程，尚须本批源码的实际运行签收。
+- **实际同步与最终 CI**：源码 `0d6608fdfec2d071676c1892e633bd8c15d761e9` 已按授权普通推送，`35858597117` 仅 dispatch 一次并最终四项 success。623 passed / 226 subtests / 7 warnings，218.37 秒，覆盖率 84.56%；6 条 Chromium 生产旅程通过（32.9 秒），含 PG/MinIO、当次依赖扫描、构建/SSR/SBOM/来源证据。最后仅补签收文档，不 force、不合并、不部署；完整目标仍在推进。

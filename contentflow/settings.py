@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
+from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +50,10 @@ class Settings(BaseSettings):
     allow_registration: bool = True
     allow_mock_providers: bool = False
     require_governed_prompts: bool = False
+    prompt_approval_policy: Literal["dual_control", "single_operator_private"] = (
+        "dual_control"
+    )
+    single_operator_workspace_id: UUID | None = None
     metrics_enabled: bool = False
     metrics_bearer_token: str | None = Field(default=None, max_length=4096)
     cors_origins: list[str] = Field(
@@ -65,10 +72,34 @@ class Settings(BaseSettings):
     storage_backend: str = "local"
     local_storage_dir: Path = Path(".contentflow/storage")
     max_upload_bytes: int = Field(default=100 * 1024 * 1024, gt=0, le=1024**3)
+    workspace_storage_max_bytes: int = Field(
+        default=5 * 1024**3,
+        gt=0,
+        le=10 * 1024**4,
+    )
+    workspace_storage_max_objects: int = Field(default=10_000, ge=1, le=1_000_000)
+    storage_reservation_ttl_minutes: int = Field(default=60, ge=5, le=24 * 60)
+    storage_cleanup_batch_size: int = Field(default=100, ge=1, le=500)
+    storage_delete_max_attempts: int = Field(default=20, ge=1, le=100)
+    storage_orphan_grace_seconds: int = Field(
+        default=24 * 60 * 60,
+        ge=60 * 60,
+        le=30 * 24 * 60 * 60,
+    )
+    storage_reconcile_schedule_enabled: bool = True
+    storage_reconcile_interval_hours: int = Field(default=24, ge=1, le=30 * 24)
+    storage_reconcile_schedule_batch_size: int = Field(default=25, ge=1, le=200)
+    storage_reconcile_schedule_poll_seconds: int = Field(default=60, ge=5, le=3600)
     publish_evidence_max_bytes: int = Field(
         default=10 * 1024 * 1024,
         gt=0,
         le=100 * 1024 * 1024,
+    )
+    publish_evidence_max_items: int = Field(default=20, ge=1, le=100)
+    publish_evidence_max_total_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        gt=0,
+        le=1024**3,
     )
     publish_evidence_max_pixels: int = Field(
         default=40_000_000,
@@ -91,11 +122,34 @@ class Settings(BaseSettings):
     embedding_provider: str = "hash"
     image_provider: str = "mock"
     video_provider: str = "mock"
+    release_sha: str = "development"
     model_api_base: str | None = None
     model_api_key: str | None = None
     text_model: str | None = None
+    model_request_timeout_seconds: int = Field(default=120, ge=10, le=300)
+    model_max_output_tokens: int = Field(default=8192, ge=1, le=32768)
+    model_output_limit_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    model_max_request_bytes: int = Field(default=256 * 1024, ge=1024, le=2 * 1024 * 1024)
+    model_max_response_bytes: int = Field(default=4 * 1024 * 1024, ge=1024, le=16 * 1024 * 1024)
+    workspace_provider_daily_calls: int = Field(default=1000, ge=1, le=100_000)
+    workspace_provider_daily_input_bytes: int = Field(default=64 * 1024 * 1024, ge=1024, le=1024**3)
+    workspace_provider_concurrent_requests: int = Field(default=4, ge=1, le=64)
+    embedding_api_batch_size: int = Field(default=32, ge=1, le=128)
+    embedding_max_text_chars: int = Field(default=8192, ge=1, le=32768)
+    embedding_max_request_bytes: int = Field(default=256 * 1024, ge=1024, le=2 * 1024 * 1024)
+    embedding_max_response_bytes: int = Field(default=8 * 1024 * 1024, ge=1024, le=32 * 1024 * 1024)
+    knowledge_max_chunks: int = Field(default=2000, ge=1, le=10_000)
+    embedding_api_base: str | None = None
+    embedding_api_key: str | None = None
     embedding_model: str | None = None
     embedding_dimensions: int = 1024
+    embedding_send_dimensions: bool = True
+    local_embedding_model: str = "BAAI/bge-m3"
+    local_embedding_revision: str = "5617a9f61b028005a4858fdac845db406aefb181"
+    local_embedding_device: str = "cpu"
+    local_embedding_cache_dir: Path = Path(".contentflow/models")
+    local_embedding_offline: bool = False
+    local_embedding_batch_size: int = Field(default=8, ge=1, le=128)
 
     media_api_base: str | None = None
     media_api_key: str | None = None
@@ -108,16 +162,54 @@ class Settings(BaseSettings):
     image_model: str | None = None
     video_model: str | None = None
 
+    image_search_provider: str = "openverse"
+    openverse_api_base: str = "https://api.openverse.org/v1"
+    image_search_result_limit: int = Field(default=6, ge=1, le=12)
+    image_search_download_allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["upload.wikimedia.org"]
+    )
+    asset_max_items_per_content_version: int = Field(default=20, ge=1, le=100)
+
     worker_poll_seconds: float = Field(default=1.0, gt=0, le=60)
     worker_lease_seconds: int = Field(default=300, ge=3, le=86_400)
     worker_max_attempts: int = Field(default=4, ge=1, le=100)
     worker_heartbeat_seconds: int = Field(default=10, ge=1, le=300)
     worker_stale_seconds: int = Field(default=45, ge=3, le=1800)
     worker_queue_stall_seconds: int = Field(default=300, ge=10, le=86_400)
+    worker_database_retry_initial_seconds: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=60,
+        allow_inf_nan=False,
+    )
+    worker_database_retry_max_seconds: float = Field(
+        default=30.0,
+        ge=0.1,
+        le=600,
+        allow_inf_nan=False,
+    )
+    worker_database_retry_max_attempts: int = Field(default=8, ge=1, le=100)
+    worker_database_retry_jitter_ratio: float = Field(
+        default=0.2,
+        ge=0,
+        le=1,
+        allow_inf_nan=False,
+    )
     publish_reconciliation_initial_delay_seconds: int = Field(default=15, ge=1, le=3600)
     publish_reconciliation_max_attempts: int = Field(default=20, ge=1, le=100)
+    publish_reconciliation_sweep_poll_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=3600,
+    )
+    publish_reconciliation_sweep_batch_size: int = Field(default=100, ge=1, le=1000)
 
-    @field_validator("cors_origins", "media_download_allowed_hosts", mode="before")
+    @field_validator(
+        "cors_origins",
+        "media_download_allowed_hosts",
+        "image_search_download_allowed_hosts",
+        mode="before",
+    )
     @classmethod
     def split_origins(cls, value):
         if isinstance(value, str):
@@ -131,9 +223,26 @@ class Settings(BaseSettings):
                 "worker_stale_seconds must be greater than twice "
                 "worker_heartbeat_seconds"
             )
+        if (
+            self.worker_database_retry_max_seconds
+            < self.worker_database_retry_initial_seconds
+        ):
+            raise ValueError(
+                "worker_database_retry_max_seconds must not be less than "
+                "worker_database_retry_initial_seconds"
+            )
         if self.publish_evidence_max_bytes > self.max_upload_bytes:
             raise ValueError(
                 "publish_evidence_max_bytes must not exceed max_upload_bytes"
+            )
+        if self.workspace_storage_max_bytes < self.max_upload_bytes:
+            raise ValueError(
+                "workspace_storage_max_bytes must not be less than max_upload_bytes"
+            )
+        if self.publish_evidence_max_total_bytes < self.publish_evidence_max_bytes:
+            raise ValueError(
+                "publish_evidence_max_total_bytes must not be less than "
+                "publish_evidence_max_bytes"
             )
         return self
 
@@ -143,6 +252,7 @@ class Settings(BaseSettings):
         "embedding_provider",
         "image_provider",
         "video_provider",
+        "image_search_provider",
     )
     @classmethod
     def normalize_choice(cls, value: str) -> str:
@@ -173,7 +283,44 @@ class Settings(BaseSettings):
         ]
         return tuple(dict.fromkeys(key for key in candidates if key))
 
+    @property
+    def resolved_embedding_api_base(self) -> str | None:
+        return self.embedding_api_base or self.model_api_base
+
+    @property
+    def resolved_embedding_api_key(self) -> str | None:
+        return self.embedding_api_key or self.model_api_key
+
+    def prompt_approval_policy_for(self, workspace_id: str) -> str:
+        if (
+            self.prompt_approval_policy == "single_operator_private"
+            and self.single_operator_workspace_id is not None
+            and str(self.single_operator_workspace_id) == workspace_id
+        ):
+            return "single_operator_private"
+        return "dual_control"
+
     def validate_runtime(self) -> None:
+        if self.prompt_approval_policy == "single_operator_private":
+            origin = urlparse(self.public_base_url)
+            if (
+                self.single_operator_workspace_id is None
+                or not self.require_governed_prompts
+                or self.allow_registration
+                or origin.scheme != "https"
+                or not re.fullmatch(
+                    r"[a-z0-9-]+\.[a-z0-9-]+\.ts\.net", origin.netloc
+                )
+                or origin.path not in {"", "/"}
+                or origin.query
+                or origin.fragment
+                or self.cors_origins != [self.public_base_url.rstrip("/")]
+            ):
+                raise ValueError(
+                    "Single-operator approval requires an explicit workspace UUID, "
+                    "governed prompts, disabled registration and a single HTTPS "
+                    "Tailscale origin; verify Serve is private (no Funnel) separately"
+                )
         if self.production and (
             self.secret_key == "change-this-in-production" or len(self.secret_key) < 32
         ):
@@ -225,11 +372,15 @@ class Settings(BaseSettings):
         supported_providers = {
             "text": ({"mock", "openai-compatible"}, self.text_provider),
             "embedding": (
-                {"hash", "openai-compatible"},
+                {"hash", "openai-compatible", "bge-m3-local"},
                 self.embedding_provider,
             ),
-            "image": ({"mock", "http"}, self.image_provider),
-            "video": ({"mock", "http"}, self.video_provider),
+            "image": ({"mock", "http", "manual"}, self.image_provider),
+            "video": ({"mock", "http", "manual"}, self.video_provider),
+            "image_search": (
+                {"openverse", "disabled"},
+                self.image_search_provider,
+            ),
         }
         invalid = [
             f"{kind}={provider}"
@@ -238,6 +389,21 @@ class Settings(BaseSettings):
         ]
         if invalid:
             raise ValueError(f"Unsupported providers: {', '.join(invalid)}")
+        if self.image_search_provider == "openverse":
+            self._validate_external_api_base(
+                self.openverse_api_base,
+                setting_name="CONTENTFLOW_OPENVERSE_API_BASE",
+            )
+            invalid_search_hosts = [
+                host
+                for host in self.image_search_download_allowed_hosts
+                if not self._is_exact_hostname(host)
+            ]
+            if not self.image_search_download_allowed_hosts or invalid_search_hosts:
+                raise ValueError(
+                    "CONTENTFLOW_IMAGE_SEARCH_DOWNLOAD_ALLOWED_HOSTS must contain "
+                    "one or more exact hostnames"
+                )
         offline_providers = {
             "text": self.text_provider == "mock",
             "embedding": self.embedding_provider == "hash",
@@ -252,19 +418,30 @@ class Settings(BaseSettings):
                 "Production mock/hash providers require "
                 "CONTENTFLOW_ALLOW_MOCK_PROVIDERS=true: " + ", ".join(enabled_offline)
             )
-        uses_openai_compatible = (
-            self.text_provider == "openai-compatible"
-            or self.embedding_provider == "openai-compatible"
-        )
-        if uses_openai_compatible:
+        if self.embedding_provider == "bge-m3-local":
+            if self.embedding_dimensions != 1024:
+                raise ValueError("BGE-M3 local embedding requires 1024 dimensions")
+            if self.local_embedding_model != "BAAI/bge-m3":
+                raise ValueError("BGE-M3 local embedding requires model BAAI/bge-m3")
+            if not re.fullmatch(r"[0-9a-f]{40}", self.local_embedding_revision):
+                raise ValueError(
+                    "CONTENTFLOW_LOCAL_EMBEDDING_REVISION must be a 40-character "
+                    "commit hash"
+                )
+            if not re.fullmatch(
+                r"(?:auto|cpu|mps|cuda(?::[0-9]+)?)",
+                self.local_embedding_device,
+            ):
+                raise ValueError(
+                    "CONTENTFLOW_LOCAL_EMBEDDING_DEVICE must be auto, cpu, mps, "
+                    "cuda, or cuda:<index>"
+                )
+        if self.text_provider == "openai-compatible":
             required = {
                 "CONTENTFLOW_MODEL_API_BASE": self.model_api_base,
                 "CONTENTFLOW_MODEL_API_KEY": self.model_api_key,
+                "CONTENTFLOW_TEXT_MODEL": self.text_model,
             }
-            if self.text_provider == "openai-compatible":
-                required["CONTENTFLOW_TEXT_MODEL"] = self.text_model
-            if self.embedding_provider == "openai-compatible":
-                required["CONTENTFLOW_EMBEDDING_MODEL"] = self.embedding_model
             missing = [name for name, value in required.items() if not value]
             if missing:
                 raise ValueError(
@@ -274,6 +451,32 @@ class Settings(BaseSettings):
             self._validate_external_api_base(
                 self.model_api_base or "",
                 setting_name="CONTENTFLOW_MODEL_API_BASE",
+            )
+        if self.embedding_provider == "openai-compatible":
+            required = {
+                (
+                    "CONTENTFLOW_EMBEDDING_API_BASE or "
+                    "CONTENTFLOW_MODEL_API_BASE"
+                ): self.resolved_embedding_api_base,
+                (
+                    "CONTENTFLOW_EMBEDDING_API_KEY or "
+                    "CONTENTFLOW_MODEL_API_KEY"
+                ): self.resolved_embedding_api_key,
+                "CONTENTFLOW_EMBEDDING_MODEL": self.embedding_model,
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise ValueError(
+                    "OpenAI-compatible embedding configuration missing: "
+                    + ", ".join(missing)
+                )
+            self._validate_external_api_base(
+                self.resolved_embedding_api_base or "",
+                setting_name=(
+                    "CONTENTFLOW_EMBEDDING_API_BASE"
+                    if self.embedding_api_base
+                    else "CONTENTFLOW_MODEL_API_BASE"
+                ),
             )
         uses_http_media = self.image_provider == "http" or self.video_provider == "http"
         if uses_http_media:

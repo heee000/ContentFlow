@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import io
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from ..db import get_db
+from ..asset_operations import lock_asset_for_mutation, require_new_asset_operation
 from ..audit import record_audit
 from ..dependencies import (
     AppSettings,
@@ -17,50 +20,194 @@ from ..dependencies import (
     Principal,
     require_role,
 )
-from ..entities import Asset, ContentItem
+from ..entities import (
+    Asset,
+    ContentItem,
+    ProviderInvocation,
+    ProviderInvocationAttempt,
+    new_id,
+)
+from ..media_validation import MediaValidationError, validate_media
+from ..review_evidence import resolve_brief
 from ..job_queue import enqueue_job
 from ..knowledge_service import local_path_from_uri
-from ..object_storage import build_object_storage
-from ..schemas import AssetResponse, JobResponse
+from ..object_storage import build_object_storage, is_managed_storage_uri
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    UpdatedAfter,
+    paginate,
+)
+from ..provider_invocations import provider_invocation_attempt_response_data
+from ..schemas import (
+    AssetCapabilitiesResponse,
+    AssetResponse,
+    AssetSelectionRequest,
+    AssetSourceChangeRequest,
+    JobResponse,
+    ProviderInvocationAttemptResponse,
+)
+from ..storage_ledger import (
+    StorageLedgerUnverified,
+    StorageQuotaExceeded,
+    build_ledgered_object_storage,
+    request_storage_deletion,
+)
 
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 Db = Annotated[Session, Depends(get_db)]
 Editor = Annotated[Principal, Depends(require_role("editor"))]
-MAX_ASSET_BYTES = 100 * 1024 * 1024
-ALLOWED_ASSET_MIME_PREFIXES = ("image/", "video/", "application/json")
+Reviewer = Annotated[Principal, Depends(require_role("reviewer"))]
 
 
-def get_asset(session: Session, workspace_id: str, asset_id: str) -> Asset:
-    asset = session.scalar(
-        select(Asset).where(
-            Asset.id == asset_id,
-            Asset.workspace_id == workspace_id,
-        )
+def storage_write_http_error(error: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=413 if isinstance(error, StorageQuotaExceeded) else 409,
+        detail=str(error),
+    )
+
+
+def request_asset_object_cleanup(
+    session: Session,
+    settings,
+    asset: Asset,
+) -> str | None:
+    if not is_managed_storage_uri(settings, asset.storage_uri):
+        return None
+    metadata = dict(asset.metadata_json or {})
+    checksum = metadata.get("checksum")
+    if not isinstance(checksum, str) or len(checksum) != 64:
+        checksum = None
+    _allocation, job = request_storage_deletion(
+        session,
+        settings=settings,
+        workspace_id=asset.workspace_id,
+        storage_uri=asset.storage_uri,
+        owner_type="asset",
+        owner_id=asset.id,
+        category="assets",
+        filename=f"{asset.id}.object",
+        size_bytes=asset.size_bytes,
+        checksum=checksum,
+        mime_type=asset.mime_type,
+    )
+    return job.id if job is not None else None
+
+
+def get_asset(
+    session: Session,
+    workspace_id: str,
+    asset_id: str,
+    *,
+    for_update: bool = False,
+) -> Asset:
+    query = select(Asset).where(
+        Asset.id == asset_id,
+        Asset.workspace_id == workspace_id,
+    )
+    asset = (
+        lock_asset_for_mutation(session, workspace_id, asset_id)
+        if for_update else session.scalar(query)
     )
     if asset is None:
         raise HTTPException(status_code=404, detail="素材不存在")
     return asset
 
 
+def asset_content_version(asset: Asset) -> int:
+    try:
+        version = int(asset.content_version)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=409, detail="素材版本无效") from error
+    if version < 1:
+        raise HTTPException(status_code=409, detail="素材版本无效")
+    return version
+
+
 @router.get("", response_model=list[AssetResponse])
 def list_assets(
     principal: CurrentPrincipal,
     session: Db,
+    response: Response,
     content_item_id: str | None = None,
     status_filter: str | None = None,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
 ):
     query = select(Asset).where(Asset.workspace_id == principal.workspace_id)
     if content_item_id:
         query = query.where(Asset.content_item_id == content_item_id)
     if status_filter:
         query = query.where(Asset.status == status_filter)
-    return list(session.scalars(query.order_by(Asset.created_at.desc())))
+    if updated_after is not None:
+        query = query.where(Asset.updated_at > updated_after)
+    return paginate(
+        session,
+        query,
+        timestamp_column=Asset.updated_at,
+        id_column=Asset.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
+
+
+@router.get("/capabilities", response_model=AssetCapabilitiesResponse)
+def get_asset_capabilities(
+    _principal: CurrentPrincipal,
+    settings: AppSettings,
+):
+    return AssetCapabilitiesResponse(
+        image_generation_available=settings.image_provider in {"http", "mock"},
+        image_search_available=settings.image_search_provider == "openverse",
+        video_generation_available=settings.video_provider in {"http", "mock"},
+    )
 
 
 @router.get("/{asset_id}", response_model=AssetResponse)
 def get_asset_detail(asset_id: str, principal: CurrentPrincipal, session: Db):
     return get_asset(session, principal.workspace_id, asset_id)
+
+
+@router.get(
+    "/{asset_id}/provider-invocations",
+    response_model=list[ProviderInvocationAttemptResponse],
+)
+def list_asset_provider_invocations(
+    asset_id: str,
+    principal: Reviewer,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    asset = get_asset(session, principal.workspace_id, asset_id)
+    rows = paginate(
+        session,
+        select(ProviderInvocationAttempt, ProviderInvocation)
+        .join(
+            ProviderInvocation,
+            ProviderInvocation.id == ProviderInvocationAttempt.invocation_id,
+        )
+        .where(
+            ProviderInvocation.workspace_id == principal.workspace_id,
+            ProviderInvocation.entity_type == "asset",
+            ProviderInvocation.entity_id == asset.id,
+        ),
+        timestamp_column=ProviderInvocationAttempt.started_at,
+        id_column=ProviderInvocationAttempt.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        scalar=False,
+    )
+    return [
+        provider_invocation_attempt_response_data(attempt, invocation)
+        for attempt, invocation in rows
+    ]
 
 
 @router.get("/{asset_id}/download")
@@ -95,6 +242,292 @@ def download_asset(
     )
 
 
+@router.post("/{asset_id}/source", response_model=AssetResponse)
+def change_asset_source(
+    asset_id: str,
+    payload: AssetSourceChangeRequest,
+    principal: Editor,
+    session: Db,
+    settings: AppSettings,
+):
+    asset = get_asset(
+        session,
+        principal.workspace_id,
+        asset_id,
+        for_update=True,
+    )
+    if asset.kind != "image":
+        raise HTTPException(status_code=409, detail="当前只支持切换封面图片来源")
+    if asset.content_item_id is None:
+        raise HTTPException(status_code=409, detail="素材未关联内容")
+    content = session.scalar(
+        select(ContentItem)
+        .where(
+            ContentItem.id == asset.content_item_id,
+            ContentItem.workspace_id == principal.workspace_id,
+        )
+        .with_for_update()
+    )
+    if content is None or content.status != "approved":
+        raise HTTPException(status_code=409, detail="内容审核通过后才能切换封面来源")
+    if asset_content_version(asset) != content.version:
+        raise HTTPException(status_code=409, detail="不能修改旧内容版本的素材")
+    if asset.status not in {
+        "planned",
+        "failed",
+        "awaiting_upload",
+        "awaiting_selection",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="素材正在处理或已经就绪，不能并发切换来源",
+        )
+
+    metadata = dict(asset.metadata_json or {})
+    if metadata.get("candidate_group"):
+        raise HTTPException(
+            status_code=409,
+            detail="混合候选已经分别生成，请直接选择候选素材",
+        )
+    require_new_asset_operation(session, asset)
+    previous_source = str(metadata.get("media_source") or asset.provider)
+    if payload.source == "generate" and settings.image_provider not in {
+        "http",
+        "mock",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="AI 图片生成服务尚未配置，可先选择人工上传或开放图库",
+        )
+    if payload.source == "search" and settings.image_search_provider != "openverse":
+        raise HTTPException(status_code=409, detail="开放图库搜索服务尚未配置")
+
+    try:
+        source_revision = int(metadata.get("source_revision") or 0) + 1
+    except (TypeError, ValueError):
+        source_revision = 1
+    for key in (
+        "candidate_count",
+        "license_checked_at",
+        "license_checked_by_user_id",
+        "license_review_required",
+        "pending_candidate_selection",
+        "provider_configuration_required",
+        "retry_sequence",
+        "search_candidates",
+        "search_provider",
+        "selected_candidate",
+        "source_checksum",
+    ):
+        metadata.pop(key, None)
+    metadata = {
+        **metadata,
+        "media_source": payload.source,
+        "source_revision": source_revision,
+        "selected": True,
+        "manual_upload_required": payload.source == "manual",
+    }
+    cleanup_job_id = request_asset_object_cleanup(session, settings, asset)
+    asset.storage_uri = None
+    asset.mime_type = None
+    asset.size_bytes = None
+    asset.external_task_id = None
+    asset.error = None
+    asset.metadata_json = metadata
+
+    job_type = None
+    if payload.source == "manual":
+        asset.provider = "manual"
+        asset.status = "awaiting_upload"
+    elif payload.source == "search":
+        asset.provider = "openverse"
+        asset.status = "queued"
+        job_type = "asset.search"
+    else:
+        asset.provider = settings.image_provider
+        asset.status = "queued"
+        job_type = "asset.generate"
+
+    if job_type is not None:
+        enqueue_job(
+            session,
+            job_type=job_type,
+            payload={"asset_id": asset.id},
+            workspace_id=principal.workspace_id,
+            idempotency_key=(
+                f"{job_type}:{asset.id}:source-r{source_revision}:"
+                f"content-v{content.version}"
+            ),
+        )
+    record_audit(
+        session,
+        action="asset.source_change",
+        entity_type="asset",
+        entity_id=asset.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "content_item_id": content.id,
+            "content_version": content.version,
+            "from": previous_source,
+            "to": payload.source,
+            "source_revision": source_revision,
+            "cleanup_job_id": cleanup_job_id,
+        },
+    )
+    session.flush()
+    return asset
+
+
+@router.post("/{asset_id}/select", response_model=AssetResponse)
+def select_asset_candidate(
+    asset_id: str,
+    payload: AssetSelectionRequest,
+    principal: Editor,
+    session: Db,
+    settings: AppSettings,
+):
+    asset = get_asset(
+        session,
+        principal.workspace_id,
+        asset_id,
+        for_update=True,
+    )
+    if asset.content_item_id is None:
+        raise HTTPException(status_code=409, detail="素材未关联内容")
+    content = session.scalar(
+        select(ContentItem)
+        .where(
+            ContentItem.id == asset.content_item_id,
+            ContentItem.workspace_id == principal.workspace_id,
+        )
+        .with_for_update()
+    )
+    if content is None or content.status != "approved":
+        raise HTTPException(status_code=409, detail="内容必须保持审核通过状态")
+    if asset_content_version(asset) != content.version:
+        raise HTTPException(status_code=409, detail="不能选择旧内容版本的素材")
+    metadata = dict(asset.metadata_json or {})
+    cleanup_job_id = None
+
+    if asset.provider == "openverse" and asset.status == "awaiting_selection":
+        require_new_asset_operation(session, asset)
+        if not payload.candidate_id:
+            raise HTTPException(status_code=422, detail="请选择搜索结果")
+        if not payload.acknowledge_license_check:
+            raise HTTPException(
+                status_code=422,
+                detail="使用开放图库前必须核验原始落地页并确认许可",
+            )
+        candidates = metadata.get("search_candidates")
+        if not isinstance(candidates, list):
+            raise HTTPException(status_code=409, detail="图片搜索候选元数据无效")
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if isinstance(candidate, dict)
+                and candidate.get("id") == payload.candidate_id
+            ),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(status_code=404, detail="图片搜索候选不存在")
+        checked_at = datetime.now(timezone.utc).isoformat()
+        asset.status = "queued"
+        asset.error = None
+        metadata = {
+            **metadata,
+            "pending_candidate_selection": {
+                "candidate_id": payload.candidate_id,
+                "license_checked_by_user_id": principal.user_id,
+                "license_checked_at": checked_at,
+            },
+            "license_checked_by_user_id": principal.user_id,
+            "license_checked_at": checked_at,
+        }
+        asset.metadata_json = metadata
+        job = enqueue_job(
+            session,
+            job_type="asset.download",
+            payload={
+                "asset_id": asset.id,
+                "candidate_id": payload.candidate_id,
+                "content_version": content.version,
+            },
+            workspace_id=principal.workspace_id,
+            idempotency_key=(
+                f"asset.download:{asset.id}:{payload.candidate_id}:"
+                f"content-v{content.version}"
+            ),
+        )
+        record_audit(
+            session,
+            action="asset.selection_requested",
+            entity_type="asset",
+            entity_id=asset.id,
+            workspace_id=principal.workspace_id,
+            actor_user_id=principal.user_id,
+            metadata={
+                "content_item_id": content.id,
+                "candidate_group": metadata.get("candidate_group"),
+                "provider": asset.provider,
+                "job_id": job.id,
+            },
+        )
+        session.flush()
+        return asset
+    elif asset.status == "ready":
+        if payload.candidate_id:
+            raise HTTPException(
+                status_code=422,
+                detail="已生成素材不接受搜索候选 ID",
+            )
+        metadata["selected"] = True
+        asset.metadata_json = metadata
+    else:
+        raise HTTPException(status_code=409, detail="当前素材还不能被选用")
+
+    candidate_group = metadata.get("candidate_group")
+    if candidate_group:
+        siblings = list(
+            session.scalars(
+                select(Asset).where(
+                    Asset.content_item_id == content.id,
+                    Asset.workspace_id == principal.workspace_id,
+                    Asset.content_version == content.version,
+                    Asset.id != asset.id,
+                ).limit(settings.asset_max_items_per_content_version + 1)
+            )
+        )
+        if len(siblings) > settings.asset_max_items_per_content_version:
+            raise HTTPException(
+                status_code=409,
+                detail="当前内容版本素材数量超过配置上限，请先由管理员处理异常数据",
+            )
+        for sibling in siblings:
+            sibling_metadata = dict(sibling.metadata_json or {})
+            if sibling_metadata.get("candidate_group") == candidate_group:
+                sibling_metadata["selected"] = False
+                sibling.metadata_json = sibling_metadata
+    record_audit(
+        session,
+        action="asset.select",
+        entity_type="asset",
+        entity_id=asset.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "content_item_id": content.id,
+            "candidate_group": candidate_group,
+            "provider": asset.provider,
+            "cleanup_job_id": cleanup_job_id,
+        },
+    )
+    session.flush()
+    return asset
+
+
 @router.post(
     "/{asset_id}/retry",
     response_model=JobResponse,
@@ -104,18 +537,66 @@ def retry_asset(
     asset_id: str,
     principal: Editor,
     session: Db,
+    settings: AppSettings,
 ):
-    asset = get_asset(session, principal.workspace_id, asset_id)
+    asset = get_asset(session, principal.workspace_id, asset_id, for_update=True)
     if asset.status not in {"failed", "planned", "stale"}:
-        raise HTTPException(status_code=409, detail="当前素材状态不能重新生成")
+        raise HTTPException(status_code=409, detail="当前素材状态不能重新执行")
+    require_new_asset_operation(session, asset)
+    metadata = dict(asset.metadata_json or {})
+    job_payload: dict[str, object] = {"asset_id": asset.id}
+    if asset.provider == "openverse":
+        pending = metadata.get("pending_candidate_selection")
+        if asset.status == "failed" and isinstance(pending, dict):
+            candidate_id = pending.get("candidate_id")
+            if not isinstance(candidate_id, str) or not candidate_id:
+                raise HTTPException(status_code=409, detail="图库候选下载凭证无效")
+            job_type = "asset.download"
+            job_payload.update(
+                {
+                    "candidate_id": candidate_id,
+                    "content_version": asset_content_version(asset),
+                }
+            )
+        else:
+            job_type = "asset.search"
+            metadata.pop("pending_candidate_selection", None)
+    else:
+        configured_provider = (
+            settings.image_provider
+            if asset.kind == "image"
+            else settings.video_provider
+        )
+        if asset.provider == "configured-image-generation":
+            configured_provider = settings.image_provider
+        elif asset.provider == "configured-video-generation":
+            configured_provider = settings.video_provider
+        if asset.provider in {"manual", "manual-upload"}:
+            raise HTTPException(
+                status_code=409,
+                detail="该素材使用人工上传模式，请上传真实素材而不是重新生成",
+            )
+        if configured_provider == "manual":
+            raise HTTPException(
+                status_code=409,
+                detail="活动要求 AI 生成素材，但当前环境仍未配置对应 Provider",
+            )
+        asset.provider = configured_provider
+        job_type = "asset.generate"
+    try:
+        retry_sequence = int(metadata.get("retry_sequence") or 0) + 1
+    except (TypeError, ValueError):
+        retry_sequence = 1
+    metadata["retry_sequence"] = retry_sequence
+    asset.metadata_json = metadata
     asset.status = "queued"
     asset.error = None
     job = enqueue_job(
         session,
-        job_type="asset.generate",
-        payload={"asset_id": asset.id},
+        job_type=job_type,
+        payload=job_payload,
         workspace_id=principal.workspace_id,
-        idempotency_key=f"asset.generate:{asset.id}:retry",
+        idempotency_key=f"{job_type}:{asset.id}:retry:{retry_sequence}",
     )
     record_audit(
         session,
@@ -137,67 +618,201 @@ async def upload_asset(
     principal: Editor,
     session: Db,
     settings: AppSettings,
-    content_item_id: str = Form(...),
-    kind: str = Form(...),
+    asset_id: str | None = Form(None),
+    content_item_id: str | None = Form(None),
+    kind: str | None = Form(None),
     file: UploadFile = File(...),
 ):
-    content = session.scalar(
-        select(ContentItem).where(
-            ContentItem.id == content_item_id,
-            ContentItem.workspace_id == principal.workspace_id,
+    asset: Asset | None = None
+    content: ContentItem | None = None
+    if asset_id:
+        asset = get_asset(session, principal.workspace_id, asset_id, for_update=True)
+        if asset.content_item_id is None:
+            raise HTTPException(status_code=409, detail="素材任务未关联内容")
+        if content_item_id and content_item_id != asset.content_item_id:
+            raise HTTPException(status_code=409, detail="素材任务与关联内容不一致")
+        if kind and kind != asset.kind:
+            raise HTTPException(status_code=409, detail="素材类型与目标任务不一致")
+        content = session.scalar(
+            select(ContentItem)
+            .where(
+                ContentItem.id == asset.content_item_id,
+                ContentItem.workspace_id == principal.workspace_id,
+            )
+            .with_for_update()
         )
-    )
+    else:
+        if not content_item_id or not kind:
+            raise HTTPException(
+                status_code=422,
+                detail="请选择待上传素材任务，或同时提供关联内容和素材类型",
+            )
+        content = session.scalar(
+            select(ContentItem)
+            .where(
+                ContentItem.id == content_item_id,
+                ContentItem.workspace_id == principal.workspace_id,
+            )
+            .with_for_update()
+        )
     if content is None:
         raise HTTPException(status_code=404, detail="关联内容不存在")
-    content_type = file.content_type or "application/octet-stream"
-    if not any(
-        content_type.startswith(prefix)
-        for prefix in ALLOWED_ASSET_MIME_PREFIXES
-    ):
-        raise HTTPException(status_code=415, detail="仅支持图片、视频或分镜 JSON")
-    data = await file.read(MAX_ASSET_BYTES + 1)
+    if content.status != "approved":
+        raise HTTPException(status_code=409, detail="内容必须先通过审核再上传正式素材")
+
+    target_kind = asset.kind if asset is not None else str(kind)
+    if target_kind not in {"image", "video", "video_storyboard"}:
+        raise HTTPException(status_code=422, detail="不支持的素材类型")
+    if asset is None:
+        candidates = list(
+            session.scalars(
+                select(Asset)
+                .where(
+                    Asset.content_item_id == content.id,
+                    Asset.workspace_id == principal.workspace_id,
+                    Asset.content_version == content.version,
+                    Asset.kind == target_kind,
+                    Asset.status.in_(["awaiting_upload", "planned", "failed"]),
+                )
+                .limit(settings.asset_max_items_per_content_version + 1)
+                .with_for_update()
+            )
+        )
+        if len(candidates) > settings.asset_max_items_per_content_version:
+            raise HTTPException(
+                status_code=409,
+                detail="当前内容版本素材数量超过配置上限，请先由管理员处理异常数据",
+            )
+        if len(candidates) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail="当前版本有多个待上传素材任务，请选择具体任务",
+            )
+        if candidates:
+            asset = candidates[0]
+    if asset is not None:
+        if asset.status not in {"awaiting_upload", "planned", "failed"}:
+            raise HTTPException(status_code=409, detail="当前素材状态不能人工替换")
+        asset_version = asset_content_version(asset)
+        if asset_version != content.version:
+            raise HTTPException(status_code=409, detail="素材任务属于旧内容版本")
+
+    filled_existing_task = asset is not None
+    if asset is not None:
+        require_new_asset_operation(session, asset)
+    if asset is None:
+        current_asset_count = session.scalar(
+            select(func.count(Asset.id)).where(
+                Asset.workspace_id == principal.workspace_id,
+                Asset.content_item_id == content.id,
+                Asset.content_version == content.version,
+            )
+        )
+        if int(current_asset_count or 0) >= settings.asset_max_items_per_content_version:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "当前内容版本素材数量已达到配置上限 "
+                    f"({settings.asset_max_items_per_content_version})"
+                ),
+            )
+    claimed_type = file.content_type or "application/octet-stream"
+    data = await file.read(settings.max_upload_bytes + 1)
     if not data:
         raise HTTPException(status_code=400, detail="上传素材为空")
-    if len(data) > MAX_ASSET_BYTES:
-        raise HTTPException(status_code=413, detail="素材不能超过 100MB")
+    if len(data) > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"素材不能超过 {settings.max_upload_bytes} 字节",
+        )
     filename = file.filename or (
-        "asset.json" if content_type == "application/json" else "asset.bin"
+        "asset.json" if claimed_type == "application/json" else "asset.bin"
     )
-    stored = build_object_storage(settings).put(
-        workspace_id=principal.workspace_id,
-        category="assets",
-        filename=filename,
-        stream=io.BytesIO(data),
-        content_type=content_type,
-    )
-    asset = Asset(
-        workspace_id=principal.workspace_id,
-        content_item_id=content.id,
-        kind=kind,
-        provider="upload",
-        status="ready",
-        storage_uri=stored.uri,
-        mime_type=stored.mime_type,
-        size_bytes=stored.size_bytes,
-        metadata_json={
-            "content_version": content.version,
-            "checksum": stored.checksum,
-            "original_filename": filename,
-        },
-    )
-    session.add(asset)
-    session.flush()
-    record_audit(
+    original_filename = filename
+    source_checksum: str | None = None
+    if target_kind == "video_storyboard" and claimed_type != "application/json":
+        raise HTTPException(status_code=415, detail="分镜任务只接受 JSON 文件")
+    try:
+        forbidden_phrases = tuple(resolve_brief(session, content).forbidden_phrases)
+        normalized = await run_in_threadpool(validate_media, data, kind=target_kind, mime_type=claimed_type,
+            filename=filename, max_bytes=settings.max_upload_bytes,
+            max_pixels=settings.publish_evidence_max_pixels, forbidden_phrases=forbidden_phrases)
+    except MediaValidationError as error:
+        raise HTTPException(status_code=415, detail=f"[{error.code}] {error}") from None
+    data, claimed_type = normalized.data, normalized.mime_type
+    original_filename = normalized.original_filename
+    filename = f"asset.{normalized.extension}"
+    source_checksum = normalized.source_sha256
+
+    storage_owner_id = asset.id if asset is not None else new_id()
+    storage = build_ledgered_object_storage(
         session,
-        action="asset.upload",
-        entity_type="asset",
-        entity_id=asset.id,
-        workspace_id=principal.workspace_id,
-        actor_user_id=principal.user_id,
-        metadata={
-            "content_item_id": content.id,
-            "size_bytes": stored.size_bytes,
-            "mime_type": stored.mime_type,
-        },
+        settings,
+        owner_type="asset",
+        owner_id=storage_owner_id,
     )
+    try:
+        stored = storage.put(
+            workspace_id=principal.workspace_id,
+            category="assets",
+            filename=filename,
+            stream=io.BytesIO(data),
+            content_type=claimed_type,
+        )
+    except (StorageQuotaExceeded, StorageLedgerUnverified) as error:
+        raise storage_write_http_error(error) from error
+    if asset is None:
+        asset = Asset(
+            id=storage_owner_id,
+            workspace_id=principal.workspace_id,
+            content_item_id=content.id,
+            content_version=content.version,
+            kind=target_kind,
+        )
+        session.add(asset)
+    cleanup_job_id = (
+        request_asset_object_cleanup(session, settings, asset)
+        if asset.storage_uri != stored.uri
+        else None
+    )
+    asset.provider = "manual-upload"
+    asset.status = "ready"
+    asset.storage_uri = stored.uri
+    asset.mime_type = stored.mime_type
+    asset.size_bytes = stored.size_bytes
+    asset.external_task_id = None
+    asset.error = None
+    asset.metadata_json = {
+        **(asset.metadata_json or {}),
+        "content_version": content.version,
+        "checksum": stored.checksum,
+        "source_checksum": source_checksum or stored.checksum,
+        "media_validation": normalized.evidence,
+        "original_filename": original_filename,
+        "manual_upload_required": False,
+    }
+    try:
+        session.flush()
+        record_audit(
+            session,
+            action="asset.upload",
+            entity_type="asset",
+            entity_id=asset.id,
+            workspace_id=principal.workspace_id,
+            actor_user_id=principal.user_id,
+            metadata={
+                "content_item_id": content.id,
+                "content_version": content.version,
+                "size_bytes": stored.size_bytes,
+                "mime_type": stored.mime_type,
+                "filled_existing_task": filled_existing_task,
+                "cleanup_job_id": cleanup_job_id,
+            },
+        )
+    except Exception:
+        try:
+            storage.delete(stored.uri)
+        except Exception:
+            pass
+        raise
     return asset

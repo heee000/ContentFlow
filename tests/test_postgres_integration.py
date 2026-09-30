@@ -1,23 +1,41 @@
 from __future__ import annotations
 
+import asyncio
+import io
+import logging
+import math
+import multiprocessing
 import os
 import re
+import signal
+import subprocess
+import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from threading import Barrier
-from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 from alembic import command
-from fastapi import HTTPException
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, select, text
+from fastapi import HTTPException
+import pytest
+from sqlalchemy import create_engine, event, inspect, select, text, update
+from PIL import Image
+from media_fixtures import png_bytes
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.datastructures import UploadFile
 
 from contentflow.auth_rate_limit import RateLimitKey, consume_rate_limits
+from contentflow.asset_operations import AssetOperationConflict
+from contentflow.asset_work import AssetWorkSuperseded
+from contentflow.audit import record_audit, verify_audit_chain
 from contentflow.connectors import ConnectorResult
 from contentflow.entities import (
     Asset,
@@ -26,24 +44,58 @@ from contentflow.entities import (
     Campaign,
     ChannelConnection,
     ContentItem,
+    ContentReviewEvidence,
+    ContentRevision,
     Job,
+    JobManualReview,
+    MetricSnapshot,
     PublishJob,
+    PublishEvidence,
+    StorageObjectAllocation,
     User,
+    WorkerNode,
     WorkflowRun,
     Workspace,
+    WorkspaceStorageUsage,
 )
+from contentflow.job_queue import enqueue_job
 from contentflow.migrate import HEAD_REVISION, PROJECT_ROOT
+from contentflow.object_storage import LocalObjectStorage, build_object_storage
+from contentflow.publish_manifest import PublishManifestConflict, build_release_manifest
 from contentflow.observability import ObservabilityMetrics
+from contentflow.routers.publish_evidence import upload_publish_evidence
+from contentflow.routers.assets import change_asset_source, retry_asset, select_asset_candidate
+from contentflow.routers.publishing import preview_publish, schedule_publish
+from contentflow.routers import publishing as publishing_router
+from contentflow.routers.contents import review_content, update_content
+from contentflow.routers.metrics import metrics_summary
+from contentflow.review_evidence import capture_review, digest, local_review, resolve_brief
+from contentflow.schemas import AssetSelectionRequest, AssetSourceChangeRequest, ContentUpdate, PublishPreviewRequest, PublishScheduleRequest, ReviewDecision
 from contentflow.security import hash_rate_limit_key
 from contentflow.settings import Settings
+from contentflow.storage_ledger import (
+    LedgeredObjectStorage,
+    StorageQuotaExceeded,
+    create_workspace_storage_usage,
+    schedule_due_storage_reconciliations,
+)
 from contentflow.worker import (
+    DatabaseErrorKind,
+    Worker,
+    classify_database_error,
+    database_error_sqlstate,
     handle_publish_reconcile,
+    handle_publish_dispatch,
+    handle_asset_download,
+    logger as worker_logger,
+    sanitized_database_error,
     schedule_pending_publish_reconciliations,
 )
 
 
 TEST_DATABASE_URL = os.getenv("CONTENTFLOW_TEST_POSTGRES_URL")
 TEST_ADMIN_DATABASE_URL = os.getenv("CONTENTFLOW_TEST_POSTGRES_ADMIN_URL")
+TEST_POSTGRES_CONTAINER_ID = os.getenv("CONTENTFLOW_TEST_POSTGRES_CONTAINER_ID")
 
 pytestmark = pytest.mark.skipif(
     not TEST_DATABASE_URL,
@@ -56,6 +108,168 @@ class PostgresHarness:
     engine: Engine
     sessions: sessionmaker[Session]
     settings: Settings
+    storage_dir: Path
+
+
+def _capture_postgres_error(connection, statement: str) -> DBAPIError:
+    with pytest.raises(DBAPIError) as captured:
+        connection.execute(text(statement))
+    return captured.value
+
+
+def _run_serializable_increment(
+    engine: Engine,
+    barrier: Barrier,
+) -> DBAPIError | None:
+    with engine.connect().execution_options(
+        isolation_level="SERIALIZABLE"
+    ) as connection:
+        transaction = connection.begin()
+        try:
+            connection.execute(text("SET LOCAL statement_timeout = '10s'"))
+            connection.execute(
+                text(
+                    "SELECT value FROM contentflow_sqlstate_probe "
+                    "WHERE id = 1"
+                )
+            ).scalar_one()
+            barrier.wait(timeout=10)
+            connection.execute(
+                text(
+                    "UPDATE contentflow_sqlstate_probe "
+                    "SET value = value + 1 WHERE id = 1"
+                )
+            )
+            transaction.commit()
+        except DBAPIError as exc:
+            transaction.rollback()
+            return exc
+        except BaseException:
+            transaction.rollback()
+            raise
+    return None
+
+
+def _run_deadlocking_update(
+    engine: Engine,
+    barrier: Barrier,
+    *,
+    first_id: int,
+    second_id: int,
+) -> DBAPIError | None:
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            connection.execute(text("SET LOCAL statement_timeout = '10s'"))
+            connection.execute(
+                text(
+                    "UPDATE contentflow_sqlstate_probe "
+                    "SET value = value + 1 WHERE id = :row_id"
+                ),
+                {"row_id": first_id},
+            )
+            barrier.wait(timeout=10)
+            connection.execute(
+                text(
+                    "UPDATE contentflow_sqlstate_probe "
+                    "SET value = value + 1 WHERE id = :row_id"
+                ),
+                {"row_id": second_id},
+            )
+            transaction.commit()
+        except DBAPIError as exc:
+            transaction.rollback()
+            return exc
+        except BaseException:
+            transaction.rollback()
+            raise
+    return None
+
+
+def _control_disposable_postgres_container(action: str, container_id: str) -> None:
+    normalized_id = container_id.strip().lower()
+    if action not in {"start", "stop"}:
+        raise ValueError("Unsupported disposable PostgreSQL container action")
+    if not re.fullmatch(r"[a-f0-9]{12,64}", normalized_id):
+        raise ValueError("PostgreSQL test container ID is not a safe Docker ID")
+    subprocess.run(
+        ["docker", action, normalized_id],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def _wait_for_postgres_ready(engine: Engine, *, timeout_seconds: float = 30) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            with engine.connect() as connection:
+                if connection.scalar(text("SELECT 1")) == 1:
+                    return
+        except DBAPIError:
+            pass
+        time.sleep(0.2)
+    raise AssertionError("Disposable PostgreSQL did not become ready before timeout")
+
+
+def _wait_for_job_status(
+    sessions: sessionmaker[Session],
+    job_id: str,
+    expected_status: str,
+    *,
+    timeout_seconds: float = 15,
+) -> Job:
+    deadline = time.monotonic() + timeout_seconds
+    last_status: str | None = None
+    while time.monotonic() < deadline:
+        with sessions() as session:
+            job = session.get(Job, job_id)
+            if job is not None:
+                last_status = job.status
+                if job.status == expected_status:
+                    return job
+        time.sleep(0.1)
+    raise AssertionError(
+        f"Job did not reach {expected_status!r} before timeout; "
+        f"last_status={last_status!r}"
+    )
+
+
+def _run_crash_probe_worker(
+    settings: Settings,
+    worker_id: str,
+    handler_entered,
+) -> None:
+    engine = create_engine(settings.database_url, pool_pre_ping=True)
+    sessions = sessionmaker(
+        bind=engine,
+        expire_on_commit=False,
+        future=True,
+    )
+
+    def handle_probe(
+        _session: Session,
+        payload: dict[str, str],
+        _settings: Settings,
+    ) -> dict[str, str]:
+        if payload.get("phase") != "before_kill":
+            raise ValueError("Unexpected crash probe phase")
+        handler_entered.set()
+        threading.Event().wait(60)
+        raise RuntimeError("Crash probe worker was not terminated before timeout")
+
+    worker = Worker(
+        settings=settings,
+        worker_id=worker_id,
+        session_factory=sessions,
+        handlers={"postgres.worker.crash.probe": handle_probe},
+    )
+    try:
+        worker.run_forever()
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture(scope="module")
@@ -112,6 +326,7 @@ def postgres_harness(tmp_path_factory: pytest.TempPathFactory):
                 future=True,
             ),
             settings=settings,
+            storage_dir=storage_dir,
         )
     finally:
         if test_engine is not None:
@@ -196,15 +411,22 @@ def _create_publish_fixture(
         )
         session.add_all([content, channel])
         session.flush()
+        stored = build_object_storage(harness.settings).put(
+            workspace_id=workspace.id, category="assets", filename="cover.png",
+            stream=io.BytesIO(png_bytes()), content_type="image/png",
+        )
         asset = Asset(
             workspace_id=workspace.id,
             content_item_id=content.id,
             kind="image",
             status="ready",
-            storage_uri=f"memory://postgres/{suffix}.png",
+            storage_uri=stored.uri,
             mime_type="image/png",
-            metadata_json={"content_version": 1},
+            size_bytes=stored.size_bytes,
+            metadata_json={"content_version": 1, "checksum": stored.checksum},
         )
+        session.add(asset)
+        session.flush()
         publish_job = PublishJob(
             workspace_id=workspace.id,
             content_item_id=content.id,
@@ -214,7 +436,8 @@ def _create_publish_fixture(
             idempotency_key=f"postgres-publish-{suffix}",
             external_id=external_id,
             attempts=1 if status == "submitted" else 0,
-            request_json={"content_version": 1},
+            request_json={"content_version": 1, "release_manifest":
+                build_release_manifest(content, channel, [asset], harness.settings)},
             response_json={"submit": {"publish_id": external_id}},
         )
         session.add_all([asset, publish_job])
@@ -222,7 +445,546 @@ def _create_publish_fixture(
         return {
             "workspace_id": workspace.id,
             "publish_job_id": publish_job.id,
+            "user_id": user.id,
         }
+
+
+@pytest.mark.parametrize("first,second", [
+    ("edit", "approve"), ("approve", "edit"),
+    ("approve", "reject"), ("reject", "approve"),
+])
+def test_postgres_review_and_edit_recheck_after_lock_wait(
+    postgres_harness: PostgresHarness, first: str, second: str,
+):
+    fixture = _create_publish_fixture(postgres_harness, status="cancelled", external_id=None)
+    with postgres_harness.sessions() as session:
+        publish = session.get(PublishJob, fixture["publish_job_id"])
+        content = session.get(ContentItem, publish.content_item_id)
+        content_id = content.id
+        campaign = session.get(Campaign, content.campaign_id)
+        campaign.brief = {"call_to_action": "Read the details"}
+        content.body = "ContentFlow. Read the details."
+        content.status = "needs_review"
+        content.approved_by = content.approved_at = None
+        content.review_json = local_review(content, resolve_brief(session, content), generated_model={
+            "model_review": {"passed": True, "risk_level": "low"}, "quality_score": 9,
+        })
+        capture_review(session, content, "generated")
+        session.commit()
+    principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
+    first_locked, second_loaded, second_lock_requested = (
+        threading.Event(), threading.Event(), threading.Event(),
+    )
+
+    def mutate(session, action):
+        if action == "edit":
+            return update_content(content_id, ContentUpdate(expected_version=1,
+                body="ContentFlow. Read the details. Revised saved version."),
+                principal, session, postgres_harness.settings)
+        return review_content(content_id, ReviewDecision(expected_version=1, decision=action),
+            principal, session, postgres_harness.settings)
+
+    def winner():
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+            session.scalar(select(ContentItem).where(ContentItem.id == content_id).with_for_update())
+            first_locked.set()
+            assert second_loaded.wait(timeout=10)
+            assert second_lock_requested.wait(timeout=10)
+            item = mutate(session, first)
+            session.commit()
+            return item.version
+
+    def follower():
+        assert first_locked.wait(timeout=10)
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+            # Keep a strong reference: the ORM identity map must not hide the
+            # freshly committed state after waiting for the other transaction.
+            stale = session.get(ContentItem, content_id)
+            assert (stale.version, stale.status) == (1, "needs_review")
+            second_loaded.set()
+
+            def observe_lock(state):
+                if getattr(state.statement, "_for_update_arg", None) is not None and any(
+                    column.get("entity") is ContentItem
+                    for column in getattr(state.statement, "column_descriptions", [])
+                ):
+                    second_lock_requested.set()
+
+            event.listen(session, "do_orm_execute", observe_lock)
+            try:
+                mutate(session, second)
+                session.commit()
+                return 200
+            except HTTPException as error:
+                session.rollback()
+                assert error.status_code == 409
+                return 409
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winning, following = pool.submit(winner), pool.submit(follower)
+        assert winning.result(timeout=25) == (2 if first == "edit" else 1)
+        assert following.result(timeout=25) == (200 if second == "edit" else 409)
+    with postgres_harness.sessions() as session:
+        item = session.get(ContentItem, content_id)
+        edited = "edit" in {first, second}
+        expected_status = "needs_review" if edited else ("approved" if first == "approve" else "rejected")
+        assert (item.version, item.status) == (2 if edited else 1, expected_status)
+        assert (item.approved_by is not None) == (expected_status == "approved")
+        evidence = list(session.scalars(select(ContentReviewEvidence).where(
+            ContentReviewEvidence.content_item_id == content_id)))
+        human = [row for row in evidence if row.event.startswith("human_")]
+        assert len(human) == (0 if first == "edit" else 1)
+        for row in human:
+            assert row.content_version == 1
+            assert row.snapshot_json["human_content_version"] == 1
+            assert row.snapshot_json["human_content_sha256"] == row.content_sha256
+        assert len(evidence) == 1 + (2 if first != "edit" else 0) + (2 if edited else 0)
+        assert all(row.snapshot_sha256 == digest(row.snapshot_json) for row in evidence)
+        revisions = list(session.scalars(select(ContentRevision).where(ContentRevision.content_item_id == content_id)))
+        assert [row.version for row in revisions] == ([2] if edited else [])
+        assert list(session.scalars(select(Job).where(Job.workspace_id == fixture["workspace_id"]))) == []
+
+
+def test_postgres_serializes_asset_retry_and_source_change(postgres_harness: PostgresHarness):
+    fixture = _create_publish_fixture(postgres_harness, status="scheduled", external_id=None)
+    with postgres_harness.sessions() as session:
+        asset = session.scalar(select(Asset).where(Asset.workspace_id == fixture["workspace_id"]))
+        asset.status = "failed"
+        asset.provider = "mock"
+        asset_id = asset.id
+        original_uri = asset.storage_uri
+        session.commit()
+    principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
+    barrier = Barrier(2)
+
+    def mutate(source_change):
+        with postgres_harness.sessions() as session:
+            barrier.wait(timeout=10)
+            try:
+                if source_change:
+                    change_asset_source(asset_id, AssetSourceChangeRequest(source="generate"),
+                        principal, session, postgres_harness.settings)
+                else:
+                    retry_asset(asset_id, principal, session, postgres_harness.settings)
+                session.commit()
+                return "queued"
+            except (HTTPException, AssetOperationConflict) as error:
+                session.rollback()
+                if isinstance(error, HTTPException):
+                    assert error.status_code == 409
+                return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(mutate, [False, True]))
+    assert sorted(results) == ["conflict", "queued"]
+    with postgres_harness.sessions() as session:
+        jobs = list(session.scalars(select(Job).where(Job.workspace_id == fixture["workspace_id"])))
+        generation_jobs = [job for job in jobs if job.job_type == "asset.generate"]
+        cleanup_jobs = [job for job in jobs if job.job_type == "storage.delete"]
+        assert len(generation_jobs) == 1
+        assert generation_jobs[0].status == "queued"
+        assert generation_jobs[0].payload_json["asset_id"] == asset_id
+        # A real managed object is now part of the fixture. If source-change
+        # wins, its old-object cleanup is expected, not a second generation.
+        assert len(cleanup_jobs) == int(results[1] == "queued")
+        assert len(jobs) == len(generation_jobs) + len(cleanup_jobs)
+        for cleanup in cleanup_jobs:
+            allocation = session.get(StorageObjectAllocation, cleanup.payload_json["allocation_id"])
+            assert allocation.storage_uri == original_uri
+            assert allocation.owner_type == "asset"
+            assert allocation.owner_id == asset_id
+        assert session.get(Asset, asset_id).status == "queued"
+
+
+def test_postgres_download_and_content_edit_share_lock_order(postgres_harness: PostgresHarness):
+    fixture = _create_publish_fixture(postgres_harness, status="scheduled", external_id=None)
+    with postgres_harness.sessions() as session:
+        asset = session.scalar(select(Asset).where(Asset.workspace_id == fixture["workspace_id"]))
+        asset.status = "queued"
+        asset.provider = "openverse"
+        asset.storage_uri = None
+        asset.metadata_json = {
+            "pending_candidate_selection": {"candidate_id": "cover-1"},
+            "search_candidates": [{"id": "cover-1", "download_url": "https://image.test/cover.png"}],
+        }
+        asset_id, content_id = asset.id, asset.content_item_id
+        create_workspace_storage_usage(session, fixture["workspace_id"])
+        session.commit()
+    settings = postgres_harness.settings.model_copy(update={"image_search_download_allowed_hosts": ["image.test"]})
+    data = io.BytesIO()
+    Image.new("RGB", (10, 10)).save(data, format="PNG")
+    parent_held, worker_lock_requested = threading.Event(), threading.Event()
+
+    def edit_content():
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+            content = session.scalar(select(ContentItem).where(ContentItem.id == content_id).with_for_update())
+            parent_held.set()
+            assert worker_lock_requested.wait(timeout=10)
+            asset = session.scalar(select(Asset).where(Asset.id == asset_id).with_for_update())
+            content.version += 1
+            content.status = "needs_review"
+            asset.status = "stale"
+            session.commit()
+
+    def download():
+        assert parent_held.wait(timeout=10)
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+
+            def observe_lock(state):
+                if getattr(state.statement, "_for_update_arg", None) is not None and any(
+                    column.get("entity") is ContentItem
+                    for column in getattr(state.statement, "column_descriptions", [])
+                ):
+                    worker_lock_requested.set()
+
+            event.listen(session, "do_orm_execute", observe_lock)
+            with patch("contentflow.worker.download_generated_media", return_value=data.getvalue()):
+                with pytest.raises(AssetWorkSuperseded):
+                    handle_asset_download(session, {
+                        "asset_id": asset_id, "candidate_id": "cover-1", "content_version": 1,
+                    }, settings)
+            # Same rollback boundary as Worker: tentative attachment must not
+            # commit just because the remote read succeeded.
+            session.rollback()
+            return session.get(Asset, asset_id).status
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        edited, downloaded = pool.submit(edit_content), pool.submit(download)
+        edited.result(timeout=20)
+        assert downloaded.result(timeout=20) == "stale"
+    with postgres_harness.sessions() as session:
+        asset = session.get(Asset, asset_id)
+        assert asset.status == "stale"
+        assert asset.storage_uri is None
+        assert session.get(ContentItem, content_id).version == 2
+
+
+def test_postgres_schedule_and_cover_selection_preserve_release_boundary(postgres_harness: PostgresHarness):
+    fixture = _create_publish_fixture(postgres_harness, status="scheduled", external_id=None)
+    with postgres_harness.sessions() as session:
+        original = session.scalar(select(Asset).where(Asset.workspace_id == fixture["workspace_id"]))
+        original.metadata_json = {**original.metadata_json, "candidate_group": "cover",
+            "candidate_optional": True, "selected": True}
+        other = Asset(workspace_id=original.workspace_id, content_item_id=original.content_item_id,
+            content_version=1, kind="image", provider=original.provider, status="ready",
+            storage_uri=original.storage_uri, size_bytes=original.size_bytes, mime_type=original.mime_type,
+            metadata_json={**original.metadata_json, "selected": False})
+        session.add(other)
+        job = session.get(PublishJob, fixture["publish_job_id"])
+        content_id, channel_id = job.content_item_id, job.channel_id
+        session.commit()
+        first_id, second_id = original.id, other.id
+    principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
+    captured, selection_requested = threading.Event(), threading.Event()
+    intent = {"content_item_id": content_id, "channel_id": channel_id, "publish_now": True,
+        "request_id": "postgres-manifest-race"}
+    with postgres_harness.sessions() as session:
+        preview = preview_publish(PublishPreviewRequest(**intent), principal, session, postgres_harness.settings)
+        session.commit()
+
+    def schedule():
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+
+            def observe_capture(_connection, _cursor, _statement, _parameters, context, _executemany):
+                # Publication acceptance now uses a Core INSERT for its unique
+                # key; ORM after_flush/session.new no longer observes this row.
+                if context.isinsert and getattr(
+                    getattr(context.compiled.statement, "table", None), "name", None
+                ) == "publish_jobs":
+                    captured.set()
+                    assert selection_requested.wait(timeout=10)
+
+            event.listen(session.connection(), "after_cursor_execute", observe_capture)
+            job = schedule_publish(PublishScheduleRequest(**intent,
+                preview_token=preview["preview_token"]),
+                principal, session, postgres_harness.settings)
+            session.commit()
+            return job.id
+
+    def select_other():
+        assert captured.wait(timeout=10)
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+
+            def observe_lock(state):
+                if getattr(state.statement, "_for_update_arg", None) is not None and any(
+                    column.get("entity") is ContentItem
+                    for column in getattr(state.statement, "column_descriptions", [])
+                ):
+                    selection_requested.set()
+
+            event.listen(session, "do_orm_execute", observe_lock)
+            select_asset_candidate(second_id, AssetSelectionRequest(), principal, session, postgres_harness.settings)
+            session.commit()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        scheduled, selected = pool.submit(schedule), pool.submit(select_other)
+        publish_id = scheduled.result(timeout=20)
+        selected.result(timeout=20)
+    with postgres_harness.sessions() as session, patch("contentflow.worker.build_connector") as connector:
+        manifest = session.get(PublishJob, publish_id).request_json["release_manifest"]
+        assert [item["asset_id"] for item in manifest["assets"]] == [first_id]
+        assert session.get(Asset, second_id).metadata_json["selected"] is True
+        with pytest.raises(PublishManifestConflict, match="已变化"):
+            handle_publish_dispatch(session, {"publish_job_id": publish_id}, postgres_harness.settings)
+        connector.assert_not_called()
+
+
+@pytest.mark.parametrize("variant", ["same", "different_mode", "different_content", "same_after_edit"])
+def test_postgres_confirmation_race_creates_one_receipt_and_dispatch(
+    postgres_harness: PostgresHarness, variant: str,
+):
+    fixture = _create_publish_fixture(postgres_harness, status="cancelled", external_id=None)
+    principal = SimpleNamespace(workspace_id=fixture["workspace_id"], user_id=fixture["user_id"])
+    with postgres_harness.sessions() as session:
+        seed = session.get(PublishJob, fixture["publish_job_id"])
+        intent = {"content_item_id": seed.content_item_id, "channel_id": seed.channel_id,
+            "publish_now": True, "request_id": f"race-{uuid.uuid4()}"}
+        other_intent = dict(intent)
+        if variant == "different_mode":
+            other_intent["delivery_mode"] = "script"
+        if variant == "different_content":
+            original = session.get(ContentItem, seed.content_item_id)
+            other = ContentItem(workspace_id=original.workspace_id, campaign_id=original.campaign_id,
+                run_id=original.run_id, platform="wechat", title="Another confirmed article",
+                body="A different operation must not inherit the first receipt.", status="approved",
+                version=1, approved_by=principal.user_id, approved_at=datetime.now(timezone.utc))
+            session.add(other)
+            session.flush()
+            source_asset = session.scalar(select(Asset).where(Asset.content_item_id == original.id))
+            session.add(Asset(workspace_id=other.workspace_id, content_item_id=other.id,
+                content_version=1, kind="image", provider=source_asset.provider, status="ready",
+                storage_uri=source_asset.storage_uri, size_bytes=source_asset.size_bytes,
+                mime_type=source_asset.mime_type, metadata_json=dict(source_asset.metadata_json)))
+            other_intent["content_item_id"] = other.id
+            session.flush()
+        first_proof = preview_publish(PublishPreviewRequest(**intent), principal, session,
+            postgres_harness.settings)["preview_token"]
+        second_proof = first_proof if variant.startswith("same") else preview_publish(
+            PublishPreviewRequest(**other_intent), principal, session,
+            postgres_harness.settings)["preview_token"]
+        session.commit()
+
+    barrier = Barrier(2)
+    lookup = publishing_router.existing_publication
+
+    def observe_initial_miss(session, **kwargs):
+        result = lookup(session, **kwargs)
+        if not session.info.get("initial_lookup_observed"):
+            session.info["initial_lookup_observed"] = True
+            assert result is None
+            barrier.wait(timeout=10)
+        return result
+
+    def confirm(intent_data, token):
+        with postgres_harness.sessions() as session:
+            session.execute(text("SET LOCAL statement_timeout = '10s'"))
+            try:
+                job = schedule_publish(PublishScheduleRequest(**intent_data, preview_token=token),
+                    principal, session, postgres_harness.settings)
+                if variant == "same_after_edit":
+                    item = session.get(ContentItem, intent_data["content_item_id"])
+                    item.body = "Saved after the winning confirmation."
+                    item.version = 2
+                    item.status = "needs_review"
+                session.commit()
+                return "receipt", job.id
+            except PublishManifestConflict as error:
+                session.rollback()
+                return "conflict", error.code
+
+    with patch.object(publishing_router, "existing_publication", side_effect=observe_initial_miss):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(confirm, intent, first_proof)
+            second = pool.submit(confirm, other_intent, second_proof)
+            results = [first.result(timeout=20), second.result(timeout=20)]
+    receipts = [value for kind, value in results if kind == "receipt"]
+    if variant.startswith("same"):
+        assert len(receipts) == 2 and receipts[0] == receipts[1]
+    else:
+        assert len(receipts) == 1
+        assert ("conflict", "publish_intent_conflict") in results
+    with postgres_harness.sessions() as session:
+        publications = list(session.scalars(select(PublishJob).where(
+            PublishJob.workspace_id == fixture["workspace_id"], PublishJob.id != fixture["publish_job_id"])))
+        queued = list(session.scalars(select(Job).where(Job.workspace_id == fixture["workspace_id"])))
+        audited = list(session.scalars(select(AuditLog).where(AuditLog.workspace_id == fixture["workspace_id"],
+            AuditLog.action == "publish.immediate")))
+        assert [job.id for job in publications] == [receipts[0]]
+        assert len(queued) == 1 and queued[0].job_type == "publish.dispatch"
+        assert queued[0].payload_json == {"publish_job_id": receipts[0]}
+        assert len(audited) == 1 and audited[0].entity_id == receipts[0]
+
+
+def test_postgres_driver_sqlstate_classification(postgres_harness: PostgresHarness):
+    engine = postgres_harness.engine
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            connection.execute(text("SET LOCAL statement_timeout = '10ms'"))
+            query_cancelled = _capture_postgres_error(
+                connection,
+                "SELECT pg_sleep(0.05)",
+            )
+        finally:
+            transaction.rollback()
+
+    with engine.connect() as lock_owner, engine.connect() as contender:
+        owner_transaction = lock_owner.begin()
+        contender_transaction = contender.begin()
+        try:
+            lock_owner.execute(text("LOCK TABLE jobs IN ACCESS EXCLUSIVE MODE"))
+            lock_not_available = _capture_postgres_error(
+                contender,
+                "LOCK TABLE jobs IN ACCESS SHARE MODE NOWAIT",
+            )
+        finally:
+            contender_transaction.rollback()
+            owner_transaction.rollback()
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        try:
+            missing_table = _capture_postgres_error(
+                connection,
+                "SELECT * FROM contentflow_missing_sqlstate_probe",
+            )
+        finally:
+            transaction.rollback()
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE contentflow_sqlstate_probe ("
+                "id INTEGER PRIMARY KEY, value INTEGER NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO contentflow_sqlstate_probe (id, value) "
+                "VALUES (1, 0), (2, 0)"
+            )
+        )
+
+    try:
+        serialization_barrier = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            serialization_futures = [
+                executor.submit(
+                    _run_serializable_increment,
+                    engine,
+                    serialization_barrier,
+                )
+                for _index in range(2)
+            ]
+            serialization_results = [
+                future.result(timeout=15) for future in serialization_futures
+            ]
+        serialization_errors = [
+            error for error in serialization_results if error is not None
+        ]
+        assert len(serialization_errors) == 1
+        serialization_failure = serialization_errors[0]
+
+        deadlock_barrier = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            deadlock_futures = [
+                executor.submit(
+                    _run_deadlocking_update,
+                    engine,
+                    deadlock_barrier,
+                    first_id=first_id,
+                    second_id=second_id,
+                )
+                for first_id, second_id in ((1, 2), (2, 1))
+            ]
+            deadlock_results = [
+                future.result(timeout=15) for future in deadlock_futures
+            ]
+        deadlock_errors = [error for error in deadlock_results if error is not None]
+        assert len(deadlock_errors) == 1
+        deadlock_detected = deadlock_errors[0]
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DROP TABLE contentflow_sqlstate_probe"))
+
+    cases = [
+        (query_cancelled, "57014", DatabaseErrorKind.QUERY_INTERRUPTED),
+        (lock_not_available, "55P03", DatabaseErrorKind.LOCK_CONTENTION),
+        (missing_table, "42P01", DatabaseErrorKind.PERMANENT),
+        (
+            serialization_failure,
+            "40001",
+            DatabaseErrorKind.TRANSACTION_RETRYABLE,
+        ),
+        (deadlock_detected, "40P01", DatabaseErrorKind.TRANSACTION_RETRYABLE),
+    ]
+    for error, sqlstate, expected_kind in cases:
+        assert database_error_sqlstate(error) == sqlstate
+        assert classify_database_error(error) == expected_kind
+        summary = sanitized_database_error(error)
+        assert f"kind={expected_kind.value}" in summary
+        assert f"sqlstate={sqlstate}" in summary
+        assert "contentflow_missing_sqlstate_probe" not in summary
+        assert "contentflow_sqlstate_probe" not in summary
+
+
+@pytest.mark.parametrize("field", ["impressions", "clicks", "likes", "comments", "shares"])
+def test_postgres_metric_bounds_and_explicit_quarantine(postgres_harness: PostgresHarness, field):
+    fixture = _create_publish_fixture(postgres_harness, status="published", external_id="TEST-ONLY")
+    with postgres_harness.sessions() as session:
+        for value in (-1, float("inf"), float("-inf"), float("nan"), 1e100):
+            with pytest.raises(IntegrityError):
+                with session.begin_nested():
+                    session.add(MetricSnapshot(workspace_id=fixture["workspace_id"],
+                        publish_job_id=fixture["publish_job_id"], **{field: value}))
+                    session.flush()
+        captured_at = datetime.now(timezone.utc)
+        session.add(MetricSnapshot(workspace_id=fixture["workspace_id"],
+            publish_job_id=fixture["publish_job_id"], impressions=100, captured_at=captured_at))
+        session.add(MetricSnapshot(workspace_id=fixture["workspace_id"],
+            publish_job_id=fixture["publish_job_id"], impressions=float("nan"),
+            captured_at=captured_at + timedelta(seconds=1), validation_status="quarantined"))
+        session.flush()
+        summary = metrics_summary(SimpleNamespace(workspace_id=fixture["workspace_id"]), session, campaign_id=None)
+        assert summary["sample_count"] == 1
+        assert summary["impressions"] == 100
+        assert summary["excluded_snapshot_count"] == 1
+        assert summary["data_complete"] is False
+        assert summary["recommendations"] == []
+
+
+def test_postgres_legacy_metric_migration_preserves_nonfinite_values(postgres_harness: PostgresHarness):
+    fixture = _create_publish_fixture(postgres_harness, status="published", external_id="TEST-ONLY")
+    # This schema round trip is restricted to the harness-created disposable
+    # database, inside a transaction rolled back even on assertion failure.
+    with postgres_harness.engine.connect() as connection:
+        transaction = connection.begin()
+        config = Config(str(PROJECT_ROOT / "alembic.ini"))
+        config.attributes["connection"] = connection
+        try:
+            command.downgrade(config, "b6c7d8e9f0a1")
+            samples = [(str(uuid.uuid4()), value) for value in (float("inf"), float("nan"), -1, 100)]
+            for offset, (row_id, value) in enumerate(samples):
+                connection.execute(text("INSERT INTO metric_snapshots (id, workspace_id, publish_job_id, captured_at, "
+                    "impressions, clicks, likes, comments, shares, raw_json) VALUES "
+                    "(:id, :workspace, :publish, :captured, :value, 0, 0, 0, 0, '{}')"),
+                    {"id": row_id, "workspace": fixture["workspace_id"], "publish": fixture["publish_job_id"],
+                     "captured": datetime.now(timezone.utc) + timedelta(seconds=offset), "value": value})
+            command.upgrade(config, "head")
+            for row_id, original in samples:
+                row = connection.execute(text("SELECT impressions, validation_status FROM metric_snapshots WHERE id=:id"),
+                    {"id": row_id}).one()
+                assert math.isnan(row.impressions) if math.isnan(original) else row.impressions == original
+                assert row.validation_status == ("valid" if original == 100 else "quarantined")
+        finally:
+            transaction.rollback()
 
 
 def test_postgres_migrations_reach_head(postgres_harness: PostgresHarness):
@@ -242,6 +1004,7 @@ def test_postgres_migrations_reach_head(postgres_harness: PostgresHarness):
     assert revision == HEAD_REVISION
     assert vector_enabled is True
     assert {
+        "audit_chain_heads",
         "jobs",
         "publish_jobs",
         "worker_nodes",
@@ -249,7 +1012,267 @@ def test_postgres_migrations_reach_head(postgres_harness: PostgresHarness):
         "auth_sessions",
         "auth_refresh_token_history",
         "auth_rate_limits",
+        "workspace_storage_usage",
+        "storage_object_allocations",
     } <= tables
+
+
+def test_postgres_serializes_concurrent_storage_quota_reservations(
+    postgres_harness: PostgresHarness,
+):
+    suffix = uuid.uuid4().hex
+    with postgres_harness.sessions() as session:
+        user = User(
+            email=f"storage-quota-{suffix}@example.com",
+            password_hash="not-used-by-this-test",
+            display_name="Storage Quota Owner",
+        )
+        session.add(user)
+        session.flush()
+        workspace = Workspace(
+            name=f"Storage Quota {suffix}",
+            slug=f"storage-quota-{suffix}",
+            created_by=user.id,
+        )
+        session.add(workspace)
+        session.flush()
+        create_workspace_storage_usage(session, workspace.id)
+        session.commit()
+        workspace_id = workspace.id
+
+    settings = postgres_harness.settings.model_copy(
+        update={
+            "max_upload_bytes": 8,
+            "workspace_storage_max_bytes": 8,
+            "workspace_storage_max_objects": 1,
+        }
+    )
+    storage = LocalObjectStorage(
+        postgres_harness.storage_dir,
+        max_upload_bytes=8,
+    )
+    barrier = Barrier(2)
+
+    def upload(index: int) -> tuple[str, str | None]:
+        with postgres_harness.sessions() as session:
+            barrier.wait(timeout=10)
+            ledger = LedgeredObjectStorage(
+                session=session,
+                settings=settings,
+                owner_type="postgres_quota_test",
+                owner_id=f"concurrent-{index}",
+                storage=storage,
+            )
+            try:
+                stored = ledger.put(
+                    workspace_id=workspace_id,
+                    category="quota-tests",
+                    filename=f"payload-{index}.bin",
+                    stream=io.BytesIO(b"12345678"),
+                )
+                session.commit()
+                return "stored", stored.uri
+            except StorageQuotaExceeded:
+                session.rollback()
+                return "quota", None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(upload, range(2)))
+
+    assert sorted(status for status, _uri in results) == ["quota", "stored"]
+    with postgres_harness.sessions() as session:
+        usage = session.get(WorkspaceStorageUsage, workspace_id)
+        allocations = list(
+            session.scalars(
+                select(StorageObjectAllocation).where(
+                    StorageObjectAllocation.workspace_id == workspace_id
+                )
+            )
+        )
+        assert usage is not None
+        assert (usage.used_bytes, usage.used_objects) == (8, 1)
+        assert (usage.reserved_bytes, usage.reserved_objects) == (0, 0)
+        assert len(allocations) == 1
+        assert allocations[0].status == "active"
+
+
+def test_postgres_schedules_one_storage_reconciliation_across_workers(
+    postgres_harness: PostgresHarness,
+):
+    suffix = uuid.uuid4().hex
+    now = datetime.now(timezone.utc)
+    with postgres_harness.sessions() as session:
+        user = User(
+            email=f"storage-schedule-{suffix}@example.com",
+            password_hash="not-used-by-this-test",
+            display_name="Storage Schedule Owner",
+        )
+        session.add(user)
+        session.flush()
+        workspace = Workspace(
+            name=f"Storage Schedule {suffix}",
+            slug=f"storage-schedule-{suffix}",
+            created_by=user.id,
+        )
+        session.add(workspace)
+        session.flush()
+        create_workspace_storage_usage(session, workspace.id)
+        usage = session.get(WorkspaceStorageUsage, workspace.id)
+        assert usage is not None
+        usage.last_reconciled_at = now - timedelta(hours=2)
+        session.commit()
+        workspace_id = workspace.id
+
+    settings = postgres_harness.settings.model_copy(
+        update={
+            "storage_reconcile_schedule_enabled": True,
+            "storage_reconcile_interval_hours": 1,
+            "storage_reconcile_schedule_batch_size": 10,
+        }
+    )
+    barrier = Barrier(2)
+
+    def sweep() -> int:
+        with postgres_harness.sessions() as session:
+            barrier.wait(timeout=10)
+            count = schedule_due_storage_reconciliations(
+                session,
+                settings=settings,
+                now=now,
+            )
+            session.commit()
+            return count
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        counts = list(executor.map(lambda _index: sweep(), range(2)))
+    assert sum(counts) == 1
+
+    with postgres_harness.sessions() as session:
+        jobs = list(
+            session.scalars(
+                select(Job).where(
+                    Job.workspace_id == workspace_id,
+                    Job.job_type == "storage.reconcile",
+                )
+            )
+        )
+        assert len(jobs) == 1
+        assert jobs[0].payload_json["trigger"] == "scheduled"
+        assert jobs[0].payload_json["delete_orphans"] is False
+
+
+def test_postgres_serializes_concurrent_audit_chain_appends(
+    postgres_harness: PostgresHarness,
+):
+    suffix = uuid.uuid4().hex
+    with postgres_harness.sessions() as session:
+        user = User(
+            email=f"audit-chain-{suffix}@example.com",
+            password_hash="not-used-by-this-test",
+            display_name="Audit Chain Owner",
+        )
+        session.add(user)
+        session.flush()
+        workspace = Workspace(
+            name=f"Audit Chain {suffix}",
+            slug=f"audit-chain-{suffix}",
+            created_by=user.id,
+        )
+        session.add(workspace)
+        session.commit()
+        workspace_id = workspace.id
+        user_id = user.id
+
+    barrier = Barrier(2)
+
+    def append_event(index: int) -> None:
+        with postgres_harness.sessions() as session:
+            barrier.wait(timeout=10)
+            record_audit(
+                session,
+                action=f"postgres.audit.{index}",
+                entity_type="postgres_test",
+                entity_id=str(index),
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+                metadata={"index": index},
+            )
+            session.commit()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(append_event, index) for index in range(2)]
+        for future in futures:
+            future.result(timeout=15)
+
+    with postgres_harness.sessions() as session:
+        result = verify_audit_chain(session, workspace_id=workspace_id)
+        entries = list(
+            session.scalars(
+                select(AuditLog)
+                .where(AuditLog.workspace_id == workspace_id)
+                .order_by(AuditLog.chain_sequence.asc())
+            )
+        )
+        session.commit()
+    assert result.valid is True
+    assert result.checked_entries == 2
+    assert [entry.chain_sequence for entry in entries] == [1, 2]
+    assert entries[1].previous_hash == entries[0].entry_hash
+
+
+def test_postgres_reconciliation_sweep_skips_active_jobs_before_limit(
+    postgres_harness: PostgresHarness,
+):
+    fixtures = [
+        _create_publish_fixture(
+            postgres_harness,
+            status="submitted",
+            external_id=f"postgres-fairness-{index}",
+        )
+        for index in range(3)
+    ]
+    oldest = datetime.now(timezone.utc) - timedelta(minutes=3)
+    with postgres_harness.sessions() as session:
+        for index, fixture in enumerate(fixtures):
+            publish_job = session.get(PublishJob, fixture["publish_job_id"])
+            assert publish_job is not None
+            publish_job.updated_at = oldest + timedelta(minutes=index)
+            if index < 2:
+                session.add(
+                    Job(
+                        workspace_id=fixture["workspace_id"],
+                        job_type="publish.reconcile",
+                        status="queued",
+                        payload_json={
+                            "publish_job_id": publish_job.id,
+                            "lookup_external_id": publish_job.external_id,
+                        },
+                        run_at=datetime.now(timezone.utc),
+                        idempotency_key=f"publish.reconcile:{publish_job.id}",
+                    )
+                )
+        session.commit()
+
+    with postgres_harness.sessions() as session:
+        assert (
+            schedule_pending_publish_reconciliations(
+                session,
+                settings=postgres_harness.settings,
+                limit=1,
+            )
+            == 1
+        )
+        session.commit()
+
+    with postgres_harness.sessions() as session:
+        recovered = session.scalar(
+            select(Job).where(
+                Job.idempotency_key
+                == f"publish.reconcile:{fixtures[2]['publish_job_id']}"
+            )
+        )
+        assert recovered is not None
+        assert recovered.status == "queued"
 
 
 def test_postgres_skip_locked_idempotency_and_terminal_convergence(
@@ -503,6 +1526,78 @@ def test_postgres_auth_rate_limit_serializes_same_key(
         assert row.blocked_until is not None
 
 
+def test_postgres_serializes_concurrent_publish_evidence_quota(
+    postgres_harness: PostgresHarness,
+):
+    fixture = _create_publish_fixture(
+        postgres_harness,
+        status="script_ready",
+        external_id=None,
+    )
+    attempt_id = str(uuid.uuid4())
+    with postgres_harness.sessions() as session:
+        publish_job = session.get(PublishJob, fixture["publish_job_id"])
+        assert publish_job is not None
+        publish_job.request_json = {
+            "content_version": 1,
+            "delivery_mode": "script",
+        }
+        publish_job.response_json = {
+            "script_attempt_id": attempt_id,
+            "package_uri": "memory://script-package.zip",
+            "package_sha256": "a" * 64,
+            "script_confirmation_expires_at": "2999-01-01T00:00:00+00:00",
+            "script_evidence_frozen": False,
+        }
+        session.commit()
+
+    settings = postgres_harness.settings.model_copy(
+        update={"publish_evidence_max_items": 1}
+    )
+    principal = SimpleNamespace(
+        workspace_id=fixture["workspace_id"],
+        user_id=fixture["user_id"],
+    )
+    barrier = Barrier(2)
+
+    def upload(index: int) -> int:
+        with postgres_harness.sessions() as session:
+            barrier.wait(timeout=10)
+            try:
+                asyncio.run(
+                    upload_publish_evidence(
+                        publish_job_id=fixture["publish_job_id"],
+                        principal=principal,
+                        session=session,
+                        settings=settings,
+                        kind="platform_export",
+                        file=UploadFile(
+                            filename=f"evidence-{index}.json",
+                            file=io.BytesIO(f'{{"proof":{index}}}'.encode()),
+                        ),
+                    )
+                )
+                session.commit()
+            except HTTPException as error:
+                return error.status_code
+            return 201
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = sorted(executor.map(upload, range(2)))
+    assert statuses == [201, 409]
+
+    with postgres_harness.sessions() as session:
+        evidence = list(
+            session.scalars(
+                select(PublishEvidence).where(
+                    PublishEvidence.publish_job_id == fixture["publish_job_id"],
+                    PublishEvidence.script_attempt_id == attempt_id,
+                )
+            )
+        )
+    assert len(evidence) == 1
+
+
 def test_postgres_operational_metrics_collector(postgres_harness: PostgresHarness):
     metrics = ObservabilityMetrics(
         postgres_harness.settings,
@@ -515,3 +1610,409 @@ def test_postgres_operational_metrics_collector(postgres_harness: PostgresHarnes
     assert "contentflow_workflow_runs" in payload
     assert "contentflow_prompt_eval_runs" in payload
     assert "contentflow_publish_reconciliation_required" in payload
+
+
+@pytest.mark.skipif(
+    not TEST_POSTGRES_CONTAINER_ID,
+    reason="CONTENTFLOW_TEST_POSTGRES_CONTAINER_ID is required for restart tests",
+)
+def test_worker_recovers_after_disposable_postgres_restart(
+    postgres_harness: PostgresHarness,
+):
+    container_id = TEST_POSTGRES_CONTAINER_ID or ""
+    with postgres_harness.sessions() as session:
+        session.execute(
+            update(Job)
+            .where(Job.status.in_(["queued", "retry", "running"]))
+            .values(
+                status="succeeded",
+                result_json={"reason": "isolated_restart_probe"},
+                locked_by=None,
+                locked_at=None,
+            )
+        )
+        first_job = enqueue_job(
+            session,
+            job_type="postgres.restart.probe",
+            payload={"phase": "before_restart"},
+            workspace_id=None,
+            idempotency_key=f"postgres-restart-before:{uuid.uuid4().hex}",
+            max_attempts=2,
+        )
+        session.commit()
+        first_job_id = first_job.id
+
+    settings = postgres_harness.settings.model_copy(
+        update={
+            "storage_reconcile_schedule_enabled": False,
+            "worker_poll_seconds": 0.1,
+            "worker_heartbeat_seconds": 1,
+            "worker_database_retry_initial_seconds": 0.1,
+            "worker_database_retry_max_seconds": 0.5,
+            "worker_database_retry_max_attempts": 100,
+            "worker_database_retry_jitter_ratio": 0,
+        }
+    )
+    worker_holder: dict[str, Worker] = {}
+    processed_phases: list[str] = []
+
+    def handle_probe(
+        _session: Session,
+        payload: dict[str, str],
+        _settings: Settings,
+    ) -> dict[str, str]:
+        phase = payload["phase"]
+        processed_phases.append(phase)
+        if phase == "after_restart":
+            worker_holder["worker"].request_stop()
+        return {"phase": phase}
+
+    worker = Worker(
+        settings=settings,
+        worker_id=f"postgres-restart-{uuid.uuid4().hex[:12]}",
+        session_factory=postgres_harness.sessions,
+        handlers={"postgres.restart.probe": handle_probe},
+    )
+    worker_holder["worker"] = worker
+    retry_observed = threading.Event()
+    retry_messages: list[str] = []
+
+    class RetrySignal(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            message = record.getMessage()
+            if "worker database operation unavailable; retrying" in message:
+                retry_messages.append(message)
+                retry_observed.set()
+
+    signal_handler = RetrySignal(level=logging.WARNING)
+    previous_logger_level = worker_logger.level
+    previous_logger_disabled = worker_logger.disabled
+    worker_logger.disabled = False
+    worker_logger.setLevel(logging.INFO)
+    worker_logger.addHandler(signal_handler)
+    worker_thread = threading.Thread(
+        target=worker.run_forever,
+        name="contentflow-postgres-restart-probe",
+        daemon=True,
+    )
+    container_stopped = False
+    try:
+        worker_thread.start()
+        completed_before = _wait_for_job_status(
+            postgres_harness.sessions,
+            first_job_id,
+            "succeeded",
+        )
+        assert completed_before.attempts == 1
+        assert completed_before.last_error is None
+
+        _control_disposable_postgres_container("stop", container_id)
+        container_stopped = True
+        assert retry_observed.wait(timeout=15)
+        assert worker_thread.is_alive()
+
+        restart_started = time.monotonic()
+        _control_disposable_postgres_container("start", container_id)
+        container_stopped = False
+        _wait_for_postgres_ready(postgres_harness.engine)
+
+        with postgres_harness.sessions() as session:
+            second_job = enqueue_job(
+                session,
+                job_type="postgres.restart.probe",
+                payload={"phase": "after_restart"},
+                workspace_id=None,
+                idempotency_key=f"postgres-restart-after:{uuid.uuid4().hex}",
+                max_attempts=2,
+            )
+            session.commit()
+            second_job_id = second_job.id
+
+        completed_after = _wait_for_job_status(
+            postgres_harness.sessions,
+            second_job_id,
+            "succeeded",
+        )
+        recovery_seconds = time.monotonic() - restart_started
+        assert recovery_seconds < 15
+        assert completed_after.attempts == 1
+        assert completed_after.last_error is None
+        assert processed_phases == ["before_restart", "after_restart"]
+    finally:
+        if container_stopped:
+            _control_disposable_postgres_container("start", container_id)
+            _wait_for_postgres_ready(postgres_harness.engine)
+        worker.request_stop()
+        worker_thread.join(timeout=10)
+        worker_logger.removeHandler(signal_handler)
+        worker_logger.setLevel(previous_logger_level)
+        worker_logger.disabled = previous_logger_disabled
+
+    assert not worker_thread.is_alive()
+    assert retry_messages
+    assert all("@" not in message for message in retry_messages)
+    assert all("127.0.0.1" not in message for message in retry_messages)
+    with postgres_harness.sessions() as session:
+        worker_node = session.get(WorkerNode, worker.worker_id)
+        assert worker_node is not None
+        assert worker_node.status == "stopped"
+        assert worker_node.stopped_at is not None
+
+
+def test_running_job_is_reclaimed_after_worker_process_kill(
+    postgres_harness: PostgresHarness,
+):
+    lease_seconds = 6
+    settings = postgres_harness.settings.model_copy(
+        update={
+            "storage_reconcile_schedule_enabled": False,
+            "publish_reconciliation_sweep_poll_seconds": 3600,
+            "worker_poll_seconds": 0.1,
+            "worker_lease_seconds": lease_seconds,
+            "worker_heartbeat_seconds": 1,
+            "worker_stale_seconds": 3,
+        }
+    )
+    with postgres_harness.sessions() as session:
+        session.execute(
+            update(Job)
+            .where(Job.status.in_(["queued", "retry", "running"]))
+            .values(
+                status="succeeded",
+                result_json={"reason": "isolated_worker_kill_probe"},
+                locked_by=None,
+                locked_at=None,
+            )
+        )
+        session.execute(
+            update(PublishJob)
+            .where(PublishJob.status == "submitted")
+            .values(
+                status="failed",
+                error="isolated_worker_kill_probe",
+            )
+        )
+        job = enqueue_job(
+            session,
+            job_type="postgres.worker.crash.probe",
+            payload={"phase": "before_kill"},
+            workspace_id=None,
+            idempotency_key=f"postgres-worker-kill:{uuid.uuid4().hex}",
+            max_attempts=3,
+        )
+        session.commit()
+        job_id = job.id
+
+    context = multiprocessing.get_context("spawn")
+    handler_entered = context.Event()
+    crashed_worker_id = f"postgres-crashed-{uuid.uuid4().hex[:12]}"
+    crashed_worker = context.Process(
+        target=_run_crash_probe_worker,
+        args=(settings, crashed_worker_id, handler_entered),
+        name="contentflow-postgres-crash-probe",
+    )
+    recovered_payloads: list[dict[str, str]] = []
+    recovery_worker_holder: dict[str, Worker] = {}
+
+    def handle_recovered_probe(
+        _session: Session,
+        payload: dict[str, str],
+        _settings: Settings,
+    ) -> dict[str, str]:
+        recovered_payloads.append(payload)
+        recovery_worker_holder["worker"].request_stop()
+        return {"recovered": "after_process_kill"}
+
+    recovery_worker = Worker(
+        settings=settings,
+        worker_id=f"postgres-recovery-{uuid.uuid4().hex[:12]}",
+        session_factory=postgres_harness.sessions,
+        handlers={"postgres.worker.crash.probe": handle_recovered_probe},
+    )
+    recovery_worker_holder["worker"] = recovery_worker
+    recovery_thread = threading.Thread(
+        target=recovery_worker.run_forever,
+        name="contentflow-postgres-recovery-worker",
+        daemon=True,
+    )
+    try:
+        crashed_worker.start()
+        assert handler_entered.wait(timeout=15)
+        running_job = _wait_for_job_status(
+            postgres_harness.sessions,
+            job_id,
+            "running",
+        )
+        assert running_job.attempts == 1
+        assert running_job.locked_by == crashed_worker_id
+        assert running_job.locked_at is not None
+
+        crashed_worker.kill()
+        crashed_worker.join(timeout=10)
+        assert not crashed_worker.is_alive()
+        assert crashed_worker.exitcode is not None
+        if os.name == "posix":
+            assert crashed_worker.exitcode == -signal.SIGKILL
+        else:
+            assert crashed_worker.exitcode != 0
+
+        with postgres_harness.sessions() as session:
+            still_leased_job = session.get(Job, job_id)
+            crashed_node = session.get(WorkerNode, crashed_worker_id)
+            assert still_leased_job is not None
+            assert still_leased_job.status == "running"
+            assert still_leased_job.attempts == 1
+            assert still_leased_job.locked_by == crashed_worker_id
+            assert still_leased_job.locked_at is not None
+            lease_age = (
+                datetime.now(timezone.utc) - still_leased_job.locked_at
+            ).total_seconds()
+            assert lease_age < lease_seconds
+            assert crashed_node is not None
+            assert crashed_node.status == "online"
+            assert crashed_node.stopped_at is None
+
+        assert recovery_worker.run_once() is False
+        recovery_thread.start()
+        recovered_job = _wait_for_job_status(
+            postgres_harness.sessions,
+            job_id,
+            "succeeded",
+            timeout_seconds=15,
+        )
+        recovery_thread.join(timeout=10)
+        assert not recovery_thread.is_alive()
+        assert recovered_job.attempts == 2
+        assert recovered_job.locked_by is None
+        assert recovered_job.locked_at is None
+        assert recovered_job.last_error is None
+        assert recovered_job.result_json == {"recovered": "after_process_kill"}
+        assert recovered_payloads == [{"phase": "before_kill"}]
+
+        with postgres_harness.sessions() as session:
+            crashed_node = session.get(WorkerNode, crashed_worker_id)
+            recovery_node = session.get(WorkerNode, recovery_worker.worker_id)
+            assert crashed_node is not None
+            assert crashed_node.status == "online"
+            assert crashed_node.stopped_at is None
+            assert crashed_node.heartbeat_at < (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=settings.worker_stale_seconds)
+            )
+            assert recovery_node is not None
+            assert recovery_node.status == "stopped"
+            assert recovery_node.stopped_at is not None
+    finally:
+        if crashed_worker.is_alive():
+            crashed_worker.kill()
+            crashed_worker.join(timeout=10)
+        recovery_worker.request_stop()
+        if recovery_thread.is_alive():
+            recovery_thread.join(timeout=10)
+
+    assert not crashed_worker.is_alive()
+    assert not recovery_thread.is_alive()
+
+
+def test_expired_provider_job_requires_manual_review_on_postgres(
+    postgres_harness: PostgresHarness,
+):
+    fixture = _create_publish_fixture(
+        postgres_harness,
+        status="failed",
+        external_id=None,
+    )
+    expired_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    with postgres_harness.sessions() as session:
+        publish_job = session.get(PublishJob, fixture["publish_job_id"])
+        content = session.get(ContentItem, publish_job.content_item_id)
+        workflow_run = session.get(WorkflowRun, content.run_id)
+        workflow_run.status = "running"
+        workflow_run.current_stage = "drafting"
+        job = enqueue_job(
+            session,
+            job_type="workflow.execute",
+            payload={"run_id": workflow_run.id},
+            workspace_id=workflow_run.workspace_id,
+            idempotency_key=f"postgres-manual-review:{uuid.uuid4().hex}",
+        )
+        job.status = "running"
+        job.attempts = 1
+        job.locked_by = "terminated-provider-worker"
+        job.locked_at = expired_at
+        session.commit()
+        job_id = job.id
+        workflow_run_id = workflow_run.id
+
+    handler_calls: list[dict[str, str]] = []
+
+    def should_not_run(
+        _session: Session,
+        payload: dict[str, str],
+        _settings: Settings,
+    ) -> dict[str, str]:
+        handler_calls.append(payload)
+        raise AssertionError("expired provider job must not be replayed")
+
+    settings = postgres_harness.settings.model_copy(
+        update={
+            "storage_reconcile_schedule_enabled": False,
+            "publish_reconciliation_sweep_poll_seconds": 3600,
+            "worker_lease_seconds": 30,
+        }
+    )
+    worker = Worker(
+        settings=settings,
+        worker_id=f"postgres-manual-review-{uuid.uuid4().hex[:12]}",
+        session_factory=postgres_harness.sessions,
+        handlers={"workflow.execute": should_not_run},
+    )
+
+    assert worker.run_once() is True
+    assert handler_calls == []
+    with postgres_harness.sessions() as session:
+        stored_job = session.get(Job, job_id)
+        workflow_run = session.get(WorkflowRun, workflow_run_id)
+        manual_review = session.scalar(
+            select(JobManualReview).where(JobManualReview.job_id == job_id)
+        )
+        assert stored_job.status == "manual_review"
+        assert stored_job.attempts == 1
+        assert stored_job.locked_by is None
+        assert stored_job.locked_at is None
+        assert "Automatic retry was blocked" in stored_job.last_error
+        assert workflow_run.status == "failed"
+        assert workflow_run.current_stage == "failed"
+        assert "Automatic retry was blocked" in workflow_run.error
+        assert manual_review is not None
+        assert (
+            manual_review.reason_code
+            == "worker_lease_expired_provider_outcome_unknown"
+        )
+        assert manual_review.resolved_at is None
+
+
+@pytest.mark.parametrize("dimension", ["daily_calls", "concurrent_requests"])
+def test_postgres_provider_admission_serializes_last_allowance(postgres_harness: PostgresHarness, dimension):
+    from contentflow.provider_invocations import ProviderInvocationLedger
+    from contentflow.provider_resources import ProviderResourceLimits, ProviderResourceLimitError, provider_resource_usage
+
+    fixture = _create_publish_fixture(postgres_harness, status="cancelled", external_id=None)
+    limits = ProviderResourceLimits(**{dimension: 1})
+    barrier = threading.Barrier(2)
+    def enter(ordinal):
+        ledger = ProviderInvocationLedger(postgres_harness.engine, limits=limits)
+        barrier.wait(timeout=10)
+        try:
+            return ledger.start(workspace_id=fixture["workspace_id"], job_id=None,
+                entity_type="TEST-ONLY", entity_id="postgres-resource", provider_kind="text",
+                provider_name="TEST-ONLY", model_name="TEST-ONLY", operation="text.plan",
+                ordinal=ordinal, request_sha256=f"{ordinal:064x}", request_bytes=100, idempotency_key_sent=False)
+        except ProviderResourceLimitError as error:
+            return error.code
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(enter, [1, 2]))
+    assert len([result for result in results if not isinstance(result, str)]) == 1
+    with postgres_harness.sessions() as session:
+        usage = provider_resource_usage(session, fixture["workspace_id"])
+        assert (usage["calls"], usage["input_bytes"], usage["active_requests"]) == (1, 100, 1)

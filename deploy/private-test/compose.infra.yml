@@ -1,0 +1,84 @@
+name: contentflow-private-test
+
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    # Offline docker-save/load may lose RepoDigests; an independently checked
+    # sha256 image-config ID is also accepted for this linux/amd64 private host.
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb}
+    restart: unless-stopped
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=40", "-c", "work_mem=4MB", "-c", "maintenance_work_mem=64MB"]
+    environment:
+      POSTGRES_DB: contentflow
+      POSTGRES_USER: contentflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run init-infra-secrets.sh first}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contentflow -d contentflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    mem_limit: 512m
+    pids_limit: 160
+    shm_size: 128m
+    security_opt: ["no-new-privileges:true"]
+    logging: *bounded-logging
+
+  minio:
+    image: quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Run init-infra-secrets.sh first}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Run init-infra-secrets.sh first}
+    volumes:
+      - minio_data:/data
+    networks: [data]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    mem_limit: 384m
+    pids_limit: 160
+    security_opt: ["no-new-privileges:true"]
+    logging: *bounded-logging
+
+  minio-init:
+    image: quay.io/minio/mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+    profiles: [setup]
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/bootstrap/init-minio.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Run init-infra-secrets.sh first}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Run init-infra-secrets.sh first}
+      CONTENTFLOW_S3_ACCESS_KEY: ${CONTENTFLOW_S3_ACCESS_KEY:?Run init-infra-secrets.sh first}
+      CONTENTFLOW_S3_SECRET_KEY: ${CONTENTFLOW_S3_SECRET_KEY:?Run init-infra-secrets.sh first}
+    volumes:
+      - ./init-minio.sh:/bootstrap/init-minio.sh:ro
+      - ./bucket-policy.json:/bootstrap/bucket-policy.json:ro
+    networks: [data]
+    mem_limit: 128m
+    pids_limit: 64
+    security_opt: ["no-new-privileges:true"]
+    logging: *bounded-logging
+
+# No service publishes host ports. The data network has no external egress.
+# Future API/Worker services need this plus a separate outbound network.
+networks:
+  data:
+    internal: true
+
+volumes:
+  postgres_data:
+  minio_data:

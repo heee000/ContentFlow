@@ -1,0 +1,18 @@
+# Optional overlay, used only after device authorization and HTTPS consent.
+# Keep compose.app.yml unchanged for an explicit SSH-only rollback.
+x-tailnet-environment: &tailnet-environment
+  CONTENTFLOW_PUBLIC_BASE_URL: https://${CONTENTFLOW_PRIVATE_HOST:?Set the verified Tailscale device DNS name}
+  CONTENTFLOW_CORS_ORIGINS: '["https://${CONTENTFLOW_PRIVATE_HOST:?Set the verified Tailscale device DNS name}"]'
+
+services:
+  api:
+    environment: *tailnet-environment
+  worker:
+    environment: *tailnet-environment
+  web:
+    image: ${CONTENTFLOW_TAILNET_WEB_IMAGE:?Set the verified HTTPS Web image ID}
+  caddy:
+    environment:
+      CONTENTFLOW_PRIVATE_HOST: ${CONTENTFLOW_PRIVATE_HOST:?Set the verified Tailscale device DNS name}
+    volumes:
+      - ./Caddyfile.tailnet:/etc/caddy/Caddyfile:ro

@@ -10,7 +10,7 @@ ContentFlow 是一套可部署的 AI 内容营销自动化系统，覆盖“内�
 flowchart LR
     A["营销 Brief"] --> B["品牌/产品知识检索"]
     B --> C["内容策划与平台文案生成"]
-    C --> D["确定性规则校验与一次修复"]
+    C --> D["规则校验、编辑评审与有界修订"]
     D --> E["人工编辑和审核"]
     E -->|通过| F["图片/视频素材任务"]
     E -->|驳回| C
@@ -25,21 +25,25 @@ flowchart LR
 
 - 多租户账户、工作区创建/切换、成员管理与 RBAC：`viewer / editor / reviewer / admin`
 - PBKDF2 密码哈希、HMAC 签名访问令牌、Fernet 平台凭据加密
-- 活动 Brief、运行批次、内容版本、平台结构化排版/分镜、素材、渠道、发布、指标和审计持久化
+- 活动 Brief、运行批次、内容版本、平台结构化排版/分镜、素材、渠道、发布、指标和审计持久化；审计记录按工作区形成可核验 SHA-256 哈希链
 - Markdown/TXT/CSV/JSON 知识导入、切块、引用追踪
-- 离线 Hash Embedding；生产环境支持显式配置的 OpenAI-compatible Embedding
+- 离线 Hash Embedding；生产可显式选择 OpenAI-compatible Embedding 或固定版本的本地 BGE-M3（1024 维归一化 Dense 向量）
 - PostgreSQL + pgvector 1024 维向量列和 HNSW 余弦索引
 - Mock/OpenAI-compatible 文本生成
+- 有界内容工作室 Agent：策略候选、证据账本、平台化草稿、九维编辑评审、最多一次定向修订与回归保护
+- 可安装的声明式风格 Skill：工作区隔离、语义化版本、内容哈希和启停审计，不执行用户代码
 - 每次文本生成记录 Provider、模型、Prompt 来源/发布版本、Prompt/输入/输出摘要、分阶段时延和 Provider 返回的 Token 用量；不在运行追溯中复制原始 Prompt，也不虚构 Token 或成本
 - 工作区 Prompt Registry：不可变草稿、另一名管理员审批/拒绝、激活与历史回滚；激活和运行前校验正文 SHA-256，审计只保存版本与哈希
 - 版本化 Prompt Eval：不可变确定性用例、双人激活、异步 Worker 执行、Prompt/套件/目标 Provider 与模型绑定；当前套件未通过时审批、激活、回滚和每次实际生成均失败关闭
-- Mock/中立 HTTP 图片与异步视频生成，生成结果写入本地存储或 S3/MinIO
+- Mock/中立 HTTP 图片与异步视频生成，以及人工上传真实素材模式；结果写入本地存储或 S3/MinIO
+- 统一工作区对象账本、并发容量预留、可重试删除、周期只读核对和存储完整性告警；孤儿删除始终要求管理员确认
+- 人工、AI 生成、开放授权搜索和混合候选四种图片来源；搜索候选保留作者/许可/原始页面并要求人工核验
 - 人工审核门禁、内容版本校验、旧素材失效
 - 小红书卡片结构、抖音逐镜头脚本和公众号章节结构随版本保存并进入投放链路
 - 抖音视频上传/创建/数据回收适配器
 - 公众号封面素材、草稿创建、可选发布提交和基于 `publish_id` 的最终状态对账适配器
 - 官方 API、本机脚本辅助和小红书人工导出三种显式发布方式；不确定 API 结果必须先对账，禁止静默脚本降级
-- 10 个业务区的响应式运营工作台，包含全量内容/版本回看、人工指标录入、团队权限、Prompt/Eval 治理与审计查询
+- 10 个业务区的响应式运营工作台，包含全量内容/版本回看、人工指标录入、团队权限、Prompt/Eval 治理、审计查询与完整性告警
 - Alembic、Docker Compose、健康检查、结构化日志、受保护 Prometheus 指标、版本化告警规则与 Grafana 运维看板
 
 ## 目录
@@ -57,6 +61,8 @@ docker-compose.yml  PostgreSQL、MinIO、API、Worker、Web
 
 环境要求：Python 3.11+、Node.js 22.13+、Docker Desktop。SQLite 只用于显式指定数据库 URL 的隔离测试，不再是默认运行数据库。
 
+视频素材还要求 API 和 Worker 的 PATH 中都有 `ffmpeg`、`ffprobe`；运行时 Dockerfile 已声明安装。缺工具时拒绝视频校验，并在 HTTP 视频生成调用前拦截，不自动重新生成。图片、MP4 与离线分镜的支持边界见 [媒体有效性契约](docs/media_validity_contract.md)。
+
 ```powershell
 Copy-Item .env.example .env
 # 将 .env 中所有 replace-me 替换为本机开发凭据。
@@ -65,7 +71,7 @@ docker compose up -d postgres
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[test,security]"
 .\.venv\Scripts\python.exe -m contentflow.migrate
-.\.venv\Scripts\python.exe -m uvicorn contentflow.api:app --reload
+.\.venv\Scripts\python.exe -m uvicorn contentflow.api:create_app --factory --reload
 ```
 
 已有 PostgreSQL volume 的密码由首次初始化决定；修改 `.env` 不会自动修改旧 volume 中的密码。不要用 `docker compose down -v` 处理密码不一致，除非已完成备份并明确要删除全部数据。
@@ -99,15 +105,24 @@ npm run dev:local
 
 首次使用在登录页切换到“注册”，创建账户与工作区。默认 API 地址为 `http://localhost:8000/api/v1`。
 
-## 一键容器部署
+面向工作区的可增长列表均默认每页 100 条，使用 `limit`（最大 200；运行记录保持最大 100）与不透明 `cursor` 继续读取；范围包括活动、运行、内容、素材、渠道、发布任务、知识文档、队列任务、工作区、成员、风格 Skill、内容修订、发布证据/确认、审计和 Prompt/Eval 历史。响应头 `X-ContentFlow-Next-Cursor` 表示还有下一页。运营增量接口的 `updated_after` 只接受带时区时间，`X-ContentFlow-Sync-Time` 提供服务端同步水位；按版本号或审计序号排序的历史使用独立序列游标。数组响应结构保持不变，跨域 Web 可读取这些分页头。Prompt/Eval 管理摘要只返回最近 100 条嵌套记录，完整历史由对应分页端点提供。
+
+## 容器部署（显式迁移）
 
 复制 `.env.example` 为 `.env`，至少设置两个不同的 32 位以上随机密钥 `CONTENTFLOW_SECRET_KEY`、`CONTENTFLOW_CREDENTIAL_ENCRYPTION_KEY`，并替换 PostgreSQL 与 MinIO 密码。离线验收可保留 `CONTENTFLOW_ALLOW_MOCK_PROVIDERS=true`；真实生产必须设为 `false` 并配置真实 Provider。生产还必须显式设置 `CONTENTFLOW_REQUIRE_GOVERNED_PROMPTS=true` 和 `CONTENTFLOW_METRICS_ENABLED=true`；Compose 的 API/Worker 默认启用 Prompt 门禁。指标端点必须使用与应用签名/凭据密钥不同的 32 位以上 Bearer Token，并只允许内部监控网络访问。
 
-首次生产初始化时保持门禁开启，只临时允许受限来源注册两个管理员：一人创建并激活工作区，另一人加入该工作区成为管理员；随后依次完成 Eval 套件双人激活、Prompt 评测、双人审批与激活。管理页显示“可生成”后立刻设置 `CONTENTFLOW_ALLOW_REGISTRATION=false` 并重新部署。初始化期间未完成治理的生成请求会在入队前返回 409，不应通过临时关闭治理门禁绕过。
+首次生产初始化时保持注册关闭与治理门禁开启，先按下面的维护步骤迁移；再在受限维护终端使用 `contentflow-bootstrap-admin bootstrap-workspace` 和 `add-admin` 交互创建两名独立管理员。随后完成 Eval 套件双人激活、Prompt 评测、双人审批与激活。初始化期间未完成治理的生成请求会在入队前返回 409，不应通过临时关闭治理门禁绕过。
 
 ```powershell
 docker compose config
-docker compose up --build -d
+docker compose build api worker web
+docker compose up -d --wait postgres minio
+docker compose run --rm minio-init
+# 已有库升级必须先核对任务/未知副作用、停止同库写入者并完成验证备份。
+docker compose stop worker api
+# 确认备份成功后再继续；首次空白库也需要显式迁移。
+docker compose run --rm --no-deps api contentflow-migrate
+docker compose up -d api worker web
 docker compose ps
 ```
 
@@ -115,7 +130,7 @@ Compose 会启动：
 
 - `postgres`：PostgreSQL 16 + pgvector
 - `minio` / `minio-init`：私有对象存储与 bucket 初始化
-- `api`：先执行 Alembic，再启动 FastAPI
+- `api`：只启动 FastAPI；schema 缺失/错版会拒绝启动，不隐式迁移
 - `worker`：消费持久化任务队列
 - `web`：Next.js standalone 运营工作台
 - `prometheus` / `grafana`：可选 `observability` profile，加载版本化抓取、记录/告警规则和只读运维看板
@@ -136,7 +151,7 @@ docker compose --profile observability up --build -d
 
 ## 配置真实 AI Provider
 
-文本与 Embedding 使用显式配置的 OpenAI-compatible 端点，不预设云厂商或模型：
+文本与 Embedding 可以使用显式配置的 OpenAI-compatible 端点，不预设云厂商或模型。两者可继续共用 `MODEL_API_*`，也可让 Embedding 使用独立端点：
 
 ```dotenv
 CONTENTFLOW_TEXT_PROVIDER=openai-compatible
@@ -144,10 +159,44 @@ CONTENTFLOW_EMBEDDING_PROVIDER=openai-compatible
 CONTENTFLOW_MODEL_API_BASE=https://models.example.com/v1
 CONTENTFLOW_MODEL_API_KEY=...
 CONTENTFLOW_TEXT_MODEL=configured-text-model
+CONTENTFLOW_MODEL_REQUEST_TIMEOUT_SECONDS=120
+CONTENTFLOW_EMBEDDING_API_BASE=https://embeddings.example.com/v1
+CONTENTFLOW_EMBEDDING_API_KEY=...
 CONTENTFLOW_EMBEDDING_MODEL=configured-embedding-model
 ```
 
-图片与视频使用 ContentFlow 定义的中立 HTTP 媒体契约；部署方可以连接内部模型网关或独立适配服务：
+Embedding 也可独立使用本地 BGE-M3。模型提交必须固定，默认在 Worker 首次检索/索引时懒加载，知识分块按可配置批次推理，后续由进程缓存复用；容器使用 CPU-only PyTorch 和持久模型缓存卷：
+
+```dotenv
+CONTENTFLOW_EMBEDDING_PROVIDER=bge-m3-local
+CONTENTFLOW_LOCAL_EMBEDDING_MODEL=BAAI/bge-m3
+CONTENTFLOW_LOCAL_EMBEDDING_REVISION=5617a9f61b028005a4858fdac845db406aefb181
+CONTENTFLOW_LOCAL_EMBEDDING_DEVICE=cpu
+CONTENTFLOW_LOCAL_EMBEDDING_OFFLINE=false
+CONTENTFLOW_LOCAL_EMBEDDING_BATCH_SIZE=8
+```
+
+文本请求默认超时 120 秒，可在 10–300 秒内调整。长文 Agent 会显著增加请求时长和 Token 用量；超时配置是单次请求上限，不会放开修订轮数。可选修订的生成或最终复评失败时，系统保留已经完成编辑/安全评审的原稿并记录失败类型，绝不会采用未经最终复评的修订稿。
+
+文本默认限制输出 8192 Token、请求 256 KiB、响应 4 MiB；HTTP Embedding 每批最多 32 条并限制响应，知识索引最多 2000 个分块。经过调用账本的真实外部操作共享工作区 UTC 日调用/证据输入额度和本地请求并发，管理员可读取 `/api/v1/admin/provider-resources`。单位、配置、未知结果与人工重试边界见 [外部调用资源限制](docs/provider_resource_contract.md)；调用额度不等于金额预算。
+
+开放授权图片搜索默认使用 Openverse 的 Wikimedia 来源，只保留 CC0/PDM/BY/BY-SA 和精确允许的下载域名。页面要求用户打开原始页面核验许可后才能选择；许可元数据是检索线索，不是法律保证：
+
+```dotenv
+CONTENTFLOW_IMAGE_SEARCH_PROVIDER=openverse
+CONTENTFLOW_OPENVERSE_API_BASE=https://api.openverse.org/v1
+CONTENTFLOW_IMAGE_SEARCH_RESULT_LIMIT=6
+CONTENTFLOW_IMAGE_SEARCH_DOWNLOAD_ALLOWED_HOSTS=["upload.wikimedia.org"]
+```
+
+没有可验收的媒体生成服务时，可以显式使用人工真实素材模式。审核通过后素材进入 `awaiting_upload`，上传并绑定当前内容版本且安全解码成功后才变为 `ready`；发布门禁不会把“等待人工封面”误报为生成成功：
+
+```dotenv
+CONTENTFLOW_IMAGE_PROVIDER=manual
+CONTENTFLOW_VIDEO_PROVIDER=manual
+```
+
+图片与视频也可使用 ContentFlow 定义的中立 HTTP 媒体契约；部署方可以连接内部模型网关或独立适配服务：
 
 ```dotenv
 CONTENTFLOW_IMAGE_PROVIDER=http
@@ -191,7 +240,7 @@ uv sync --all-extras --locked --python 3.12
 uv run --locked ruff check .
 uv run --locked pytest -q --cov=contentflow --cov-branch --cov-fail-under=75
 $env:PYTHONUTF8="1"
-uv run --locked pip-audit --strict
+uv run --locked python scripts/supply_chain.py audit-python
 ```
 
 不使用 uv 时仍可在现有虚拟环境中运行：
@@ -239,7 +288,17 @@ gh attestation verify .\contentflow-source-<commit>.tar.gz --repo heee000/Conten
 gh attestation verify .\contentflow-source-<commit>.tar.gz --repo heee000/ContentFlow --signer-workflow heee000/ContentFlow/.github/workflows/ci.yml --source-digest <commit> --predicate-type https://cyclonedx.org/bom
 ```
 
-完整的本地生成、哈希核对、证明验证和边界说明见 [软件供应链证据](docs/supply_chain.md)。当前签名对象是源码归档，不是 OCI 镜像；镜像扫描/签名、注册表保留和部署时验签仍需后续生产签收。
+完整的本地生成、哈希核对、证明验证和边界说明见 [软件供应链证据](docs/supply_chain.md)。源码证明之外，受控公网工作流还会为 OCI 镜像生成 BuildKit provenance/SBOM、执行 Critical 漏洞门禁并记录不可变 digest；镜像签名、注册表保留和部署时密码学验签仍需后续生产签收。
+
+## 受控公网测试
+
+固定 IPv4 单机、Caddy 同源 HTTPS、GHCR 不可变镜像、R2 双 Bucket、本地 BGE 固定缓存、加密 PostgreSQL 备份和人工批准部署的完整入口见 [公网测试部署手册](deploy/public-test/README.md)。规划与成本依据见 [公网测试部署实现计划](docs/public_test_deployment_plan.md)。仓库资产可静态验证：
+
+```powershell
+uv run --locked python scripts/validate_public_test_deployment.py
+```
+
+这些资产不代表目标云环境已经上线；固定 IP、DNS、R2、真实模型、微信白名单、跨网络草稿和恢复演练仍必须取得真实证据。
 
 
 ## 备份与隔离恢复校验
@@ -269,6 +328,7 @@ gh attestation verify .\contentflow-source-<commit>.tar.gz --repo heee000/Conten
 
 - [系统架构](docs/architecture.md)
 - [生产部署与运维](docs/operations.md)
+- [公网测试部署实现计划](docs/public_test_deployment_plan.md)
 - [系统使用手册](docs/user_manual.md)
 - [平台连接器与权限边界](docs/platform_connectors.md)
 - [系统能力概览](docs/capability_overview.md)

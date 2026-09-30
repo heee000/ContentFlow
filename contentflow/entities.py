@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    BigInteger,
     String,
     Text,
     UniqueConstraint,
@@ -21,6 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
+from .metric_values import COUNTER_RANGE_SQL
 
 
 def new_id() -> str:
@@ -61,11 +63,146 @@ class Workspace(TimestampMixin, Base):
     )
 
 
+class WorkspaceStorageUsage(TimestampMixin, Base):
+    __tablename__ = "workspace_storage_usage"
+    __table_args__ = (
+        Index(
+            "ix_workspace_storage_usage_reconciliation_due",
+            "last_reconciled_at",
+            "workspace_id",
+        ),
+        CheckConstraint("used_bytes >= 0", name="used_bytes_non_negative"),
+        CheckConstraint("used_objects >= 0", name="used_objects_non_negative"),
+        CheckConstraint("reserved_bytes >= 0", name="reserved_bytes_non_negative"),
+        CheckConstraint(
+            "reserved_objects >= 0", name="reserved_objects_non_negative"
+        ),
+        CheckConstraint(
+            "unverified_objects >= 0", name="unverified_objects_non_negative"
+        ),
+    )
+
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    used_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    used_objects: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    reserved_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    reserved_objects: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    unverified_objects: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+
+class StorageObjectAllocation(TimestampMixin, Base):
+    __tablename__ = "storage_object_allocations"
+    __table_args__ = (
+        UniqueConstraint("storage_uri", name="uq_storage_allocation_uri"),
+        CheckConstraint("size_bytes >= 0", name="size_bytes_non_negative"),
+        CheckConstraint("delete_attempts >= 0", name="delete_attempts_non_negative"),
+        CheckConstraint(
+            "status IN ('reserved', 'active', 'delete_pending', 'missing', "
+            "'integrity_error', 'deleted', 'abandoned', 'staging')",
+            name="status",
+        ),
+        CheckConstraint(
+            "status != 'reserved' OR "
+            "(storage_uri IS NULL AND reserved_until IS NOT NULL)",
+            name="reserved_shape",
+        ),
+        CheckConstraint(
+            "status IN ('reserved', 'abandoned') OR storage_uri IS NOT NULL",
+            name="persisted_uri",
+        ),
+        CheckConstraint(
+            "status != 'deleted' OR deleted_at IS NOT NULL",
+            name="deleted_timestamp",
+        ),
+        CheckConstraint(
+            "checksum IS NULL OR length(checksum) = 64",
+            name="checksum_length",
+        ),
+        CheckConstraint(
+            "status != 'staging' OR (write_job_id IS NOT NULL AND "
+            "write_lease_token IS NOT NULL AND length(write_lease_token) = 32 "
+            "AND checksum IS NOT NULL)", name="staging_identity",
+        ),
+        Index(
+            "ix_storage_allocations_workspace_status_updated_page",
+            "workspace_id",
+            "status",
+            "updated_at",
+            "id",
+        ),
+        Index(
+            "ix_storage_allocations_workspace_owner",
+            "workspace_id",
+            "owner_type",
+            "owner_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    owner_type: Mapped[str] = mapped_column(String(48), index=True)
+    owner_id: Mapped[str] = mapped_column(String(160), index=True)
+    category: Mapped[str] = mapped_column(String(160), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(
+        String(24), default="reserved", server_default=text("'reserved'"), index=True
+    )
+    storage_uri: Mapped[str | None] = mapped_column(Text)
+    write_job_id: Mapped[str | None] = mapped_column(String(36))
+    write_lease_token: Mapped[str | None] = mapped_column(String(32))
+    checksum: Mapped[str | None] = mapped_column(String(64), index=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    size_verified: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
+    mime_type: Mapped[str | None] = mapped_column(String(120))
+    reserved_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    delete_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    delete_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Membership(TimestampMixin, Base):
     __tablename__ = "memberships"
     __table_args__ = (
         UniqueConstraint(
             "workspace_id", "user_id", name="uq_membership_workspace_user"
+        ),
+        Index(
+            "ix_memberships_workspace_created_page",
+            "workspace_id",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "ix_memberships_user_created_page",
+            "user_id",
+            "created_at",
+            "id",
         ),
     )
 
@@ -184,6 +321,12 @@ class PromptRelease(TimestampMixin, Base):
             "workspace_id",
             "status",
         ),
+        Index(
+            "ix_prompt_releases_workspace_number_page",
+            "workspace_id",
+            "release_number",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -236,6 +379,12 @@ class PromptEvalSuite(TimestampMixin, Base):
             "workspace_id",
             "status",
         ),
+        Index(
+            "ix_prompt_eval_suites_workspace_version_page",
+            "workspace_id",
+            "version_number",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -270,6 +419,12 @@ class PromptEvalRun(TimestampMixin, Base):
             "ix_prompt_eval_runs_workspace_created",
             "workspace_id",
             "created_at",
+        ),
+        Index(
+            "ix_prompt_eval_runs_workspace_created_page",
+            "workspace_id",
+            "created_at",
+            "id",
         ),
         Index(
             "ix_prompt_eval_runs_release_suite",
@@ -308,6 +463,9 @@ class PromptEvalRun(TimestampMixin, Base):
 
 class Campaign(TimestampMixin, Base):
     __tablename__ = "campaigns"
+    __table_args__ = (
+        Index("ix_campaigns_workspace_updated_page", "workspace_id", "updated_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -324,8 +482,58 @@ class Campaign(TimestampMixin, Base):
     brief: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class StyleSkill(TimestampMixin, Base):
+    __tablename__ = "style_skills"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "slug",
+            "version",
+            name="uq_style_skill_workspace_slug_version",
+        ),
+        CheckConstraint(
+            "status IN ('enabled', 'disabled')",
+            name="status",
+        ),
+        Index("ix_style_skills_workspace_status", "workspace_id", "status"),
+        Index(
+            "ix_style_skills_workspace_created_page",
+            "workspace_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    version: Mapped[str] = mapped_column(String(40), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(24), default="enabled", nullable=False, index=True
+    )
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )
+    installed_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+
+
 class KnowledgeDocument(TimestampMixin, Base):
     __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        Index(
+            "ix_knowledge_documents_workspace_updated_page",
+            "workspace_id",
+            "updated_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -363,6 +571,14 @@ class KnowledgeChunk(TimestampMixin, Base):
 
 class WorkflowRun(TimestampMixin, Base):
     __tablename__ = "workflow_runs"
+    __table_args__ = (
+        Index(
+            "ix_workflow_runs_workspace_updated_page",
+            "workspace_id",
+            "updated_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -382,10 +598,34 @@ class WorkflowRun(TimestampMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class GenerationIntent(TimestampMixin, Base):
+    """Durable workspace-scoped acceptance receipt; never silently expire keys."""
+
+    __tablename__ = "generation_intents"
+
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    request_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="RESTRICT"), unique=True
+    )
+    requested_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+
 class ContentItem(TimestampMixin, Base):
     __tablename__ = "content_items"
     __table_args__ = (
         Index("ix_content_items_workspace_status", "workspace_id", "status"),
+        Index(
+            "ix_content_items_workspace_updated_page",
+            "workspace_id",
+            "updated_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -412,6 +652,11 @@ class ContentItem(TimestampMixin, Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     source_chunk_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     review_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    generation_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        default=dict,
+        server_default=text("'{}'"),
+    )
     approved_by: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -425,6 +670,13 @@ class ContentRevision(Base):
             "content_item_id",
             "version",
             name="uq_content_revision_version",
+        ),
+        Index(
+            "ix_content_revisions_item_version_page",
+            "workspace_id",
+            "content_item_id",
+            "version",
+            "id",
         ),
     )
 
@@ -445,6 +697,11 @@ class ContentRevision(Base):
         default=dict,
         server_default=text("'{}'"),
     )
+    generation_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        default=dict,
+        server_default=text("'{}'"),
+    )
     changed_by: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
@@ -454,8 +711,36 @@ class ContentRevision(Base):
     )
 
 
+class ContentReviewEvidence(Base):
+    __tablename__ = "content_review_evidence"
+    __table_args__ = (Index("ix_content_review_evidence_page", "workspace_id", "content_item_id", "created_at", "id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    content_item_id: Mapped[str] = mapped_column(ForeignKey("content_items.id", ondelete="CASCADE"))
+    content_version: Mapped[int] = mapped_column(Integer)
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    event: Mapped[str] = mapped_column(String(32))
+    model_binding: Mapped[str] = mapped_column(String(32))
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64))
+    actor_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Asset(TimestampMixin, Base):
     __tablename__ = "assets"
+    __table_args__ = (
+        Index("ix_assets_workspace_updated_page", "workspace_id", "updated_at", "id"),
+        Index(
+            "ix_assets_workspace_item_version_status",
+            "workspace_id",
+            "content_item_id",
+            "content_version",
+            "status",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -463,6 +748,12 @@ class Asset(TimestampMixin, Base):
     )
     content_item_id: Mapped[str | None] = mapped_column(
         ForeignKey("content_items.id", ondelete="SET NULL"), index=True
+    )
+    content_version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
     )
     kind: Mapped[str] = mapped_column(String(32), index=True)
     provider: Mapped[str] = mapped_column(String(80), default="upload")
@@ -482,6 +773,12 @@ class ChannelConnection(TimestampMixin, Base):
         UniqueConstraint(
             "workspace_id", "platform", "display_name", name="uq_channel_display_name"
         ),
+        Index(
+            "ix_channel_connections_workspace_created_page",
+            "workspace_id",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -498,6 +795,20 @@ class ChannelConnection(TimestampMixin, Base):
 
 class PublishJob(TimestampMixin, Base):
     __tablename__ = "publish_jobs"
+    __table_args__ = (
+        Index(
+            "ix_publish_jobs_workspace_updated_page",
+            "workspace_id",
+            "updated_at",
+            "id",
+        ),
+        Index(
+            "ix_publish_jobs_reconciliation_sweep",
+            "status",
+            "updated_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -521,12 +832,39 @@ class PublishJob(TimestampMixin, Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     @property
+    def request_id(self) -> str | None:
+        value = (self.request_json or {}).get("request_id")
+        return value if isinstance(value, str) else None
+
+    @property
     def delivery_mode(self) -> str:
         mode = (self.request_json or {}).get("delivery_mode")
 
         if mode in {"connector", "script", "manual_export"}:
             return str(mode)
         return "connector"
+
+    @property
+    def publish_timing(self) -> str:
+        timing = (self.request_json or {}).get("publish_timing")
+        return "immediate" if timing == "immediate" else "scheduled"
+
+    @property
+    def retry_safe(self) -> bool:
+        failure = (self.response_json or {}).get("dispatch_failure")
+        return (
+            self.status == "failed"
+            and isinstance(failure, dict)
+            and failure.get("retry_safe") is True
+        )
+
+    @property
+    def failure_stage(self) -> str | None:
+        failure = (self.response_json or {}).get("dispatch_failure")
+        if not isinstance(failure, dict):
+            return None
+        stage = failure.get("stage")
+        return stage if isinstance(stage, str) else None
 
     @property
     def script_confirmation_required(self) -> int:
@@ -611,6 +949,13 @@ class PublishEvidence(Base):
             "script_attempt_id",
             "created_at",
         ),
+        Index(
+            "ix_publish_evidence_attempt_created_page",
+            "publish_job_id",
+            "script_attempt_id",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -660,6 +1005,13 @@ class PublishConfirmation(Base):
             "script_attempt_id",
             "created_at",
         ),
+        Index(
+            "ix_publish_confirmation_attempt_created_page",
+            "publish_job_id",
+            "script_attempt_id",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -690,6 +1042,8 @@ class MetricSnapshot(Base):
         UniqueConstraint(
             "publish_job_id", "captured_at", name="uq_metric_snapshot_capture"
         ),
+        CheckConstraint("validation_status IN ('valid', 'quarantined')", name="validation_status"),
+        CheckConstraint("validation_status = 'quarantined' OR (" + COUNTER_RANGE_SQL + ")", name="counters_bounded"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -707,11 +1061,51 @@ class MetricSnapshot(Base):
     likes: Mapped[float] = mapped_column(Float, default=0)
     comments: Mapped[float] = mapped_column(Float, default=0)
     shares: Mapped[float] = mapped_column(Float, default=0)
+    validation_status: Mapped[str] = mapped_column(
+        String(24), default="valid", server_default="valid", nullable=False
+    )
     raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class AuditChainHead(Base):
+    __tablename__ = "audit_chain_heads"
+    __table_args__ = (
+        CheckConstraint("sequence >= 0", name="sequence_non_negative"),
+        CheckConstraint("length(head_hash) = 64", name="head_hash_length"),
+    )
+
+    chain_scope: Mapped[str] = mapped_column(String(80), primary_key=True)
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="SET NULL"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    head_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
 
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        UniqueConstraint(
+            "chain_scope",
+            "chain_sequence",
+            name="uq_audit_log_chain_sequence",
+        ),
+        CheckConstraint("chain_sequence > 0", name="chain_sequence_positive"),
+        CheckConstraint("integrity_version = 1", name="integrity_version"),
+        CheckConstraint(
+            "length(previous_hash) = 64 AND length(entry_hash) = 64",
+            name="hash_lengths",
+        ),
+        Index(
+            "ix_audit_logs_workspace_sequence_page",
+            "workspace_id",
+            "chain_sequence",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str | None] = mapped_column(
@@ -725,6 +1119,11 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(80), index=True)
     request_id: Mapped[str | None] = mapped_column(String(64), index=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    chain_scope: Mapped[str] = mapped_column(String(80), index=True)
+    chain_sequence: Mapped[int] = mapped_column(BigInteger)
+    previous_hash: Mapped[str] = mapped_column(String(64))
+    entry_hash: Mapped[str] = mapped_column(String(64), index=True)
+    integrity_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
     )
@@ -732,7 +1131,10 @@ class AuditLog(Base):
 
 class Job(TimestampMixin, Base):
     __tablename__ = "jobs"
-    __table_args__ = (Index("ix_jobs_claim", "status", "run_at", "locked_at"),)
+    __table_args__ = (
+        Index("ix_jobs_claim", "status", "run_at", "locked_at"),
+        Index("ix_jobs_workspace_updated_page", "workspace_id", "updated_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str | None] = mapped_column(
@@ -749,8 +1151,206 @@ class Job(TimestampMixin, Base):
     )
     locked_by: Mapped[str | None] = mapped_column(String(120), index=True)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[str | None] = mapped_column(String(32), default=lambda: uuid.uuid4().hex)
     last_error: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+
+
+class JobManualReview(Base):
+    __tablename__ = "job_manual_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IS NULL OR decision IN ('retry', 'abandon')",
+            name="decision",
+        ),
+        CheckConstraint(
+            "length(reason_code) > 0",
+            name="reason_code_non_empty",
+        ),
+        CheckConstraint(
+            "((resolved_at IS NULL AND decision IS NULL AND note IS NULL "
+            "AND provider_checked = false) OR "
+            "(resolved_at IS NOT NULL AND decision IS NOT NULL "
+            "AND length(note) >= 8 AND provider_checked = true))",
+            name="resolution_consistent",
+        ),
+        Index(
+            "ix_job_manual_reviews_workspace_requested_page",
+            "workspace_id",
+            "requested_at",
+            "id",
+        ),
+        Index(
+            "uq_job_manual_reviews_open_job",
+            "job_id",
+            unique=True,
+            postgresql_where=text("resolved_at IS NULL"),
+            sqlite_where=text("resolved_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), index=True
+    )
+    reason_code: Mapped[str] = mapped_column(String(80), index=True)
+    context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    provider_checked: Mapped[bool] = mapped_column(Boolean, default=False)
+    decision: Mapped[str | None] = mapped_column(String(24))
+    note: Mapped[str | None] = mapped_column(Text)
+
+
+class ProviderInvocation(TimestampMixin, Base):
+    __tablename__ = "provider_invocations"
+    __table_args__ = (
+        CheckConstraint(
+            "provider_kind IN ('text', 'embedding', 'media', 'search')",
+            name="provider_kind",
+        ),
+        CheckConstraint(
+            "last_status IN ('started', 'succeeded', 'outcome_unknown', "
+            "'late_succeeded', 'late_failed')",
+            name="last_status",
+        ),
+        CheckConstraint("length(request_key) = 64", name="request_key_length"),
+        CheckConstraint("length(request_sha256) = 64", name="request_sha256_length"),
+        CheckConstraint("request_bytes >= 0", name="request_bytes_non_negative"),
+        CheckConstraint("length(entity_type) > 0", name="entity_type_non_empty"),
+        CheckConstraint("length(entity_id) > 0", name="entity_id_non_empty"),
+        CheckConstraint("length(operation) > 0", name="operation_non_empty"),
+        UniqueConstraint("request_key", name="uq_provider_invocations_request_key"),
+        Index(
+            "ix_provider_invocations_workspace_created_page",
+            "workspace_id",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "ix_provider_invocations_job_created_page",
+            "job_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), index=True
+    )
+    entity_type: Mapped[str] = mapped_column(String(80), index=True)
+    entity_id: Mapped[str] = mapped_column(String(80), index=True)
+    provider_kind: Mapped[str] = mapped_column(String(24), index=True)
+    provider_name: Mapped[str] = mapped_column(String(80), index=True)
+    model_name: Mapped[str] = mapped_column(String(160))
+    operation: Mapped[str] = mapped_column(String(80), index=True)
+    request_key: Mapped[str] = mapped_column(String(64))
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    request_bytes: Mapped[int] = mapped_column(Integer)
+    last_status: Mapped[str] = mapped_column(
+        String(24), default="started", nullable=False, index=True
+    )
+
+
+class ProviderInvocationAttempt(Base):
+    __tablename__ = "provider_invocation_attempts"
+    __table_args__ = (
+        CheckConstraint("attempt_number > 0", name="attempt_number_positive"),
+        CheckConstraint(
+            "status IN ('started', 'succeeded', 'outcome_unknown', "
+            "'late_succeeded', 'late_failed')",
+            name="status",
+        ),
+        CheckConstraint(
+            "usage_source IN ('not_reported', 'provider_reported')",
+            name="usage_source",
+        ),
+        CheckConstraint(
+            "input_tokens IS NULL OR input_tokens >= 0",
+            name="input_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "output_tokens IS NULL OR output_tokens >= 0",
+            name="output_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "total_tokens IS NULL OR total_tokens >= 0",
+            name="total_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "response_bytes IS NULL OR response_bytes >= 0",
+            name="response_bytes_non_negative",
+        ),
+        CheckConstraint(
+            "response_sha256 IS NULL OR length(response_sha256) = 64",
+            name="response_sha256_length",
+        ),
+        CheckConstraint(
+            "provider_request_id IS NULL OR length(provider_request_id) > 0",
+            name="provider_request_id_non_empty",
+        ),
+        CheckConstraint(
+            "((status = 'started' AND completed_at IS NULL) OR "
+            "(status <> 'started' AND completed_at IS NOT NULL))",
+            name="completion_consistent",
+        ),
+        UniqueConstraint(
+            "invocation_id",
+            "attempt_number",
+            name="uq_provider_invocation_attempt_number",
+        ),
+        Index(
+            "ix_provider_invocation_attempts_invocation_started_page",
+            "invocation_id",
+            "started_at",
+            "id",
+        ),
+        Index(
+            "ix_provider_invocation_attempts_status_started",
+            "status",
+            "started_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_invocations.id", ondelete="CASCADE"), index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(
+        String(24), default="started", nullable=False, index=True
+    )
+    idempotency_key_sent: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    provider_request_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    provider_request_id_source: Mapped[str | None] = mapped_column(String(40))
+    response_sha256: Mapped[str | None] = mapped_column(String(64))
+    response_bytes: Mapped[int | None] = mapped_column(Integer)
+    response_model: Mapped[str | None] = mapped_column(String(160))
+    usage_source: Mapped[str] = mapped_column(
+        String(24), default="not_reported", nullable=False
+    )
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    total_tokens: Mapped[int | None] = mapped_column(Integer)
+    error_type: Mapped[str | None] = mapped_column(String(160))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class WorkerNode(Base):

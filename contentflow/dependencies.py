@@ -13,6 +13,7 @@ from .db import get_db
 from .entities import AuthSession, Membership, User, Workspace
 from .security import decode_access_token
 from .settings import Settings, get_settings
+from .session_context import CONTEXT_HEADER, require_browser_context
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -122,6 +123,13 @@ def get_principal(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户或工作区访问权限已失效",
         )
+    # Bootstrap is read-only and explicit. Every other cookie-authenticated
+    # endpoint requires a context, regardless of the optional session-mode hint.
+    if cookie_auth and (
+        request.url.path.rstrip("/") != f"{settings.api_prefix}/auth/session"
+        or request.headers.get(CONTEXT_HEADER)
+    ):
+        require_browser_context(request, auth_session, settings)
     return Principal(
         user=user,
         workspace=workspace,

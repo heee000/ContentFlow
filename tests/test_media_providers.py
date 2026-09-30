@@ -10,6 +10,7 @@ import httpx
 from contentflow.media_providers import (
     HTTPMediaProvider,
     MediaGeneration,
+    MediaProviderError,
     build_media_provider,
     download_generated_media,
 )
@@ -32,6 +33,49 @@ def http_settings(**overrides) -> Settings:
 
 
 class HTTPMediaProviderTest(unittest.TestCase):
+    def test_download_keeps_request_id_on_success_http_error_and_size_rejection(self):
+        for status_code, max_bytes, expected_error in (
+            (200, 100, None),
+            (429, 100, MediaProviderError),
+            (200, 1, ValueError),
+        ):
+            with self.subTest(status_code=status_code, max_bytes=max_bytes):
+                metadata = {}
+                with httpx.Client(transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(
+                        status_code,
+                        headers={"x-request-id": "download-request-123"},
+                        content=b"private-image-body",
+                    )
+                )) as client:
+                    def invoke():
+                        return download_generated_media(
+                            MediaGeneration(
+                                status="ready",
+                                download_url="https://assets.example/image.png",
+                            ),
+                            client=client,
+                            max_bytes=max_bytes,
+                            allowed_hosts=("assets.example",),
+                            call_metadata=metadata,
+                        )
+
+                    if expected_error is None:
+                        self.assertEqual(invoke(), b"private-image-body")
+                    else:
+                        with self.assertRaises(expected_error) as captured:
+                            invoke()
+                        self.assertNotIn("private-image-body", str(captured.exception))
+                        if status_code == 429:
+                            self.assertEqual(
+                                captured.exception.provider_request_id,
+                                "download-request-123",
+                            )
+                self.assertEqual(metadata, {
+                    "provider_request_id": "download-request-123",
+                    "provider_request_id_source": "header.x-request-id",
+                })
+
     def test_image_generation_accepts_bounded_base64_result(self):
         expected = b"generated-image"
 

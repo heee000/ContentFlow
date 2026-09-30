@@ -5,30 +5,48 @@ import tempfile
 import threading
 import unittest
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from contentflow.db import Base, build_engine
-from contentflow.entities import Job, WorkerNode
+from contentflow.entities import AuditLog, Job, JobManualReview, WorkerNode
 from contentflow.job_queue import (
     JobLeaseLost,
     claim_next_job,
     complete_job,
     enqueue_job,
+    fail_expired_manual_review_leases,
     renew_job_lease,
 )
 from contentflow.settings import Settings
 from contentflow.worker import (
+    DatabaseErrorKind,
+    HANDLERS,
+    JOB_RECOVERY_POLICIES,
+    MANUAL_REVIEW_JOB_TYPES,
+    JobRecoveryPolicy,
     LeaseHeartbeat,
     Worker,
+    WorkerDatabaseUnavailable,
     WorkerNodeHeartbeat,
+    classify_database_error,
     configure_worker_logging,
+    database_error_sqlstate,
     logger as worker_logger,
+    manual_review_job_types,
+    sanitized_database_error,
 )
+
+
+class PostgresTestError(Exception):
+    def __init__(self, sqlstate: str, message: str = "sensitive database detail"):
+        super().__init__(message)
+        self.sqlstate = sqlstate
 
 
 class JobQueueLeaseTest(unittest.TestCase):
@@ -63,11 +81,34 @@ class JobQueueLeaseTest(unittest.TestCase):
                 session,
                 worker_id="worker-a",
                 lease_seconds=30,
+                manual_review_job_types=(),
             )
             self.assertIsNotNone(job)
             attempt = job.attempts
+            self.claim_token = job.lease_token
             session.commit()
         return job_id, attempt
+
+    @staticmethod
+    def _database_unavailable_error() -> OperationalError:
+        return OperationalError(
+            "SELECT redacted",
+            {},
+            OSError("postgresql://sensitive-host database unavailable"),
+        )
+
+    @staticmethod
+    def _postgres_error(
+        sqlstate: str,
+        *,
+        connection_invalidated: bool = False,
+    ) -> OperationalError:
+        return OperationalError(
+            "SELECT secret_column FROM private_table",
+            {"token": "sensitive-parameter"},
+            PostgresTestError(sqlstate),
+            connection_invalidated=connection_invalidated,
+        )
 
     def test_lease_renewal_requires_current_owner_and_attempt(self):
         job_id, attempt = self._claim_job()
@@ -78,6 +119,7 @@ class JobQueueLeaseTest(unittest.TestCase):
                 job_id=job_id,
                 worker_id="worker-a",
                 attempt=attempt,
+                lease_token=self.claim_token, lease_seconds=30,
             )
             self.assertTrue(renewed)
             session.commit()
@@ -96,9 +138,153 @@ class JobQueueLeaseTest(unittest.TestCase):
                     job_id=job_id,
                     worker_id="worker-b",
                     attempt=attempt,
+                    lease_token=self.claim_token, lease_seconds=30,
                 )
             )
             session.rollback()
+
+    def test_every_production_handler_declares_a_lease_recovery_policy(self):
+        self.assertEqual(
+            set(JOB_RECOVERY_POLICIES),
+            set(HANDLERS),
+        )
+        self.assertEqual(
+            MANUAL_REVIEW_JOB_TYPES,
+            {
+                "prompt_eval.execute",
+                "workflow.execute",
+            },
+        )
+        self.assertTrue(
+            all(
+                isinstance(policy, JobRecoveryPolicy)
+                for policy in JOB_RECOVERY_POLICIES.values()
+            )
+        )
+        local_settings = Settings(
+            database_url="sqlite://",
+            secret_key="local-provider-policy-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            embedding_provider="bge-m3-local",
+        )
+        remote_settings = local_settings.model_copy(
+            update={"embedding_provider": "openai-compatible"}
+        )
+        self.assertNotIn("knowledge.index", manual_review_job_types(local_settings))
+        self.assertIn("knowledge.index", manual_review_job_types(remote_settings))
+
+    def test_expired_manual_review_job_is_not_reclaimed_automatically(self):
+        expired_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        with self.session_factory() as session:
+            unsafe = enqueue_job(
+                session,
+                job_type="workflow.execute",
+                payload={"run_id": "unsafe-run"},
+                workspace_id=None,
+            )
+            safe = enqueue_job(
+                session,
+                job_type="connector.test",
+                payload={"channel_id": "safe-channel"},
+                workspace_id=None,
+            )
+            for job in (unsafe, safe):
+                job.status = "running"
+                job.attempts = 1
+                job.locked_by = "dead-worker"
+                job.locked_at = expired_at
+            session.commit()
+            unsafe_id = unsafe.id
+            safe_id = safe.id
+
+        with self.session_factory() as session:
+            claimed = claim_next_job(
+                session,
+                worker_id="recovery-worker",
+                lease_seconds=30,
+                manual_review_job_types=MANUAL_REVIEW_JOB_TYPES,
+            )
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.id, safe_id)
+            session.commit()
+
+        with self.session_factory() as session:
+            failed = fail_expired_manual_review_leases(
+                session,
+                lease_seconds=30,
+                job_types=MANUAL_REVIEW_JOB_TYPES,
+            )
+            self.assertEqual([job.id for job in failed], [unsafe_id])
+            session.commit()
+
+        with self.session_factory() as session:
+            unsafe = session.get(Job, unsafe_id)
+            safe = session.get(Job, safe_id)
+            self.assertEqual(unsafe.status, "manual_review")
+            self.assertEqual(unsafe.attempts, 1)
+            self.assertIsNone(unsafe.locked_by)
+            self.assertIsNone(unsafe.locked_at)
+            self.assertIn("Automatic retry was blocked", unsafe.last_error)
+            review = session.scalar(
+                select(JobManualReview).where(JobManualReview.job_id == unsafe_id)
+            )
+            self.assertIsNotNone(review)
+            self.assertEqual(
+                review.reason_code,
+                "worker_lease_expired_provider_outcome_unknown",
+            )
+            self.assertIsNone(review.resolved_at)
+            actions = set(session.scalars(select(AuditLog.action)))
+            self.assertIn("job.manual_review_requested", actions)
+            self.assertEqual(safe.status, "running")
+            self.assertEqual(safe.locked_by, "recovery-worker")
+            self.assertEqual(safe.attempts, 2)
+
+    def test_manual_review_provider_failure_is_not_retried_automatically(self):
+        handler_calls = 0
+
+        def failing_handler(_session, _payload, _settings):
+            nonlocal handler_calls
+            handler_calls += 1
+            raise RuntimeError("provider attempt outcome requires review")
+
+        with self.session_factory() as session:
+            job = enqueue_job(
+                session,
+                job_type="workflow.execute",
+                payload={"run_id": "manual-review-run"},
+                workspace_id=None,
+            )
+            session.commit()
+            job_id = job.id
+
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="manual-review-provider-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+            ),
+            worker_id="manual-review-worker",
+            session_factory=self.session_factory,
+            handlers={"workflow.execute": failing_handler},
+        )
+
+        self.assertTrue(worker.run_once())
+        self.assertEqual(handler_calls, 1)
+        with self.session_factory() as session:
+            stored_job = session.get(Job, job_id)
+            self.assertEqual(stored_job.status, "manual_review")
+            self.assertEqual(stored_job.attempts, 1)
+            self.assertIsNone(stored_job.locked_by)
+            self.assertIsNone(stored_job.locked_at)
+            review = session.scalar(
+                select(JobManualReview).where(JobManualReview.job_id == job_id)
+            )
+            self.assertIsNotNone(review)
+            self.assertEqual(
+                review.reason_code,
+                "provider_outcome_unknown_after_error",
+            )
 
     def test_heartbeat_renews_active_job_in_independent_session(self):
         job_id, attempt = self._claim_job()
@@ -112,6 +298,7 @@ class JobQueueLeaseTest(unittest.TestCase):
             worker_id="worker-a",
             attempt=attempt,
             lease_seconds=3,
+            lease_token=self.claim_token,
         ) as heartbeat:
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
@@ -184,6 +371,434 @@ class JobQueueLeaseTest(unittest.TestCase):
             node = session.get(WorkerNode, "idle-worker")
             self.assertEqual(node.status, "stopped")
             self.assertIsNotNone(node.stopped_at)
+
+    def test_idle_worker_throttles_maintenance_sweeps(self):
+        settings = Settings(
+            database_url="sqlite://",
+            secret_key="storage-sweep-throttle-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            storage_reconcile_schedule_poll_seconds=60,
+        )
+        worker = Worker(
+            settings=settings,
+            worker_id="storage-sweep-throttle-worker",
+            session_factory=self.session_factory,
+        )
+
+        with patch(
+            "contentflow.worker.schedule_due_storage_reconciliations",
+            return_value=0,
+        ) as storage_sweep, patch(
+            "contentflow.worker.schedule_pending_publish_reconciliations",
+            return_value=0,
+        ) as publish_sweep:
+            self.assertFalse(worker.run_once())
+            self.assertFalse(worker.run_once())
+
+        storage_sweep.assert_called_once_with(
+            ANY,
+            settings=settings,
+        )
+        publish_sweep.assert_called_once_with(
+            ANY,
+            settings=settings,
+        )
+
+    def test_database_outage_during_handler_is_not_recorded_as_domain_failure(self):
+        with self.session_factory() as session:
+            queued = enqueue_job(
+                session,
+                job_type="test.database-outage",
+                payload={},
+                workspace_id=None,
+                idempotency_key="test.database-outage",
+            )
+            session.commit()
+            job_id = queued.id
+
+        def unavailable_handler(_session, _payload, _settings):
+            raise self._database_unavailable_error()
+
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="database-outage-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+            ),
+            worker_id="database-outage-worker",
+            session_factory=self.session_factory,
+            handlers={"test.database-outage": unavailable_handler},
+        )
+
+        with self.assertRaises(OperationalError):
+            worker.run_once()
+
+        with self.session_factory() as session:
+            claimed = session.get(Job, job_id)
+            self.assertEqual(claimed.status, "running")
+            self.assertEqual(claimed.attempts, 1)
+            self.assertIsNone(claimed.last_error)
+
+    def test_postgres_sqlstate_classifier_separates_recovery_categories(self):
+        expected = {
+            "08006": DatabaseErrorKind.AVAILABILITY,
+            "57P01": DatabaseErrorKind.AVAILABILITY,
+            "53300": DatabaseErrorKind.AVAILABILITY,
+            "40001": DatabaseErrorKind.TRANSACTION_RETRYABLE,
+            "40P01": DatabaseErrorKind.TRANSACTION_RETRYABLE,
+            "55P03": DatabaseErrorKind.LOCK_CONTENTION,
+            "57014": DatabaseErrorKind.QUERY_INTERRUPTED,
+            "28P01": DatabaseErrorKind.PERMANENT,
+            "42P01": DatabaseErrorKind.PERMANENT,
+        }
+
+        for sqlstate, kind in expected.items():
+            with self.subTest(sqlstate=sqlstate):
+                error = self._postgres_error(sqlstate)
+                self.assertEqual(database_error_sqlstate(error), sqlstate)
+                self.assertEqual(classify_database_error(error), kind)
+
+        self.assertEqual(
+            classify_database_error(self._database_unavailable_error()),
+            DatabaseErrorKind.AVAILABILITY,
+        )
+        self.assertEqual(
+            classify_database_error(
+                self._postgres_error("57P05", connection_invalidated=True)
+            ),
+            DatabaseErrorKind.AVAILABILITY,
+        )
+
+    def test_database_error_summary_never_contains_sql_parameters_or_driver_text(self):
+        error = self._postgres_error("40001")
+
+        summary = sanitized_database_error(error)
+
+        self.assertIn("kind=transaction_retryable", summary)
+        self.assertIn("sqlstate=40001", summary)
+        self.assertIn("error_type=OperationalError", summary)
+        self.assertNotIn("secret_column", summary)
+        self.assertNotIn("sensitive-parameter", summary)
+        self.assertNotIn("sensitive database detail", summary)
+
+    def test_transaction_conflict_requeues_job_with_sanitized_error(self):
+        with self.session_factory() as session:
+            queued = enqueue_job(
+                session,
+                job_type="test.transaction-conflict",
+                payload={},
+                workspace_id=None,
+                idempotency_key="test.transaction-conflict",
+            )
+            session.commit()
+            job_id = queued.id
+
+        def conflicting_handler(_session, _payload, _settings):
+            raise self._postgres_error("40001")
+
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="transaction-conflict-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+            ),
+            worker_id="transaction-conflict-worker",
+            session_factory=self.session_factory,
+            handlers={"test.transaction-conflict": conflicting_handler},
+        )
+
+        with (
+            patch.object(worker_logger, "disabled", False),
+            self.assertLogs(worker_logger, level=logging.ERROR) as captured,
+        ):
+            self.assertTrue(worker.run_once())
+
+        with self.session_factory() as session:
+            current = session.get(Job, job_id)
+            self.assertEqual(current.status, "retry")
+            self.assertEqual(current.attempts, 1)
+            self.assertIn("kind=transaction_retryable", current.last_error)
+            self.assertIn("sqlstate=40001", current.last_error)
+            self.assertNotIn("secret_column", current.last_error)
+            self.assertNotIn("sensitive-parameter", current.last_error)
+        messages = "\n".join(captured.output)
+        self.assertIn("kind=transaction_retryable", messages)
+        self.assertNotIn("sensitive database detail", messages)
+
+    def test_permanent_database_error_fails_job_without_retry(self):
+        with self.session_factory() as session:
+            queued = enqueue_job(
+                session,
+                job_type="test.permanent-database-error",
+                payload={},
+                workspace_id=None,
+                idempotency_key="test.permanent-database-error",
+            )
+            session.commit()
+            job_id = queued.id
+
+        def invalid_database_handler(_session, _payload, _settings):
+            raise self._postgres_error("28P01")
+
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="permanent-database-error-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+            ),
+            worker_id="permanent-database-error-worker",
+            session_factory=self.session_factory,
+            handlers={"test.permanent-database-error": invalid_database_handler},
+        )
+
+        self.assertTrue(worker.run_once())
+
+        with self.session_factory() as session:
+            current = session.get(Job, job_id)
+            self.assertEqual(current.status, "failed")
+            self.assertEqual(current.attempts, 1)
+            self.assertIn("kind=permanent", current.last_error)
+            self.assertIn("sqlstate=28P01", current.last_error)
+            self.assertNotIn("sensitive database detail", current.last_error)
+
+    def test_worker_retries_database_outage_then_recovers(self):
+        settings = Settings(
+            database_url="sqlite://",
+            secret_key="database-recovery-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            worker_database_retry_initial_seconds=0.1,
+            worker_database_retry_max_seconds=0.1,
+            worker_database_retry_max_attempts=2,
+            worker_database_retry_jitter_ratio=0,
+        )
+        worker = Worker(
+            settings=settings,
+            worker_id="database-recovery-worker",
+            session_factory=self.session_factory,
+        )
+        worker._next_storage_reconciliation_sweep_at = 123.0
+        worker._next_publish_reconciliation_sweep_at = 456.0
+        calls = 0
+
+        def flaky_run_once():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise self._database_unavailable_error()
+            worker.request_stop()
+            return False
+
+        with (
+            patch.object(worker_logger, "disabled", False),
+            patch.object(worker, "run_once", side_effect=flaky_run_once),
+            self.assertLogs(worker_logger, level=logging.INFO) as captured,
+        ):
+            worker.run_forever()
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(worker._next_storage_reconciliation_sweep_at, 0.0)
+        self.assertEqual(worker._next_publish_reconciliation_sweep_at, 0.0)
+        messages = "\n".join(captured.output)
+        self.assertIn("database operation unavailable", messages)
+        self.assertIn("database operation recovered", messages)
+        self.assertNotIn("sensitive-host", messages)
+
+    def test_worker_retries_transient_sqlstate_but_not_permanent_sqlstate(self):
+        settings = Settings(
+            database_url="sqlite://",
+            secret_key="sqlstate-worker-recovery-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            worker_database_retry_initial_seconds=0.1,
+            worker_database_retry_max_seconds=0.1,
+            worker_database_retry_max_attempts=2,
+            worker_database_retry_jitter_ratio=0,
+        )
+        recovering_worker = Worker(
+            settings=settings,
+            worker_id="sqlstate-recovery-worker",
+            session_factory=self.session_factory,
+        )
+
+        recovery_calls = 0
+
+        def flaky_sqlstate_run_once():
+            nonlocal recovery_calls
+            recovery_calls += 1
+            if recovery_calls == 1:
+                raise self._postgres_error("40P01")
+            recovering_worker.request_stop()
+            return False
+
+        with (
+            patch.object(worker_logger, "disabled", False),
+            patch.object(
+                recovering_worker,
+                "run_once",
+                side_effect=flaky_sqlstate_run_once,
+            ) as run_once,
+            self.assertLogs(worker_logger, level=logging.INFO) as captured,
+        ):
+            recovering_worker.run_forever()
+
+        self.assertEqual(run_once.call_count, 2)
+        messages = "\n".join(captured.output)
+        self.assertIn("database operation retryable", messages)
+        self.assertIn("kind=transaction_retryable", messages)
+        self.assertIn("sqlstate=40P01", messages)
+        self.assertNotIn("sensitive database detail", messages)
+
+        permanent_worker = Worker(
+            settings=settings,
+            worker_id="sqlstate-permanent-worker",
+            session_factory=self.session_factory,
+        )
+        permanent_error = self._postgres_error("28P01")
+        with patch.object(
+            permanent_worker,
+            "run_once",
+            side_effect=permanent_error,
+        ) as run_once, self.assertRaises(OperationalError):
+            permanent_worker.run_forever()
+        self.assertEqual(run_once.call_count, 1)
+
+    def test_worker_database_retry_delay_is_exponential_capped_and_jittered(self):
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="database-delay-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+                worker_database_retry_initial_seconds=1,
+                worker_database_retry_max_seconds=5,
+                worker_database_retry_max_attempts=8,
+                worker_database_retry_jitter_ratio=0.2,
+            ),
+            session_factory=self.session_factory,
+        )
+
+        with patch("contentflow.worker.random.uniform", return_value=0):
+            self.assertEqual(
+                [worker._database_retry_delay(attempt) for attempt in range(1, 6)],
+                [1, 2, 4, 5, 5],
+            )
+        with patch("contentflow.worker.random.uniform", return_value=-0.2):
+            self.assertEqual(worker._database_retry_delay(1), 0.8)
+        with patch("contentflow.worker.random.uniform", return_value=0.2):
+            self.assertEqual(worker._database_retry_delay(1), 1.2)
+
+    def test_worker_node_database_error_log_is_redacted(self):
+        def unavailable_session_factory():
+            raise self._database_unavailable_error()
+
+        heartbeat = WorkerNodeHeartbeat(
+            session_factory=unavailable_session_factory,
+            worker_id="redacted-heartbeat-worker",
+            interval_seconds=10,
+        )
+
+        with (
+            patch.object(worker_logger, "disabled", False),
+            self.assertLogs(worker_logger, level=logging.ERROR) as captured,
+        ):
+            self.assertFalse(heartbeat.pulse())
+
+        messages = "\n".join(captured.output)
+        self.assertIn("heartbeat database unavailable", messages)
+        self.assertNotIn("sensitive-host", messages)
+
+    def test_worker_database_retry_wait_is_interruptible(self):
+        settings = Settings(
+            database_url="sqlite://",
+            secret_key="database-stop-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            worker_database_retry_initial_seconds=30,
+            worker_database_retry_max_seconds=30,
+            worker_database_retry_max_attempts=2,
+            worker_database_retry_jitter_ratio=0,
+        )
+        worker = Worker(
+            settings=settings,
+            worker_id="database-stop-worker",
+            session_factory=self.session_factory,
+        )
+        attempted = threading.Event()
+
+        def unavailable_run_once():
+            attempted.set()
+            raise self._database_unavailable_error()
+
+        with patch.object(worker, "run_once", side_effect=unavailable_run_once):
+            thread = threading.Thread(target=worker.run_forever, daemon=True)
+            thread.start()
+            self.assertTrue(attempted.wait(timeout=1))
+            started = time.monotonic()
+            worker.request_stop(15)
+            thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertLess(time.monotonic() - started, 1)
+
+    def test_worker_exits_after_bounded_database_retries(self):
+        settings = Settings(
+            database_url="sqlite://",
+            secret_key="database-exhaustion-test-secret",
+            local_storage_dir=Path(self.temp_dir.name) / "storage",
+            worker_database_retry_initial_seconds=0.1,
+            worker_database_retry_max_seconds=0.1,
+            worker_database_retry_max_attempts=1,
+            worker_database_retry_jitter_ratio=0,
+        )
+        worker = Worker(
+            settings=settings,
+            worker_id="database-exhaustion-worker",
+            session_factory=self.session_factory,
+        )
+
+        with (
+            patch.object(worker_logger, "disabled", False),
+            patch.object(
+                worker,
+                "run_once",
+                side_effect=self._database_unavailable_error(),
+            ) as run_once,
+            self.assertLogs(worker_logger, level=logging.ERROR) as captured,
+            self.assertRaisesRegex(
+                WorkerDatabaseUnavailable,
+                "retry budget exhausted",
+            ),
+        ):
+            worker.run_forever()
+
+        self.assertEqual(run_once.call_count, 2)
+        self.assertNotIn("sensitive-host", "\n".join(captured.output))
+
+    def test_worker_does_not_retry_non_availability_database_error(self):
+        worker = Worker(
+            settings=Settings(
+                database_url="sqlite://",
+                secret_key="database-integrity-test-secret",
+                local_storage_dir=Path(self.temp_dir.name) / "storage",
+            ),
+            worker_id="database-integrity-worker",
+            session_factory=self.session_factory,
+        )
+        integrity_error = IntegrityError(
+            "INSERT redacted",
+            {},
+            ValueError("constraint failed"),
+        )
+        self.assertEqual(
+            classify_database_error(integrity_error),
+            DatabaseErrorKind.PERMANENT,
+        )
+
+        with patch.object(
+            worker,
+            "run_once",
+            side_effect=integrity_error,
+        ) as run_once, self.assertRaises(IntegrityError):
+            worker.run_forever()
+
+        self.assertEqual(run_once.call_count, 1)
 
     def test_worker_logging_is_reenabled_after_migrations(self):
         previous_disabled = worker_logger.disabled
@@ -280,6 +895,7 @@ class JobQueueLeaseTest(unittest.TestCase):
                     {"unsafe": True},
                     worker_id="worker-a",
                     attempt=attempt,
+                    lease_token=self.claim_token, lease_seconds=30,
                 )
             session.rollback()
 

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..atomic_insert import insert_on_unique_key
 from ..audit import record_audit
 from ..db import get_db
 from ..dependencies import (
@@ -18,17 +18,38 @@ from ..dependencies import (
     Principal,
     require_role,
 )
-from ..entities import ChannelConnection, ContentItem, Job, PublishJob
+from ..entities import Asset, ChannelConnection, ContentItem, Job, PublishJob
 from ..job_queue import enqueue_job
-from ..object_storage import build_object_storage
+from ..object_storage import build_object_storage, is_workspace_storage_uri
+from ..publication_payload import preview_document
+from ..review_evidence import resolve_brief
+from ..publish_manifest import (
+    ManifestObjectStorage,
+    PublishManifestConflict,
+    build_release_manifest,
+    confirmation_request_digest,
+    load_release_inputs,
+    publication_fingerprint,
+    require_publish_manifest,
+    sign_publication_preview,
+    verify_publication_preview,
+)
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    UpdatedAfter,
+    paginate,
+)
 from ..schemas import (
     PublishJobResponse,
+    PublishPreviewRequest,
     PublishReconcileRequest,
     PublishScheduleRequest,
 )
+from ..storage_ledger import request_storage_deletion
 
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/publishing", tags=["publishing"])
 Db = Annotated[Session, Depends(get_db)]
 Reviewer = Annotated[Principal, Depends(require_role("reviewer"))]
@@ -57,37 +78,47 @@ def get_reconciliation_queue_job_for_update(
 
 
 @router.get("/jobs", response_model=list[PublishJobResponse])
-def list_publish_jobs(principal: CurrentPrincipal, session: Db):
-    return list(
-        session.scalars(
-            select(PublishJob)
-            .where(PublishJob.workspace_id == principal.workspace_id)
-            .order_by(PublishJob.scheduled_at.desc())
-        )
+def list_publish_jobs(
+    principal: CurrentPrincipal,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
+):
+    query = select(PublishJob).where(
+        PublishJob.workspace_id == principal.workspace_id
+    )
+    if updated_after is not None:
+        query = query.where(PublishJob.updated_at > updated_after)
+    return paginate(
+        session,
+        query,
+        timestamp_column=PublishJob.updated_at,
+        id_column=PublishJob.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
     )
 
 
-@router.post(
-    "/jobs",
-    response_model=PublishJobResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def schedule_publish(
-    payload: PublishScheduleRequest,
+def prepare_publication(
+    payload: PublishPreviewRequest,
     principal: Reviewer,
     session: Db,
+    settings: AppSettings,
 ):
     content = session.scalar(
         select(ContentItem).where(
             ContentItem.id == payload.content_item_id,
             ContentItem.workspace_id == principal.workspace_id,
-        )
+        ).with_for_update().execution_options(populate_existing=True)
     )
     channel = session.scalar(
         select(ChannelConnection).where(
             ChannelConnection.id == payload.channel_id,
             ChannelConnection.workspace_id == principal.workspace_id,
-        )
+        ).with_for_update().execution_options(populate_existing=True)
     )
     if content is None or channel is None:
         raise HTTPException(status_code=404, detail="内容或连接器不存在")
@@ -95,8 +126,24 @@ def schedule_publish(
         raise HTTPException(status_code=409, detail="内容必须先通过人工审核")
     if channel.platform != content.platform:
         raise HTTPException(status_code=409, detail="内容平台与连接器不匹配")
-    if payload.scheduled_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=422, detail="发布时间不能早于当前时间")
+    requested_at = datetime.now(timezone.utc)
+    if payload.publish_now:
+        if payload.scheduled_at is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="立即发布不能同时填写计划时间",
+            )
+        scheduled_at = requested_at
+        publish_timing = "immediate"
+    else:
+        if payload.scheduled_at is None:
+            raise HTTPException(status_code=422, detail="定时发布必须填写计划时间")
+        if payload.scheduled_at.tzinfo is None:
+            raise HTTPException(status_code=422, detail="计划时间必须包含时区")
+        scheduled_at = payload.scheduled_at.astimezone(timezone.utc)
+        if scheduled_at < requested_at:
+            raise HTTPException(status_code=422, detail="发布时间不能早于当前时间")
+        publish_timing = "scheduled"
     if payload.delivery_mode == "manual_export" and channel.platform != "xiaohongshu":
         raise HTTPException(status_code=422, detail="人工导出目前只适用于小红书")
     delivery_mode = payload.delivery_mode
@@ -108,42 +155,212 @@ def schedule_publish(
             detail="该连接器不支持官方 API，请选择脚本辅助或人工导出",
         )
 
-    raw_key = (
-        f"{principal.workspace_id}:{content.id}:{content.version}:"
-        f"{channel.id}:{delivery_mode}:{payload.scheduled_at.isoformat()}"
+    if delivery_mode == "connector" and channel.status != "connected":
+        raise HTTPException(
+            status_code=409,
+            detail="官方 API 发布要求先通过平台连接测试",
+        )
+    content, channel, assets = load_release_inputs(
+        session, workspace_id=principal.workspace_id, content_id=content.id,
+        channel_id=channel.id, settings=settings,
     )
-    idempotency_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
-    existing = session.scalar(
-        select(PublishJob).where(PublishJob.idempotency_key == idempotency_key)
-    )
-    if existing:
+    manifest = build_release_manifest(content, channel, assets, settings)
+    if delivery_mode == "connector":
+        required_type = "image/" if channel.platform == "wechat" else "video/"
+        if not any((asset.mime_type or "").startswith(required_type) for asset in assets):
+            raise PublishManifestConflict("当前渠道缺少已就绪的封面图片或视频，请先准备素材")
+    return content, channel, assets, manifest, scheduled_at, publish_timing, delivery_mode
+
+
+def publication_intent(payload: PublishPreviewRequest) -> dict:
+    return {
+        "content_item_id": payload.content_item_id, "channel_id": payload.channel_id,
+        "request_id": payload.request_id,
+        "delivery_mode": payload.delivery_mode, "publish_now": payload.publish_now,
+        "scheduled_at": payload.scheduled_at.astimezone(timezone.utc).isoformat()
+        if payload.scheduled_at and payload.scheduled_at.tzinfo else (
+            payload.scheduled_at.isoformat() if payload.scheduled_at else None),
+    }
+
+
+@router.post("/preview")
+def preview_publish(payload: PublishPreviewRequest, principal: Reviewer, session: Db, settings: AppSettings):
+    content, channel, assets, manifest, _scheduled, timing, mode = prepare_publication(
+        payload, principal, session, settings)
+    fingerprint = publication_fingerprint(manifest, publication_intent(payload), mode)
+    used_ids = {asset.id for asset in assets}
+    if mode == "connector":
+        kind = "image/" if channel.platform == "wechat" else "video/"
+        used_ids = {next(asset.id for asset in assets if (asset.mime_type or "").startswith(kind))}
+    return {
+        "fingerprint": fingerprint,
+        "preview_token": sign_publication_preview(fingerprint, workspace_id=principal.workspace_id,
+            user_id=principal.user_id, secret=settings.secret_key),
+        "expires_in_seconds": 900,
+        "content_id": content.id, "campaign_id": content.campaign_id,
+        "content_version": content.version, "title": content.title,
+        "platform": content.platform, "layout": content.layout_json,
+        "channel_name": channel.display_name, "delivery_mode": mode, "publish_timing": timing,
+        "scheduled_at": publication_intent(payload)["scheduled_at"],
+        "document": preview_document(content, channel, mode),
+        "assets": [{"id": asset.id, "kind": asset.kind, "mime_type": asset.mime_type,
+            "size_bytes": asset.size_bytes, "checksum": asset.metadata_json["checksum"],
+            "used_in_delivery": asset.id in used_ids} for asset in assets],
+    }
+
+
+@router.get("/preview-assets/{asset_id}")
+def preview_asset_bytes(asset_id: str, principal: Reviewer, session: Db, settings: AppSettings,
+    checksum: Annotated[str, Query(pattern=r"^[0-9a-f]{64}$")]):
+    asset = session.scalar(select(Asset).where(Asset.id == asset_id, Asset.workspace_id == principal.workspace_id))
+    if asset is None:
+        raise HTTPException(status_code=404, detail="素材不存在")
+    if (asset.status != "ready" or (asset.metadata_json or {}).get("checksum") != checksum
+        or not is_workspace_storage_uri(settings, principal.workspace_id, asset.storage_uri)):
+        raise PublishManifestConflict("预览素材已变化，请重新预览")
+    content = session.get(ContentItem, asset.content_item_id)
+    if content is None or content.workspace_id != principal.workspace_id:
+        raise PublishManifestConflict("预览素材没有当前内容，请重新预览")
+    forbidden_phrases = tuple(resolve_brief(session, content).forbidden_phrases)
+    storage = ManifestObjectStorage(build_object_storage(settings), {"assets": [{
+        "uri": asset.storage_uri, "size_bytes": asset.size_bytes, "sha256": checksum,
+        "kind": asset.kind, "mime_type": asset.mime_type,
+    }]}, max_bytes=settings.max_upload_bytes, max_pixels=settings.publish_evidence_max_pixels,
+        forbidden_phrases=forbidden_phrases)
+    try:
+        data = storage.read(asset.storage_uri, max_bytes=settings.max_upload_bytes)
+    except (OSError, ValueError) as error:
+        raise PublishManifestConflict("预览素材无法通过文件校验，请先修复素材") from error
+    return Response(content=data, media_type=asset.mime_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{asset.id}"'})
+
+
+def existing_publication(session: Session, *, workspace_id: str, request_id: str, key: str, digest: str):
+    # Also recognize legacy request IDs: never create a second delivery just
+    # because its old key included content/version/time. Legacy intent cannot
+    # be reconstructed safely and must be inspected, not silently overwritten.
+    rows = list(session.scalars(select(PublishJob).where(
+        PublishJob.workspace_id == workspace_id,
+        ((PublishJob.idempotency_key == key) | (PublishJob.request_json["request_id"].as_string() == request_id)),
+    ).limit(2)))
+    if not rows:
+        return None
+    if len(rows) != 1 or rows[0].request_json.get("confirmation_request_sha256") != digest:
+        raise PublishManifestConflict("该发布操作编号已用于不同请求或旧任务，请先核对原任务；不要重复发布",
+            code="publish_intent_conflict")
+    require_dispatch_receipt(session, rows[0])
+    return rows[0]
+
+
+def require_dispatch_receipt(session: Session, publication: PublishJob) -> None:
+    # Older SQLite acceptances may have committed a publication without its
+    # queue row. Never silently return success or repair/replay external work.
+    if publication.status not in {"queued", "scheduled"}:
+        return
+    job = session.scalar(select(Job).where(
+        Job.idempotency_key == f"publish.dispatch:{publication.id}"))
+    if (job is None or job.workspace_id != publication.workspace_id
+        or job.job_type != "publish.dispatch"
+        or not isinstance(job.payload_json, dict)
+        or job.payload_json.get("publish_job_id") != publication.id):
+        raise PublishManifestConflict(
+            "原发布接受记录不完整，已停止重试；请保留操作编号并联系管理员核对，系统不会自动补发",
+            code="publish_receipt_incomplete")
+
+
+@router.get("/intents/{request_id}", response_model=PublishJobResponse)
+def lookup_publication(
+    request_id: Annotated[str, Path(pattern=r"^[A-Za-z0-9._:-]{8,80}$")],
+    principal: CurrentPrincipal,
+    session: Db,
+):
+    # Read-only recovery must never require a fresh preview or enqueue work.
+    rows = list(session.scalars(select(PublishJob).where(
+        PublishJob.workspace_id == principal.workspace_id,
+        PublishJob.request_json["request_id"].as_string() == request_id,
+    ).limit(2)))
+    if not rows:
+        raise HTTPException(status_code=404, detail="尚未找到该操作回执；原请求仍可能处理中，请保留编号，不要新建重复发布")
+    if len(rows) != 1:
+        raise PublishManifestConflict("该编号存在多个历史任务，请联系管理员核对，不要重复发布",
+            code="publish_intent_conflict")
+    require_dispatch_receipt(session, rows[0])
+    return rows[0]
+
+
+@router.post("/jobs", response_model=PublishJobResponse, status_code=status.HTTP_202_ACCEPTED)
+def schedule_publish(payload: PublishScheduleRequest, principal: Reviewer, session: Db, settings: AppSettings):
+    intent = publication_intent(payload)
+    digest = confirmation_request_digest({**intent, "preview_token": payload.preview_token})
+    idempotency_key = hashlib.sha256(
+        f"publish-intent-v1:{principal.workspace_id}:{payload.request_id}".encode()).hexdigest()
+    existing = existing_publication(session, workspace_id=principal.workspace_id,
+        request_id=payload.request_id, key=idempotency_key, digest=digest)
+    if existing is not None:
+        # An exact replay returns the receipt even after the preview expires,
+        # content changes or the scheduled time passes. No new work is queued.
         return existing
-    publish_job = PublishJob(
+    # Another confirmation may commit while this request waits for content.
+    # Recheck its receipt after taking that lock, before validating mutable
+    # state or expiry. A replay must not depend on a still-approved old draft.
+    session.scalar(select(ContentItem.id).where(
+        ContentItem.id == payload.content_item_id,
+        ContentItem.workspace_id == principal.workspace_id,
+    ).with_for_update())
+    existing = existing_publication(session, workspace_id=principal.workspace_id,
+        request_id=payload.request_id, key=idempotency_key, digest=digest)
+    if existing is not None:
+        return existing
+    content, channel, assets, manifest, scheduled_at, publish_timing, delivery_mode = prepare_publication(
+        payload, principal, session, settings)
+    fingerprint = publication_fingerprint(manifest, intent, delivery_mode)
+    verify_publication_preview(payload.preview_token, fingerprint, workspace_id=principal.workspace_id,
+        user_id=principal.user_id, secret=settings.secret_key)
+    publication_values = dict(
         workspace_id=principal.workspace_id,
         content_item_id=content.id,
         channel_id=channel.id,
-        scheduled_at=payload.scheduled_at,
+        scheduled_at=scheduled_at,
         idempotency_key=idempotency_key,
-        status="scheduled",
+        status="queued" if publish_timing == "immediate" else "scheduled",
         request_json={
             "content_version": content.version,
             "delivery_mode": delivery_mode,
+            "publish_timing": publish_timing,
+            "request_id": payload.request_id,
             "script_requested_by": principal.user_id,
+            "release_manifest": manifest,
+            "preview_fingerprint": fingerprint,
+            "preview_confirmed_by": principal.user_id,
+            "confirmation_request_sha256": digest,
         },
     )
-    session.add(publish_job)
-    session.flush()
+    publication_id = insert_on_unique_key(
+        session, PublishJob.__table__, values=publication_values,
+        key="idempotency_key")
+    if publication_id is None:
+        existing = existing_publication(session, workspace_id=principal.workspace_id,
+            request_id=payload.request_id, key=idempotency_key, digest=digest)
+        if existing is not None:
+            return existing
+        raise PublishManifestConflict("发布接受冲突但找不到原回执，请保留编号并联系管理员核对",
+            code="publish_receipt_incomplete")
+    publish_job = session.get(PublishJob, publication_id)
     enqueue_job(
         session,
         job_type="publish.dispatch",
         payload={"publish_job_id": publish_job.id},
         workspace_id=principal.workspace_id,
         idempotency_key=f"publish.dispatch:{publish_job.id}",
-        run_at=payload.scheduled_at,
+        run_at=scheduled_at,
     )
     record_audit(
         session,
-        action="publish.schedule",
+        action=(
+            "publish.immediate"
+            if publish_timing == "immediate"
+            else "publish.schedule"
+        ),
         entity_type="publish_job",
         entity_id=publish_job.id,
         workspace_id=principal.workspace_id,
@@ -152,10 +369,123 @@ def schedule_publish(
             "content_id": content.id,
             "channel_id": channel.id,
             "delivery_mode": delivery_mode,
-            "scheduled_at": payload.scheduled_at.isoformat(),
+            "scheduled_at": scheduled_at.isoformat(),
+            "publish_timing": publish_timing,
+            "preview_fingerprint": fingerprint,
         },
     )
     return publish_job
+
+
+@router.post(
+    "/jobs/{publish_job_id}/retry",
+    response_model=PublishJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_publish_safely(
+    publish_job_id: str,
+    principal: Reviewer,
+    session: Db,
+    settings: AppSettings,
+):
+    query = select(PublishJob).where(
+        PublishJob.id == publish_job_id,
+        PublishJob.workspace_id == principal.workspace_id,
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    job = session.scalar(query)
+    if job is None:
+        raise HTTPException(status_code=404, detail="发布任务不存在")
+    if not job.retry_safe:
+        raise HTTPException(
+            status_code=409,
+            detail="只有明确停在外部写入前的失败任务才能安全重试",
+        )
+
+    content = session.get(ContentItem, job.content_item_id)
+    channel = session.get(ChannelConnection, job.channel_id)
+    if content is None or channel is None:
+        raise HTTPException(status_code=409, detail="内容或连接器已不存在")
+    if content.status != "approved":
+        raise HTTPException(status_code=409, detail="内容必须保持人工审核通过")
+    if content.version != int((job.request_json or {}).get("content_version", 0)):
+        raise HTTPException(status_code=409, detail="内容版本已变化，请重新审核并创建发布任务")
+    if job.delivery_mode == "connector" and channel.status != "connected":
+        raise HTTPException(
+            status_code=409,
+            detail="请先重新测试平台连接，确认恢复 connected 后再安全重试",
+        )
+
+    content, channel, assets = load_release_inputs(
+        session, workspace_id=principal.workspace_id, content_id=job.content_item_id,
+        channel_id=job.channel_id, settings=settings,
+    )
+    require_publish_manifest(job, content, channel, assets, settings)
+    queue_job = get_publish_queue_job_for_update(session, job.id)
+    if queue_job is not None and queue_job.status == "running":
+        raise HTTPException(status_code=409, detail="分发任务正在执行，不能重复重试")
+
+    now = datetime.now(timezone.utc)
+    response_json = dict(job.response_json or {})
+    failure = response_json.pop("dispatch_failure", None)
+    history = list(response_json.get("dispatch_failure_history") or [])
+    if isinstance(failure, dict):
+        history.append(failure)
+    if history:
+        response_json["dispatch_failure_history"] = history[-20:]
+    request_json = dict(job.request_json or {})
+    request_json.pop("dispatch_token", None)
+    request_json.pop("dispatch_started_at", None)
+    request_json["publish_timing"] = "immediate"
+    request_json["safe_retry_count"] = int(
+        request_json.get("safe_retry_count") or 0
+    ) + 1
+    request_json["safe_retry_requested_at"] = now.isoformat()
+    request_json["safe_retry_requested_by"] = principal.user_id
+
+    job.request_json = request_json
+    job.response_json = response_json
+    job.status = "queued"
+    job.scheduled_at = now
+    job.error = None
+    job.external_id = None
+    job.external_url = None
+    job.published_at = None
+    if queue_job is None:
+        queue_job = enqueue_job(
+            session,
+            job_type="publish.dispatch",
+            payload={"publish_job_id": job.id},
+            workspace_id=principal.workspace_id,
+            idempotency_key=f"publish.dispatch:{job.id}",
+            run_at=now,
+        )
+    else:
+        queue_job.status = "retry"
+        queue_job.attempts = 0
+        queue_job.run_at = now
+        queue_job.result_json = {}
+        queue_job.last_error = None
+        queue_job.locked_by = None
+        queue_job.locked_at = None
+
+    record_audit(
+        session,
+        action="publish.retry_safe",
+        entity_type="publish_job",
+        entity_id=job.id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "queue_job_id": queue_job.id,
+            "failure_stage": failure.get("stage")
+            if isinstance(failure, dict)
+            else None,
+            "safe_retry_count": request_json["safe_retry_count"],
+        },
+    )
+    return job
 
 
 @router.post("/jobs/{publish_job_id}/cancel", response_model=PublishJobResponse)
@@ -175,8 +505,10 @@ def cancel_publish(
         raise HTTPException(status_code=404, detail="发布任务不存在")
     if job.status not in {"scheduled", "queued"}:
         raise HTTPException(status_code=409, detail="当前状态不能取消")
-    job.status = "cancelled"
     queue_job = get_publish_queue_job_for_update(session, job.id)
+    if queue_job is not None and queue_job.status == "running":
+        raise HTTPException(status_code=409, detail="分发任务已开始执行，不能取消")
+    job.status = "cancelled"
     if queue_job is not None:
         queue_job.status = "succeeded"
         queue_job.result_json = {
@@ -349,6 +681,12 @@ def create_script_package(
     }:
         raise HTTPException(status_code=409, detail="当前状态不能生成脚本发布包")
 
+    content, channel, assets = load_release_inputs(
+        session, workspace_id=principal.workspace_id, content_id=job.content_item_id,
+        channel_id=job.channel_id, settings=settings,
+    )
+    # Switching delivery mode never silently approves different text or media.
+    require_publish_manifest(job, content, channel, assets, settings)
     queue_job = get_publish_queue_job_for_update(session, job.id)
     if queue_job is not None and queue_job.status == "running":
         raise HTTPException(
@@ -417,20 +755,33 @@ def create_script_package(
         },
     )
     if isinstance(expired_package_uri, str):
-        session.commit()
-        try:
-            build_object_storage(settings).delete(expired_package_uri)
-        except Exception:
-            logger.exception("failed to delete expired script package")
-            record_audit(
-                session,
-                action="publish.script_package_cleanup_failed",
-                entity_type="publish_job",
-                entity_id=job.id,
-                workspace_id=principal.workspace_id,
-                actor_user_id=principal.user_id,
-                metadata={"expired_attempt_replaced": True},
-            )
+        _allocation, cleanup_job = request_storage_deletion(
+            session,
+            settings=settings,
+            workspace_id=principal.workspace_id,
+            storage_uri=expired_package_uri,
+            owner_type="publish_job",
+            owner_id=(
+                f"{job.id}:{response_json.get('script_attempt_id') or 'legacy-attempt'}"
+            ),
+            category="script-publish",
+            filename=expired_package_uri.rsplit("/", 1)[-1] or "script-package.zip",
+            size_bytes=response_json.get("size_bytes"),
+            checksum=response_json.get("package_sha256"),
+            mime_type="application/zip",
+        )
+        record_audit(
+            session,
+            action="publish.script_package_cleanup_requested",
+            entity_type="publish_job",
+            entity_id=job.id,
+            workspace_id=principal.workspace_id,
+            actor_user_id=principal.user_id,
+            metadata={
+                "cleanup_job_id": cleanup_job.id if cleanup_job is not None else None,
+                "shared_legacy_object_retained": cleanup_job is None,
+            },
+        )
     return job
 
 

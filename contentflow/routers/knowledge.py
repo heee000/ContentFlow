@@ -3,17 +3,28 @@ from __future__ import annotations
 import io
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
-from ..entities import KnowledgeDocument
+from ..entities import KnowledgeDocument, new_id
 from ..job_queue import enqueue_job
-from ..object_storage import build_object_storage
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    UpdatedAfter,
+    paginate,
+)
 from ..schemas import KnowledgeDocumentResponse
+from ..storage_ledger import (
+    StorageLedgerUnverified,
+    StorageQuotaExceeded,
+    build_ledgered_object_storage,
+)
 
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
@@ -25,13 +36,27 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 @router.get("/documents", response_model=list[KnowledgeDocumentResponse])
-def list_documents(principal: CurrentPrincipal, session: Db):
-    return list(
-        session.scalars(
-            select(KnowledgeDocument)
-            .where(KnowledgeDocument.workspace_id == principal.workspace_id)
-            .order_by(KnowledgeDocument.created_at.desc())
-        )
+def list_documents(
+    principal: CurrentPrincipal,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+    updated_after: UpdatedAfter = None,
+):
+    query = select(KnowledgeDocument).where(
+        KnowledgeDocument.workspace_id == principal.workspace_id
+    )
+    if updated_after is not None:
+        query = query.where(KnowledgeDocument.updated_at > updated_after)
+    return paginate(
+        session,
+        query,
+        timestamp_column=KnowledgeDocument.updated_at,
+        id_column=KnowledgeDocument.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
     )
 
 
@@ -59,14 +84,26 @@ async def upload_document(
     if not data:
         raise HTTPException(status_code=400, detail="上传文件为空")
 
-    stored = build_object_storage(settings).put(
-        workspace_id=principal.workspace_id,
-        category="knowledge",
-        filename=filename,
-        stream=io.BytesIO(data),
-        content_type=file.content_type,
-    )
+    document_id = new_id()
+    try:
+        stored = build_ledgered_object_storage(
+            session,
+            settings,
+            owner_type="knowledge_document",
+            owner_id=document_id,
+        ).put(
+            workspace_id=principal.workspace_id,
+            category="knowledge",
+            filename=filename,
+            stream=io.BytesIO(data),
+            content_type=file.content_type,
+        )
+    except StorageQuotaExceeded as error:
+        raise HTTPException(status_code=413, detail=str(error)) from error
+    except StorageLedgerUnverified as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     document = KnowledgeDocument(
+        id=document_id,
         workspace_id=principal.workspace_id,
         name=filename,
         source_type="upload",
@@ -97,4 +134,3 @@ async def upload_document(
         metadata={"filename": filename, "size_bytes": stored.size_bytes},
     )
     return document
-

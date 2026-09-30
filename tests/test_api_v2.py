@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+from generation_helpers import request_run
+
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from contentflow import db
 from contentflow.api import create_app
-from contentflow.entities import ChannelConnection, Job
+from contentflow.entities import (
+    ChannelConnection,
+    ContentItem,
+    Job,
+    MetricSnapshot,
+    PublishJob,
+)
 from contentflow.settings import Settings
 
 
@@ -17,10 +26,22 @@ class ApiV2Test(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         settings = Settings(
+            environment="development",
             database_url=f"sqlite:///{(root / 'api.db').as_posix()}",
             secret_key="test-secret",
             local_storage_dir=root / "storage",
+            storage_backend="local",
             allow_registration=True,
+            require_governed_prompts=False,
+            metrics_enabled=False,
+            embedding_provider="hash",
+            text_provider="mock",
+            image_provider="mock",
+            video_provider="mock",
+            cors_origins=[
+                "http://localhost:3000",
+                "http://localhost:3001",
+            ],
         )
         self.client = TestClient(create_app(settings))
         self.client.__enter__()
@@ -79,7 +100,7 @@ class ApiV2Test(unittest.TestCase):
             updated.json()["brief"]["product_facts"],
             ["支持多地点路线规划"],
         )
-        archived_run = self.client.post(
+        archived_run = request_run(self.client,
             f"/api/v1/campaigns/{campaign_id}/runs",
             headers=self.headers,
             json={},
@@ -93,7 +114,7 @@ class ApiV2Test(unittest.TestCase):
         )
         self.assertEqual(restored.status_code, 200, restored.text)
 
-        run = self.client.post(
+        run = request_run(self.client,
             f"/api/v1/campaigns/{campaign_id}/runs",
             headers=self.headers,
             json={},
@@ -101,7 +122,7 @@ class ApiV2Test(unittest.TestCase):
         self.assertEqual(run.status_code, 202, run.text)
         self.assertEqual(run.json()["status"], "queued")
 
-        second_run = self.client.post(
+        second_run = request_run(self.client,
             f"/api/v1/campaigns/{campaign_id}/runs",
             headers=self.headers,
             json={},
@@ -116,6 +137,16 @@ class ApiV2Test(unittest.TestCase):
         self.assertEqual(len(recent_runs.json()), 1)
         self.assertEqual(recent_runs.json()[0]["id"], second_run.json()["id"])
 
+        workspace_runs = self.client.get(
+            "/api/v1/runs?limit=100",
+            headers=self.headers,
+        )
+        self.assertEqual(workspace_runs.status_code, 200, workspace_runs.text)
+        self.assertEqual(
+            [item["id"] for item in workspace_runs.json()[:2]],
+            [second_run.json()["id"], run.json()["id"]],
+        )
+
         invalid_limit = self.client.get(
             f"/api/v1/campaigns/{campaign_id}/runs?limit=101",
             headers=self.headers,
@@ -125,6 +156,73 @@ class ApiV2Test(unittest.TestCase):
         jobs = self.client.get("/api/v1/jobs", headers=self.headers)
         self.assertEqual(jobs.status_code, 200)
         self.assertEqual(jobs.json()[0]["job_type"], "workflow.execute")
+        self.assertEqual(jobs.json()[0]["context"]["campaign_id"], campaign_id)
+        self.assertEqual(
+            jobs.json()[0]["context"]["campaign_name"],
+            "北京夜游内容计划",
+        )
+        self.assertEqual(jobs.json()[0]["context"]["product_name"], "星图地图")
+        self.assertNotIn("payload_json", jobs.json()[0])
+
+        metrics_channel = self.client.post(
+            "/api/v1/channels",
+            headers=self.headers,
+            json={
+                "platform": "xiaohongshu",
+                "display_name": "指标测试导出",
+                "credentials": {},
+                "config": {"export_format": "zip"},
+            },
+        )
+        self.assertEqual(metrics_channel.status_code, 201, metrics_channel.text)
+        workspace_id = session_response.json()["workspace"]["id"]
+        with db.SessionLocal() as session:
+            content = ContentItem(
+                workspace_id=workspace_id,
+                campaign_id=campaign_id,
+                run_id=run.json()["id"],
+                platform="xiaohongshu",
+                title="指标归属测试",
+                body="用于验证项目筛选只汇总当前项目。",
+            )
+            session.add(content)
+            session.flush()
+            publish = PublishJob(
+                workspace_id=workspace_id,
+                content_item_id=content.id,
+                channel_id=metrics_channel.json()["id"],
+                status="published",
+                scheduled_at=datetime.now(timezone.utc),
+                idempotency_key="metrics-campaign-filter",
+            )
+            session.add(publish)
+            session.flush()
+            session.add(
+                MetricSnapshot(
+                    workspace_id=workspace_id,
+                    publish_job_id=publish.id,
+                    impressions=100,
+                    clicks=8,
+                    likes=5,
+                    comments=2,
+                    shares=1,
+                )
+            )
+            session.commit()
+
+        project_metrics = self.client.get(
+            f"/api/v1/metrics/summary?campaign_id={campaign_id}",
+            headers=self.headers,
+        )
+        self.assertEqual(project_metrics.status_code, 200, project_metrics.text)
+        self.assertEqual(project_metrics.json()["sample_count"], 1)
+        self.assertEqual(project_metrics.json()["impressions"], 100)
+        unrelated_metrics = self.client.get(
+            "/api/v1/metrics/summary?campaign_id=unrelated-campaign",
+            headers=self.headers,
+        )
+        self.assertEqual(unrelated_metrics.status_code, 200, unrelated_metrics.text)
+        self.assertEqual(unrelated_metrics.json()["sample_count"], 0)
 
     def test_knowledge_upload_and_export_channel(self):
         uploaded = self.client.post(

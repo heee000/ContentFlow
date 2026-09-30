@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .publication_payload import script_markdown
+
 import hashlib
 import io
 import json
@@ -44,13 +46,7 @@ def _json_bytes(value: object) -> bytes:
 
 
 def _markdown(content: ContentItem) -> bytes:
-    tags = " ".join(f"#{tag.lstrip('#')}" for tag in content.hashtags)
-    sections = [f"# {content.title}", "", content.body]
-    if tags:
-        sections.extend(["", tags])
-    if content.call_to_action:
-        sections.extend(["", content.call_to_action])
-    return ("\n".join(sections).rstrip() + "\n").encode("utf-8")
+    return script_markdown(content).encode("utf-8")
 
 
 def _runner_source() -> bytes:

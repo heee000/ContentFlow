@@ -6,16 +6,29 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
   ApiError,
+  StaleResponseError,
   api,
+  apiAllPages,
   download,
   getApiBase,
   runtimeApiBaseConfigurable,
   setApiBase,
 } from "@/lib/contentflow-api";
+import {
+  activateBrowserSession, authenticateBrowserSession, captureContext, assertContext,
+  createBrowserWorkspace, logoutBrowserSession, restoreBrowserSession,
+  SESSION_CONTEXT_EVENT, switchBrowserWorkspace, type BrowserSession,
+} from "@/lib/browser-session";
+import { PublicationPreview, PublicationPreviewData } from "@/components/publication-preview";
+import { PublicationRequestNotice, usePublicationRequest } from "@/components/publication-request";
+import type { PublishIntent } from "@/lib/publication-intents";
+import { GenerationRequestNotice, useGenerationRequest } from "@/components/generation-request";
+import { generationScope } from "@/lib/generation-intents";
 
 type View =
   | "dashboard"
@@ -29,11 +42,7 @@ type View =
   | "jobs"
   | "admin";
 
-type Session = {
-  user: { id: string; email: string; display_name: string };
-  workspace: { id: string; name: string };
-  role: string;
-};
+type Session = BrowserSession;
 
 type Campaign = {
   id: string;
@@ -50,6 +59,11 @@ type Campaign = {
     forbidden_phrases?: string[];
     call_to_action?: string;
     product_facts?: string[];
+    style_skill_id?: string;
+    style_notes?: string;
+    quality_profile?: "standard" | "deep";
+    image_source?: "manual" | "generate" | "search" | "hybrid";
+    image_search_query?: string;
   };
   updated_at: string;
 };
@@ -76,10 +90,12 @@ type WorkflowRun = {
   current_stage: string;
   provider: string;
   trace_id: string;
+  request_json?: { generation_request_id?: string };
   result_json: { ai_provenance?: AIProvenance };
   error: string | null;
   completed_at: string | null;
   created_at: string;
+  updated_at: string;
 };
 
 type Content = {
@@ -94,6 +110,7 @@ type Content = {
   status: string;
   version: number;
   review_json: Record<string, unknown>;
+  generation_json: Record<string, unknown>;
   updated_at: string;
 };
 
@@ -106,8 +123,18 @@ type ContentRevision = {
   hashtags: string[];
   call_to_action: string;
   layout_json: Record<string, unknown>;
+  generation_json: Record<string, unknown>;
   changed_by: string | null;
   change_reason: string;
+  created_at: string;
+};
+
+type ReviewEvidence = {
+  id: string;
+  content_version: number;
+  event: string;
+  model_binding: string;
+  snapshot_json: Record<string, unknown>;
   created_at: string;
 };
 
@@ -119,8 +146,41 @@ type Asset = {
   status: string;
   mime_type: string | null;
   size_bytes: number | null;
+  metadata_json: Record<string, unknown>;
   error: string | null;
   created_at: string;
+  updated_at: string;
+};
+
+type MediaSource = "manual" | "generate" | "search" | "hybrid";
+
+type MediaCapabilities = {
+  image_generation_available: boolean;
+  image_search_available: boolean;
+  video_generation_available: boolean;
+};
+
+type StyleSkill = {
+  id: string;
+  source: "builtin" | "workspace";
+  status: "enabled" | "disabled";
+  manifest: {
+    name: string;
+    slug: string;
+    version: string;
+    description: string;
+  };
+  manifest_sha256: string;
+};
+
+type ImageSearchCandidate = {
+  id: string;
+  title: string;
+  creator: string;
+  license: string;
+  license_version: string;
+  landing_url: string;
+  thumbnail_url: string;
 };
 
 type Channel = {
@@ -133,12 +193,16 @@ type Channel = {
 };
 
 type PublishJob = {
+  request_id: string | null;
   id: string;
   content_item_id: string;
   channel_id: string;
   status: string;
   scheduled_at: string;
   delivery_mode: string;
+  publish_timing: "immediate" | "scheduled";
+  retry_safe: boolean;
+  failure_stage: string | null;
   attempts: number;
   error: string | null;
   external_id: string | null;
@@ -150,6 +214,7 @@ type PublishJob = {
   script_confirmation_expired: boolean;
   script_requested_by_user_id: string | null;
   script_package_available: boolean;
+  updated_at: string;
 };
 
 type PublishEvidence = {
@@ -196,7 +261,60 @@ type QueueJob = {
   max_attempts: number;
   run_at: string;
   last_error: string | null;
+  result_json?: { outcome?: string };
   updated_at: string;
+  manual_review: {
+    id: string;
+    reason_code: string;
+    context_json: {
+      source?: string;
+      possible_side_effect?: string;
+      required_checks?: string[];
+    };
+    requested_at: string;
+    resolved_at: string | null;
+    resolved_by_user_id: string | null;
+    provider_checked: boolean;
+    decision: "retry" | "abandon" | null;
+    note: string | null;
+  } | null;
+  context: {
+    campaign_id: string | null;
+    campaign_name: string | null;
+    product_name: string | null;
+    content_item_id: string | null;
+    content_title: string | null;
+    platform: string | null;
+  };
+};
+
+type ProviderInvocationAttempt = {
+  id: string;
+  invocation_id: string;
+  request_key: string;
+  entity_type: string;
+  entity_id: string;
+  provider_kind: "text" | "embedding" | "media" | "search";
+  provider_name: string;
+  model_name: string;
+  operation: string;
+  request_sha256: string;
+  request_bytes: number;
+  attempt_number: number;
+  status: "started" | "succeeded" | "outcome_unknown" | "late_succeeded" | "late_failed";
+  idempotency_key_sent: boolean;
+  provider_request_id: string | null;
+  provider_request_id_source: string | null;
+  response_sha256: string | null;
+  response_bytes: number | null;
+  response_model: string | null;
+  usage_source: "not_reported" | "provider_reported";
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  error_type: string | null;
+  started_at: string;
+  completed_at: string | null;
 };
 
 type DashboardSummary = {
@@ -205,10 +323,14 @@ type DashboardSummary = {
   contents_needing_review: number;
   assets_processing: number;
   publishes_scheduled: number;
+  jobs_manual_review: number;
   jobs_failed: number;
 };
 
 type MetricsSummary = {
+  load_error?: string;
+  excluded_snapshot_count?: number;
+  data_complete?: boolean;
   sample_count: number;
   impressions: number;
   clicks: number;
@@ -243,7 +365,64 @@ type AuditLog = {
   actor_display_name: string | null;
   request_id: string | null;
   metadata_json: Record<string, unknown>;
+  chain_sequence: number;
+  entry_hash: string;
+  integrity_version: number;
   created_at: string;
+};
+
+type AuditIntegrity = {
+  valid: boolean;
+  checked_entries: number;
+  head_sequence: number;
+  head_hash: string | null;
+  first_invalid_sequence: number | null;
+  reason: string | null;
+  verified_at: string;
+};
+
+type StorageUsage = {
+  used_bytes: number;
+  used_objects: number;
+  reserved_bytes: number;
+  reserved_objects: number;
+  unverified_objects: number;
+  max_bytes: number;
+  max_objects: number;
+  delete_pending_objects: number;
+  missing_objects: number;
+  integrity_error_objects: number;
+  staging_objects?: number;
+  abandoned_reservations: number;
+  last_reconciled_at: string | null;
+};
+
+type StorageObjectAllocation = {
+  id: string;
+  owner_type: string;
+  owner_id: string;
+  write_job_id?: string | null;
+  category: string;
+  filename: string;
+  status:
+    | "reserved"
+    | "staging"
+    | "active"
+    | "delete_pending"
+    | "missing"
+    | "integrity_error"
+    | "deleted"
+    | "abandoned";
+  checksum: string | null;
+  size_bytes: number;
+  size_verified: boolean;
+  mime_type: string | null;
+  reserved_until: string | null;
+  delete_attempts: number;
+  last_error: string | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 
@@ -275,10 +454,18 @@ type PromptRelease = {
 };
 
 type PromptGovernance = {
+  approval_policy: "dual_control" | "single_operator_private";
   active: {
     source: "builtin" | "workspace_release";
     version: string;
     release_id: string | null;
+    prompts: Record<PromptStage, string>;
+    prompt_hashes: Record<PromptStage, string>;
+  };
+  builtin: {
+    source: "builtin";
+    version: string;
+    release_id: null;
     prompts: Record<PromptStage, string>;
     prompt_hashes: Record<PromptStage, string>;
   };
@@ -337,6 +524,7 @@ type PromptEvalRun = {
 };
 
 type PromptEvalGovernance = {
+  approval_policy: "dual_control" | "single_operator_private";
   active_suite: PromptEvalSuite | null;
   suites: PromptEvalSuite[];
   runs: PromptEvalRun[];
@@ -350,13 +538,23 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
       brief: {
         product_name: "ContentFlow",
         city: "北京",
+        goal: "帮助内容团队建立可审核的生产流程",
+        audience: "需要稳定生产公众号内容的运营人员",
+        platforms: ["wechat"],
         must_include: ["人工复核"],
         product_facts: ["整理内容工作流"],
         call_to_action: "查看完整方案",
       },
       knowledge: [],
     },
-    required_paths: ["content_angle", "key_message", "posting_window"],
+    required_paths: [
+      "angle_candidates",
+      "selected_angle",
+      "content_thesis",
+      "evidence_ledger",
+      "platform_strategies.wechat",
+      "image_search_query",
+    ],
   },
   {
     name: "wechat-generation-contract",
@@ -365,6 +563,9 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
       brief: {
         product_name: "ContentFlow",
         city: "北京",
+        goal: "帮助内容团队建立可审核的生产流程",
+        audience: "需要稳定生产公众号内容的运营人员",
+        platforms: ["wechat"],
         must_include: ["人工复核"],
         product_facts: ["整理内容工作流"],
         call_to_action: "查看完整方案",
@@ -373,7 +574,14 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
       plan: {},
       knowledge: [],
     },
-    required_paths: ["title", "body", "layout"],
+    required_paths: [
+      "title",
+      "alternate_titles",
+      "body",
+      "layout.sections",
+      "evidence_usage",
+      "media_brief.generation_prompt",
+    ],
     required_substrings: ["ContentFlow"],
   },
   {
@@ -383,15 +591,38 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
       brief: {
         product_name: "ContentFlow",
         city: "北京",
+        goal: "帮助内容团队建立可审核的生产流程",
+        audience: "需要稳定生产公众号内容的运营人员",
+        platforms: ["wechat"],
         must_include: ["人工复核"],
         product_facts: ["整理内容工作流"],
         call_to_action: "查看完整方案",
       },
       platform: "wechat",
-      content: { title: "测试标题", body: "测试正文" },
+      content: {
+        title: "ContentFlow 内容工作流：发布前人工复核清单",
+        body: (
+          "ContentFlow 用于整理内容工作流。运营人员应先核对资料来源和产品事实，"
+          + "再检查标题、正文、图片许可与平台要求；模型建议不能替代人工判断。"
+          + "完成修订后由审核人员人工复核，通过后再查看完整方案。"
+        ),
+      },
       knowledge: [],
     },
-    required_paths: ["risk_level"],
+    required_paths: [
+      "risk_level",
+      "quality_score",
+      "scores.hook",
+      "scores.specificity",
+      "scores.evidence",
+      "scores.platform_native",
+      "scores.structure",
+      "scores.usefulness",
+      "scores.voice",
+      "scores.originality",
+      "scores.cta",
+      "revision_instructions",
+    ],
     expected_values: { passed: true },
   },
 ];
@@ -399,8 +630,11 @@ const DEFAULT_PROMPT_EVAL_CASES: PromptEvalCase[] = [
 type DataState = {
   dashboard: DashboardSummary;
   campaigns: Campaign[];
+  runs: WorkflowRun[];
+  styleSkills: StyleSkill[];
   contents: Content[];
   assets: Asset[];
+  mediaCapabilities: MediaCapabilities;
   channels: Channel[];
   publishes: PublishJob[];
   knowledge: KnowledgeDocument[];
@@ -409,6 +643,8 @@ type DataState = {
   workspaces: WorkspaceAccess[];
   members: Member[];
   auditLogs: AuditLog[];
+  storageUsage: StorageUsage | null;
+  storageAttention: StorageObjectAllocation[];
   promptGovernance: PromptGovernance | null;
   promptEval: PromptEvalGovernance | null;
 };
@@ -420,11 +656,19 @@ const EMPTY_DATA: DataState = {
     contents_needing_review: 0,
     assets_processing: 0,
     publishes_scheduled: 0,
+    jobs_manual_review: 0,
     jobs_failed: 0,
   },
   campaigns: [],
+  runs: [],
+  styleSkills: [],
   contents: [],
   assets: [],
+  mediaCapabilities: {
+    image_generation_available: false,
+    image_search_available: false,
+    video_generation_available: false,
+  },
   channels: [],
   publishes: [],
   knowledge: [],
@@ -432,6 +676,8 @@ const EMPTY_DATA: DataState = {
   workspaces: [],
   members: [],
   auditLogs: [],
+  storageUsage: null,
+  storageAttention: [],
   promptGovernance: null,
   promptEval: null,
   metrics: {
@@ -445,10 +691,62 @@ const EMPTY_DATA: DataState = {
   },
 };
 
+async function loadMetrics(path: string): Promise<MetricsSummary> {
+  try {
+    return await api<MetricsSummary>(path);
+  } catch (error) {
+    // Authentication failures still invalidate the session; an unavailable
+    // analytics endpoint must not blank unrelated project/review queues.
+    if (error instanceof StaleResponseError || (error instanceof ApiError
+      && ([401, 403].includes(error.status) || error.code.startsWith("session_context_")))) throw error;
+    return { ...EMPTY_DATA.metrics, load_error: "指标暂时无法加载，其他工作台功能可继续使用。未加载的数据不代表零。" };
+  }
+}
+
+function mergeUpdatedRows<T extends { id: string; updated_at: string }>(
+  current: T[],
+  updates: T[],
+): T[] {
+  const rows = new Map(current.map((item) => [item.id, item]));
+  for (const item of updates) rows.set(item.id, item);
+  return [...rows.values()].sort(
+    (left, right) =>
+      right.updated_at.localeCompare(left.updated_at)
+      || right.id.localeCompare(left.id),
+  );
+}
+
+function safeRefreshBoundary(syncTimes: Array<string | null>): string {
+  const earliest = syncTimes
+    .filter((value): value is string => Boolean(value))
+    .sort()[0];
+  const parsed = earliest ? Date.parse(earliest) : Number.NaN;
+  const timestamp = Number.isFinite(parsed) ? parsed : Date.now();
+  return new Date(timestamp - 2_000).toISOString();
+}
+
 const PLATFORM: Record<string, string> = {
   xiaohongshu: "小红书",
   douyin: "抖音",
   wechat: "公众号",
+};
+
+const STYLE_SKILL_EXAMPLE = {
+  manifest_version: 1,
+  slug: "warm-editor",
+  name: "温暖生活方式编辑",
+  version: "1.0.0",
+  description: "用克制、具体、有生活感的语言讲清产品价值。",
+  instructions: [
+    "从具体生活场景进入，不先写产品口号",
+    "每段保留一个能被读者带走的动作或判断",
+  ],
+  forbidden_patterns: ["夸张承诺", "虚构个人经历"],
+  platform_instructions: {
+    xiaohongshu: ["像有经验的朋友分享，保留可收藏清单"],
+    wechat: ["导语有观点，正文充分展开并说明边界"],
+  },
+  examples: [],
 };
 
 const ROLE_LABEL: Record<string, string> = {
@@ -473,6 +771,8 @@ const STATUS: Record<string, string> = {
   active: "进行中",
   approved: "已通过",
   awaiting_review: "待审核",
+  awaiting_upload: "待上传",
+  awaiting_selection: "待选择",
   blocked: "规则拦截",
   cancelled: "已取消",
   connected: "已连接",
@@ -482,10 +782,14 @@ const STATUS: Record<string, string> = {
   export_only: "导出模式",
   script_only: "脚本模式",
   script_ready: "脚本包就绪",
-  script_confirmation_pending: "Second confirmation pending",
+  script_confirmation_pending: "等待第二人确认",
   script_published: "脚本确认发布",
   error: "执行错误",
   failed: "失败",
+  manual_review: "待人工核对",
+  outcome_unknown: "结果待核对",
+  late_succeeded: "迟到成功回执",
+  late_failed: "迟到失败回执",
   generating: "生成中",
   indexed: "已索引",
   indexing: "索引中",
@@ -507,6 +811,14 @@ const STATUS: Record<string, string> = {
   stale: "旧版本",
   submitted: "已提交",
   succeeded: "成功",
+  superseded: "旧结果未采用",
+  reserved: "写入预留",
+  delete_pending: "等待删除",
+  missing: "对象缺失",
+  integrity_error: "完整性异常",
+  staging: "写入待确认",
+  deleted: "已删除",
+  abandoned: "已释放预留",
 };
 
 const DELIVERY_MODE: Record<string, string> = {
@@ -515,17 +827,31 @@ const DELIVERY_MODE: Record<string, string> = {
   manual_export: "人工导出",
 };
 
+const PUBLISH_FAILURE_STAGE: Record<string, string> = {
+  authenticate: "渠道鉴权",
+  validate_assets: "素材检查",
+  read_assets: "素材读取",
+};
+
 const NAV: Array<{ id: View; label: string; icon: IconName }> = [
-  { id: "dashboard", label: "总览", icon: "grid" },
-  { id: "campaigns", label: "营销活动", icon: "campaign" },
-  { id: "review", label: "内容审核", icon: "review" },
-  { id: "assets", label: "素材中心", icon: "image" },
-  { id: "publishing", label: "发布管理", icon: "send" },
+  { id: "dashboard", label: "工作台", icon: "grid" },
+  { id: "campaigns", label: "1 创建内容", icon: "campaign" },
+  { id: "review", label: "2 审核内容", icon: "review" },
+  { id: "assets", label: "3 准备素材", icon: "image" },
+  { id: "publishing", label: "4 发布", icon: "send" },
   { id: "knowledge", label: "知识库", icon: "book" },
   { id: "channels", label: "平台连接", icon: "link" },
   { id: "metrics", label: "数据复盘", icon: "chart" },
   { id: "jobs", label: "任务队列", icon: "queue" },
   { id: "admin", label: "团队与审计", icon: "settings" },
+];
+
+const PRIMARY_NAV_IDS: View[] = [
+  "dashboard",
+  "campaigns",
+  "review",
+  "assets",
+  "publishing",
 ];
 
 type IconName =
@@ -574,7 +900,9 @@ function messageOf(error: unknown): string {
 
 function StatusBadge({ value }: { value: string }) {
   const semantic =
-    value === "failed" || value === "blocked" || value === "rejected"
+    value === "failed" || value === "manual_review" || value === "blocked" || value === "rejected"
+      || value === "missing" || value === "integrity_error"
+      || value === "abandoned"
       ? "danger"
       : value === "approved" ||
           value === "ready" ||
@@ -589,11 +917,154 @@ function StatusBadge({ value }: { value: string }) {
         : value === "processing" ||
             value === "running" ||
             value === "queued" ||
-            value === "scheduled"
+            value === "scheduled" ||
+            value === "delete_pending" ||
+            value === "reserved"
           ? "info"
           : "neutral";
+  const animated = ["processing", "running", "queued", "generating", "indexing", "retry"].includes(value);
   return (
-    <span className={`status status-${semantic}`}>{STATUS[value] || value}</span>
+    <span className={`status status-${semantic} ${animated ? "status-animated" : ""}`}>
+      {animated ? <span className="status-spinner" aria-hidden="true" /> : null}
+      {STATUS[value] || value}
+    </span>
+  );
+}
+
+const ACTIVE_RUN_STATUSES = new Set(["queued", "running"]);
+
+function projectCode(id: string): string {
+  return `CF-${id.replaceAll("-", "").slice(0, 6).toUpperCase()}`;
+}
+
+function runStageMeta(run: WorkflowRun) {
+  if (run.status === "awaiting_review" || run.current_stage === "human_review") {
+    return { label: "生成完成，等待人工审核", detail: "内容与质量报告已保存", progress: 100, step: "7 / 7" };
+  }
+  if (run.status === "failed" || run.current_stage === "failed") {
+    return { label: "生成失败", detail: "查看错误后修复，再创建新的生成批次", progress: 100, step: "已停止" };
+  }
+  const stage = run.current_stage || "queued";
+  const platformStage = stage.match(
+    /^(final_review|drafting|reviewing|revising)_([a-z0-9-]+)__(\d+)_of_(\d+)$/,
+  );
+  if (platformStage) {
+    const phaseMetaByName = {
+      drafting: { label: "正在撰写平台初稿…", detail: "根据选定角度、知识与风格生成正文", fraction: 0.18, step: "3 / 7" },
+      reviewing: { label: "正在编辑与安全评审…", detail: "检查事实边界、平台表达与 9 项质量指标", fraction: 0.48, step: "4 / 7" },
+      revising: { label: "正在定向改写…", detail: "只修正评审指出的问题，最多 1 次", fraction: 0.72, step: "5 / 7" },
+      final_review: { label: "正在复核改写稿…", detail: "确认安全与质量没有回退", fraction: 0.9, step: "6 / 7" },
+    } as const;
+    const phase = platformStage[1] as keyof typeof phaseMetaByName;
+    const [, , platform, indexRaw, totalRaw] = platformStage;
+    const index = Number(indexRaw);
+    const total = Math.max(Number(totalRaw), 1);
+    const phaseMeta = phaseMetaByName[phase];
+    const platformName = PLATFORM[platform] || platform;
+    const progress = Math.round(34 + ((index - 1 + phaseMeta.fraction) / total) * 60);
+    return {
+      label: `${platformName}：${phaseMeta.label}`,
+      detail: phaseMeta.detail,
+      progress,
+      step: `平台 ${index} / ${total} · ${phaseMeta.step}`,
+    };
+  }
+  if (stage.startsWith("final_review_")) {
+    return { label: "正在复核改写稿…", detail: "确认安全与质量没有回退", progress: 88, step: "6 / 7" };
+  }
+  if (stage.startsWith("revising_")) {
+    return { label: "正在定向改写…", detail: "只修正评审指出的问题，最多 1 次", progress: 76, step: "5 / 7" };
+  }
+  if (stage.startsWith("reviewing_")) {
+    return { label: "正在编辑与安全评审…", detail: "检查事实边界、平台表达与 9 项质量指标", progress: 64, step: "4 / 7" };
+  }
+  if (stage.startsWith("drafting_") || stage === "content_generation") {
+    return { label: "正在撰写平台初稿…", detail: "根据选定角度、知识与风格生成正文", progress: 50, step: "3 / 7" };
+  }
+  if (stage === "planning") {
+    return { label: "正在比较选题角度…", detail: "建立证据账本、结构和素材方向", progress: 34, step: "2 / 7" };
+  }
+  if (stage === "knowledge_retrieval") {
+    return { label: "正在检索项目知识…", detail: "只使用当前工作区可访问的资料", progress: 20, step: "1 / 7" };
+  }
+  return { label: "等待 Worker 接手…", detail: "任务已安全入队，可以离开当前页面", progress: 8, step: "排队" };
+}
+
+function ProjectIdentity({
+  campaign,
+  context,
+  contentTitle,
+  fallbackCampaignId,
+  compact = false,
+}: {
+  campaign?: Campaign | null;
+  context?: QueueJob["context"];
+  contentTitle?: string | null;
+  fallbackCampaignId?: string | null;
+  compact?: boolean;
+}) {
+  const id = campaign?.id || context?.campaign_id || fallbackCampaignId || "";
+  const name = campaign?.name || context?.campaign_name || "系统级任务";
+  const product = campaign?.product_name || context?.product_name || "不属于单个内容项目";
+  const detail = contentTitle || context?.content_title;
+  return (
+    <div className={`project-identity ${compact ? "project-identity-compact" : ""}`}>
+      <span className="project-code" translate="no">{id ? projectCode(id) : "SYSTEM"}</span>
+      <span className="project-identity-copy">
+        <strong>{name}</strong>
+        <small>{product}{detail ? ` · ${detail}` : ""}</small>
+      </span>
+    </div>
+  );
+}
+
+function GenerationProgress({ run, compact = false }: { run: WorkflowRun; compact?: boolean }) {
+  const stage = runStageMeta(run);
+  const active = ACTIVE_RUN_STATUSES.has(run.status);
+  return (
+    <div className={`generation-progress ${compact ? "generation-progress-compact" : ""}`} aria-live="polite">
+      <div className="generation-progress-heading">
+        {active ? <span className="activity-spinner" aria-hidden="true" /> : null}
+        <span>
+          <strong>{stage.label}</strong>
+          <small>{stage.step} · {stage.detail}</small>
+        </span>
+      </div>
+      <div
+        className="progress-track"
+        role="progressbar"
+        aria-label="内容生成阶段"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={stage.progress}
+        aria-valuetext={`${stage.label}，${stage.step}`}
+      >
+        <span style={{ width: `${stage.progress}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function ActiveGenerationStrip({ runs, campaigns }: { runs: WorkflowRun[]; campaigns: Campaign[] }) {
+  const activeRuns = runs.filter((run) => ACTIVE_RUN_STATUSES.has(run.status));
+  if (!activeRuns.length) return null;
+  const campaignMap = Object.fromEntries(campaigns.map((campaign) => [campaign.id, campaign]));
+  return (
+    <section className="active-generation-strip" aria-label="正在生成的内容" aria-live="polite">
+      <div className="active-generation-title">
+        <span className="activity-spinner" aria-hidden="true" />
+        <div><strong>{activeRuns.length} 个内容任务正在进行</strong><small>页面会自动刷新，离开本页不会中断任务。</small></div>
+      </div>
+      <div className="active-generation-list">
+        {activeRuns.slice(0, 3).map((run) => (
+          <article key={run.id}>
+            <ProjectIdentity campaign={campaignMap[run.campaign_id]} compact />
+            <GenerationProgress run={run} compact />
+          </article>
+        ))}
+        {activeRuns.length > 3 ? <p>另有 {activeRuns.length - 3} 个任务正在运行。</p> : null}
+      </div>
+    </section>
   );
 }
 
@@ -663,11 +1134,7 @@ function AuthScreen({
               display_name: String(form.get("display_name") || ""),
               workspace_name: String(form.get("workspace_name") || ""),
             };
-      await api<unknown>(
-        mode === "login" ? "/auth/login" : "/auth/register",
-        { method: "POST", body: payload },
-      );
-      const current = await api<Session>("/auth/session");
+      const current = await authenticateBrowserSession(mode, payload);
       onAuthenticated(current);
     } catch (caught) {
       setError(messageOf(caught));
@@ -775,106 +1242,318 @@ function AuthScreen({
 
 export function ContentFlowApp() {
   const [session, setSession] = useState<Session | null>(null);
-  const [view, setView] = useState<View>("dashboard");
+  const [view, setViewState] = useState<View>("dashboard");
+  const [campaignFilter, setCampaignFilter] = useState("");
+  const [advancedNavOpen, setAdvancedNavOpen] = useState(false);
   const [data, setData] = useState<DataState>(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [pageWarning, setPageWarning] = useState("");
+  const [contextBlocked, setContextBlocked] = useState(false);
+  const dataGeneration = useRef(0);
+  const pollInFlight = useRef(false);
+  const lastOperationalRefresh = useRef<string | null>(null);
+  const reviewLeaveGuard = useRef<(() => boolean) | null>(null);
+  const registerReviewLeaveGuard = useCallback((guard: (() => boolean) | null) => {
+    reviewLeaveGuard.current = guard;
+  }, []);
 
-  const loadData = useCallback(async (silent = false) => {
-    if (!silent) setRefreshing(true);
+  const acceptSession = useCallback((current: Session) => {
+    activateBrowserSession(current);
+    dataGeneration.current += 1;
+    lastOperationalRefresh.current = null;
+    setContextBlocked(false);
+    setSession(current);
+  }, []);
+
+  useEffect(() => {
+    const block = () => {
+      dataGeneration.current += 1;
+      setContextBlocked(true);
+      setRefreshing(false);
+    };
+    window.addEventListener(SESSION_CONTEXT_EVENT, block);
+    return () => window.removeEventListener(SESSION_CONTEXT_EVENT, block);
+  }, []);
+
+  function setView(next: View) {
+    if (next === view || (reviewLeaveGuard.current && !reviewLeaveGuard.current())) return;
+    setViewState(next);
+  }
+
+  const loadData = useCallback(async () => {
+    if (contextBlocked) return;
+    const generation = ++dataGeneration.current;
+    setRefreshing(true);
     try {
+      const context = captureContext();
       const [
         dashboard,
-        campaigns,
-        contents,
-        assets,
-        channels,
-        publishes,
-        knowledge,
-        jobs,
+        campaignPage,
+        runPage,
+        stylePage,
+        contentPage,
+        assetPage,
+        mediaCapabilities,
+        channelPage,
+        publishPage,
+        knowledgePage,
+        jobPage,
         metrics,
-        workspaces,
-        members,
-        auditLogs,
-        promptGovernance,
-        promptEval,
+        workspacePage,
+        memberPage,
+        auditPage,
+        promptGovernanceControl,
+        promptReleasePage,
+        promptEvalControl,
+        promptEvalSuitePage,
+        promptEvalRunPage,
+        storageUsage,
+        storageAttentionPage,
       ] = await Promise.all([
         api<DashboardSummary>("/dashboard/summary"),
-        api<Campaign[]>("/campaigns"),
-        api<Content[]>("/contents"),
-        api<Asset[]>("/assets"),
-        api<Channel[]>("/channels"),
-        api<PublishJob[]>("/publishing/jobs"),
-        api<KnowledgeDocument[]>("/knowledge/documents"),
-        api<QueueJob[]>("/jobs"),
-        api<MetricsSummary>("/metrics/summary"),
-        api<WorkspaceAccess[]>("/auth/workspaces"),
+        apiAllPages<Campaign>("/campaigns"),
+        apiAllPages<WorkflowRun>("/runs"),
+        apiAllPages<StyleSkill>("/style-skills"),
+        apiAllPages<Content>("/contents"),
+        apiAllPages<Asset>("/assets"),
+        api<MediaCapabilities>("/assets/capabilities"),
+        apiAllPages<Channel>("/channels"),
+        apiAllPages<PublishJob>("/publishing/jobs"),
+        apiAllPages<KnowledgeDocument>("/knowledge/documents"),
+        apiAllPages<QueueJob>("/jobs"),
+        loadMetrics(
+          campaignFilter
+            ? `/metrics/summary?campaign_id=${encodeURIComponent(campaignFilter)}`
+            : "/metrics/summary",
+        ),
+        apiAllPages<WorkspaceAccess>("/auth/workspaces"),
         session?.role === "admin"
-          ? api<Member[]>("/admin/members")
-          : Promise.resolve([]),
+          ? apiAllPages<Member>("/admin/members")
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
         session?.role === "admin"
-          ? api<AuditLog[]>("/admin/audit-logs")
-          : Promise.resolve([]),
+          ? apiAllPages<AuditLog>("/admin/audit-logs")
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
         session?.role === "admin"
           ? api<PromptGovernance>("/admin/prompt-releases")
           : Promise.resolve(null),
         session?.role === "admin"
+          ? apiAllPages<PromptRelease>("/admin/prompt-releases/history")
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
+        session?.role === "admin"
           ? api<PromptEvalGovernance>("/admin/prompt-eval")
           : Promise.resolve(null),
+        session?.role === "admin"
+          ? apiAllPages<PromptEvalSuite>("/admin/prompt-eval/suites")
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
+        session?.role === "admin"
+          ? apiAllPages<PromptEvalRun>("/admin/prompt-eval/runs")
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
+        session?.role === "admin"
+          ? api<StorageUsage>("/admin/storage/usage")
+          : Promise.resolve(null),
+        session?.role === "admin"
+          ? apiAllPages<StorageObjectAllocation>(
+              "/admin/storage/objects?attention_only=true",
+            )
+          : Promise.resolve({ items: [], truncated: false, syncTime: null }),
       ]);
+      assertContext(context);
+      if (generation !== dataGeneration.current) return;
+      const limitedCollections = [
+        ["活动", campaignPage.truncated],
+        ["运行记录", runPage.truncated],
+        ["风格 Skill", stylePage.truncated],
+        ["内容", contentPage.truncated],
+        ["素材", assetPage.truncated],
+        ["发布任务", publishPage.truncated],
+        ["知识文档", knowledgePage.truncated],
+        ["队列任务", jobPage.truncated],
+        ["渠道", channelPage.truncated],
+        ["工作区", workspacePage.truncated],
+        ["成员", memberPage.truncated],
+        ["审计记录", auditPage.truncated],
+        ["Prompt 版本", promptReleasePage.truncated],
+        ["Prompt Eval 套件", promptEvalSuitePage.truncated],
+        ["Prompt Eval 运行", promptEvalRunPage.truncated],
+        ["存储异常对象", storageAttentionPage.truncated],
+      ].filter(([, truncated]) => truncated).map(([label]) => label);
       setData({
         dashboard,
-        campaigns,
-        contents,
-        assets,
-        channels,
-        publishes,
-        knowledge,
-        jobs,
+        campaigns: campaignPage.items,
+        runs: runPage.items,
+        styleSkills: stylePage.items,
+        contents: contentPage.items,
+        assets: assetPage.items,
+        mediaCapabilities,
+        channels: channelPage.items,
+        publishes: publishPage.items,
+        knowledge: knowledgePage.items,
+        jobs: jobPage.items,
         metrics,
-        workspaces,
-        members,
-        auditLogs,
-        promptGovernance,
-        promptEval,
+        workspaces: workspacePage.items,
+        members: memberPage.items,
+        auditLogs: auditPage.items,
+        storageUsage,
+        storageAttention: storageAttentionPage.items,
+        promptGovernance: promptGovernanceControl
+          ? { ...promptGovernanceControl, releases: promptReleasePage.items }
+          : null,
+        promptEval: promptEvalControl
+          ? {
+              ...promptEvalControl,
+              suites: promptEvalSuitePage.items,
+              runs: promptEvalRunPage.items,
+            }
+          : null,
       });
+      lastOperationalRefresh.current = safeRefreshBoundary([
+        campaignPage.syncTime,
+        runPage.syncTime,
+        contentPage.syncTime,
+        assetPage.syncTime,
+        publishPage.syncTime,
+        jobPage.syncTime,
+      ]);
+      setPageWarning(
+        limitedCollections.length
+          ? `${limitedCollections.join("、")}已达到安全加载上限 2000 条，请使用筛选或历史视图继续定位。`
+          : "",
+      );
       setError("");
     } catch (caught) {
+      if (caught instanceof StaleResponseError || generation !== dataGeneration.current) return;
       if (caught instanceof ApiError && caught.status === 401) {
-        setSession(null);
+        setContextBlocked(true);
       } else {
         setError(messageOf(caught));
       }
     } finally {
-      setRefreshing(false);
+      if (generation === dataGeneration.current) setRefreshing(false);
     }
-  }, [session]);
+  }, [session, campaignFilter, contextBlocked]);
+
+  const pollOperationalData = useCallback(async () => {
+    if (
+      !session
+      || contextBlocked
+      || pollInFlight.current
+      || typeof document === "undefined"
+      || document.visibilityState === "hidden"
+    ) return;
+    const updatedAfter = lastOperationalRefresh.current;
+    if (!updatedAfter) return;
+    const query = `updated_after=${encodeURIComponent(updatedAfter)}`;
+    pollInFlight.current = true;
+    const generation = dataGeneration.current;
+    try {
+      const context = captureContext();
+      const [
+        dashboard,
+        campaignPage,
+        runPage,
+        contentPage,
+        assetPage,
+        publishPage,
+        jobPage,
+        metrics,
+      ] = await Promise.all([
+        api<DashboardSummary>("/dashboard/summary"),
+        apiAllPages<Campaign>(`/campaigns?${query}`, { maxPages: 10 }),
+        apiAllPages<WorkflowRun>(`/runs?${query}`, { maxPages: 10 }),
+        apiAllPages<Content>(`/contents?${query}`, { maxPages: 10 }),
+        apiAllPages<Asset>(`/assets?${query}`, { maxPages: 10 }),
+        apiAllPages<PublishJob>(`/publishing/jobs?${query}`, { maxPages: 10 }),
+        apiAllPages<QueueJob>(`/jobs?${query}`, { maxPages: 10 }),
+        loadMetrics(
+          campaignFilter
+            ? `/metrics/summary?campaign_id=${encodeURIComponent(campaignFilter)}`
+            : "/metrics/summary",
+        ),
+      ]);
+      assertContext(context);
+      if (generation !== dataGeneration.current) return;
+      setData((current) => ({
+        ...current,
+        dashboard,
+        campaigns: mergeUpdatedRows(current.campaigns, campaignPage.items),
+        runs: mergeUpdatedRows(current.runs, runPage.items),
+        contents: mergeUpdatedRows(current.contents, contentPage.items),
+        assets: mergeUpdatedRows(current.assets, assetPage.items),
+        publishes: mergeUpdatedRows(current.publishes, publishPage.items),
+        jobs: mergeUpdatedRows(current.jobs, jobPage.items),
+        metrics,
+      }));
+      const truncated = [
+        campaignPage,
+        runPage,
+        contentPage,
+        assetPage,
+        publishPage,
+        jobPage,
+      ].some((page) => page.truncated);
+      if (truncated) {
+        setPageWarning("短时间内更新的数据超过 1000 条，请手动刷新以重新同步。");
+      } else {
+        lastOperationalRefresh.current = safeRefreshBoundary([
+          campaignPage.syncTime,
+          runPage.syncTime,
+          contentPage.syncTime,
+          assetPage.syncTime,
+          publishPage.syncTime,
+          jobPage.syncTime,
+        ]);
+      }
+      setError("");
+    } catch (caught) {
+      if (caught instanceof StaleResponseError || generation !== dataGeneration.current) return;
+      if (caught instanceof ApiError && caught.status === 401) {
+        setContextBlocked(true);
+      } else {
+        setError(messageOf(caught));
+      }
+    } finally {
+      pollInFlight.current = false;
+    }
+  }, [session, campaignFilter, contextBlocked]);
 
   useEffect(() => {
+    let active = true;
     async function restore() {
       try {
-        const current = await api<Session>("/auth/session");
-        setSession(current);
+        const current = await restoreBrowserSession();
+        if (active) acceptSession(current);
       } catch {
-        setSession(null);
+        if (active) setSession(null);
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     }
     void restore();
-  }, []);
+    return () => { active = false; };
+  }, [acceptSession]);
+
+  const hasActiveWork = data.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status))
+    || data.assets.some((asset) => ["queued", "generating", "processing"].includes(asset.status));
 
   useEffect(() => {
     if (!session) return;
     const initial = window.setTimeout(() => void loadData(), 0);
-    const timer = window.setInterval(() => void loadData(true), 15_000);
+    return () => window.clearTimeout(initial);
+  }, [session, loadData]);
+
+  useEffect(() => {
+    if (!session) return;
+    const timer = window.setInterval(
+      () => void pollOperationalData(),
+      hasActiveWork ? 2_500 : 15_000,
+    );
     return () => {
-      window.clearTimeout(initial);
       window.clearInterval(timer);
     };
-  }, [session, loadData]);
+  }, [session, pollOperationalData, hasActiveWork]);
 
   function flash(message: string) {
     setNotice(message);
@@ -883,16 +1562,14 @@ export function ContentFlowApp() {
 
   async function activateWorkspace(workspaceId: string) {
     if (workspaceId === session?.workspace.id) return;
+    if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
     setRefreshing(true);
     try {
-      await api<unknown>(
-        `/auth/switch/${workspaceId}`,
-        { method: "POST" },
-      );
-      const current = await api<Session>("/auth/session");
+      const current = await switchBrowserWorkspace(workspaceId);
       setData(EMPTY_DATA);
-      setView("dashboard");
-      setSession(current);
+      setCampaignFilter("");
+      setViewState("dashboard");
+      acceptSession(current);
       flash(`已切换到 ${current.workspace.name}`);
     } catch (caught) {
       setError(messageOf(caught));
@@ -902,24 +1579,26 @@ export function ContentFlowApp() {
   }
 
   async function createAndActivateWorkspace(name: string) {
-    await api<unknown>("/auth/workspaces", {
-      method: "POST",
-      body: { name },
-    });
-    const current = await api<Session>("/auth/session");
+    if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
+    const current = await createBrowserWorkspace(name);
     setData(EMPTY_DATA);
-    setView("dashboard");
-    setSession(current);
+    setCampaignFilter("");
+    setViewState("dashboard");
+    acceptSession(current);
     flash(`工作区 ${current.workspace.name} 已创建`);
   }
 
   async function signOut() {
+    if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
     try {
-      await api<void>("/auth/logout", { method: "POST" });
-    } finally {
+      await logoutBrowserSession();
+      dataGeneration.current += 1;
       setSession(null);
       setData(EMPTY_DATA);
-      setView("dashboard");
+      setCampaignFilter("");
+      setViewState("dashboard");
+    } catch (caught) {
+      setError(messageOf(caught));
     }
   }
 
@@ -932,13 +1611,81 @@ export function ContentFlowApp() {
     );
   }
   if (!session) {
-    return <AuthScreen onAuthenticated={setSession} />;
+    return <AuthScreen onAuthenticated={acceptSession} />;
   }
+
+  const effectiveCampaignFilter = data.campaigns.some((campaign) => campaign.id === campaignFilter)
+    ? campaignFilter
+    : "";
+  const scopedCampaigns = effectiveCampaignFilter
+    ? data.campaigns.filter((campaign) => campaign.id === effectiveCampaignFilter)
+    : data.campaigns;
+  const scopedRuns = effectiveCampaignFilter
+    ? data.runs.filter((run) => run.campaign_id === effectiveCampaignFilter)
+    : data.runs;
+  const scopedContents = effectiveCampaignFilter
+    ? data.contents.filter((content) => content.campaign_id === effectiveCampaignFilter)
+    : data.contents;
+  const scopedContentIds = new Set(scopedContents.map((content) => content.id));
+  const scopedAssets = effectiveCampaignFilter
+    ? data.assets.filter((asset) => asset.content_item_id && scopedContentIds.has(asset.content_item_id))
+    : data.assets;
+  const scopedPublishes = effectiveCampaignFilter
+    ? data.publishes.filter((job) => scopedContentIds.has(job.content_item_id))
+    : data.publishes;
+  const scopedJobs = effectiveCampaignFilter
+    ? data.jobs.filter((job) => job.context.campaign_id === effectiveCampaignFilter)
+    : data.jobs;
+  const scopedDashboard: DashboardSummary = effectiveCampaignFilter
+    ? {
+        campaigns: scopedCampaigns.filter((campaign) => campaign.status !== "archived").length,
+        runs_active: scopedRuns.filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length,
+        contents_needing_review: scopedContents.filter((content) => content.status === "needs_review").length,
+        assets_processing: scopedAssets.filter((asset) => ["pending", "processing"].includes(asset.status)).length,
+        publishes_scheduled: scopedPublishes.filter((job) => job.status === "scheduled").length,
+        jobs_manual_review: scopedJobs.filter((job) => job.status === "manual_review").length,
+        jobs_failed: scopedJobs.filter((job) => job.status === "failed").length,
+      }
+    : data.dashboard;
+  const scopedData: DataState = effectiveCampaignFilter
+    ? {
+        ...data,
+        dashboard: scopedDashboard,
+        campaigns: scopedCampaigns,
+        runs: scopedRuns,
+        contents: scopedContents,
+        assets: scopedAssets,
+        publishes: scopedPublishes,
+        jobs: scopedJobs,
+      }
+    : data;
 
   const visibleNav = NAV.filter(
     (item) => item.id !== "admin" || session.role === "admin",
   );
   const viewLabel = visibleNav.find((item) => item.id === view)?.label || "";
+  const primaryNav = visibleNav.filter((item) =>
+    PRIMARY_NAV_IDS.includes(item.id),
+  );
+  const advancedNav = visibleNav.filter(
+    (item) => !PRIMARY_NAV_IDS.includes(item.id),
+  );
+  const advancedActive = advancedNav.some((item) => item.id === view);
+  const renderSidebarItem = (item: (typeof NAV)[number]) => (
+    <button
+      key={item.id}
+      className={view === item.id ? "active" : ""}
+      onClick={() => setView(item.id)}
+      aria-current={view === item.id ? "page" : undefined}
+      title={item.label}
+    >
+      <Icon name={item.icon} />
+      <span>{item.label}</span>
+      {item.id === "review" && scopedDashboard.contents_needing_review ? (
+        <b>{scopedDashboard.contents_needing_review}</b>
+      ) : null}
+    </button>
+  );
 
   return (
     <div className="app-shell">
@@ -948,21 +1695,23 @@ export function ContentFlowApp() {
           <span className="brand-name">ContentFlow</span>
         </div>
         <nav aria-label="工作台导航">
-          {visibleNav.map((item) => (
-            <button
-              key={item.id}
-              className={view === item.id ? "active" : ""}
-              onClick={() => setView(item.id)}
-              aria-current={view === item.id ? "page" : undefined}
-              title={item.label}
+          <p className="nav-group-label">核心流程</p>
+          {primaryNav.map(renderSidebarItem)}
+          {advancedNav.length ? (
+            <details
+              className="nav-more"
+              open={advancedNavOpen || advancedActive}
+              onToggle={(event) =>
+                setAdvancedNavOpen(event.currentTarget.open)
+              }
             >
-              <Icon name={item.icon} />
-              <span>{item.label}</span>
-              {item.id === "review" && data.dashboard.contents_needing_review ? (
-                <b>{data.dashboard.contents_needing_review}</b>
-              ) : null}
-            </button>
-          ))}
+              <summary>
+                <span>资源与系统</span>
+                <span aria-hidden="true">＋</span>
+              </summary>
+              <div>{advancedNav.map(renderSidebarItem)}</div>
+            </details>
+          ) : null}
         </nav>
         <div className="sidebar-footer">
           <span className="avatar">{session.user.display_name.slice(0, 1)}</span>
@@ -1002,6 +1751,23 @@ export function ContentFlowApp() {
                 <option value={session.workspace.id}>{session.workspace.name}</option>
               )}
             </select>
+            <span className="header-divider" />
+            <select
+              className="project-switcher"
+              aria-label="按项目筛选当前工作台"
+              value={effectiveCampaignFilter}
+              onChange={(event) => {
+                if (reviewLeaveGuard.current && !reviewLeaveGuard.current()) return;
+                setCampaignFilter(event.target.value);
+              }}
+            >
+              <option value="">全部项目</option>
+              {data.campaigns.map((campaign) => (
+                <option key={campaign.id} value={campaign.id}>
+                  {projectCode(campaign.id)} · {campaign.name}
+                </option>
+              ))}
+            </select>
           </div>
           <button
             className="icon-button"
@@ -1009,11 +1775,11 @@ export function ContentFlowApp() {
             onClick={() => void loadData()}
             disabled={refreshing}
           >
-            <Icon name="refresh" />
+            <span className={refreshing ? "refresh-spin" : ""}><Icon name="refresh" /></span>
           </button>
         </header>
         <div className="mobile-nav">
-          {visibleNav.map((item) => (
+          {primaryNav.map((item) => (
             <button
               key={item.id}
               className={view === item.id ? "active" : ""}
@@ -1022,21 +1788,61 @@ export function ContentFlowApp() {
               {item.label}
             </button>
           ))}
+          {advancedNav.length ? (
+            <select
+              className="mobile-more-nav"
+              aria-label="更多功能"
+              value={advancedActive ? view : ""}
+              onChange={(event) => {
+                if (event.target.value) setView(event.target.value as View);
+              }}
+            >
+              <option value="">更多</option>
+              {advancedNav.map((item) => (
+                <option key={item.id} value={item.id}>{item.label}</option>
+              ))}
+            </select>
+          ) : null}
         </div>
         <main className="workspace">
-          {notice ? <div className="toast toast-success">{notice}</div> : null}
+          {contextBlocked ? (
+            <section className="panel form-panel" role="alert" aria-label="会话上下文已变化">
+              <h2>会话或工作区已在其他页面变化，或续期无法安全完成</h2>
+              <p>本页输入已保留，新的请求已暂停。请先复制尚未保存的文案；不要把当前页面当作新工作区继续操作。</p>
+              <Button onClick={() => {
+                if (window.confirm("重新载入将离开当前页面并丢弃未保存输入。请确认已复制需要保留的文案，是否继续？")) window.location.reload();
+              }}>同步当前会话</Button>
+            </section>
+          ) : null}
+          {notice ? (
+            <div className="toast toast-success" role="status" aria-live="polite">
+              {notice}
+            </div>
+          ) : null}
           {error ? (
-            <div className="toast toast-error">
+            <div className="toast toast-error" role="alert">
               <span>{error}</span>
               <button onClick={() => setError("")}>关闭</button>
             </div>
           ) : null}
+          {pageWarning ? (
+            <div className="pagination-warning" role="status">
+              <span>{pageWarning}</span>
+              <button onClick={() => setPageWarning("")}>知道了</button>
+            </div>
+          ) : null}
+          <ActiveGenerationStrip runs={scopedRuns} campaigns={data.campaigns} />
           {view === "dashboard" ? (
-            <DashboardView data={data} onNavigate={setView} />
+            <DashboardView data={scopedData} onNavigate={setView} />
           ) : null}
           {view === "campaigns" ? (
             <CampaignsView
-              campaigns={data.campaigns}
+              key={generationScope(getApiBase(), session.user.id, session.workspace.id)}
+              generationScopeKey={generationScope(getApiBase(), session.user.id, session.workspace.id)}
+              campaigns={scopedCampaigns}
+              runs={scopedRuns}
+              styleSkills={data.styleSkills}
+              mediaCapabilities={data.mediaCapabilities}
               role={session.role}
               onChanged={() => loadData()}
               flash={flash}
@@ -1044,16 +1850,21 @@ export function ContentFlowApp() {
           ) : null}
           {view === "review" ? (
             <ReviewView
-              contents={data.contents}
+              key={`${getApiBase()}:${session.user.id}:${session.workspace.id}:${effectiveCampaignFilter}`}
+              campaigns={data.campaigns}
+              contents={scopedContents}
               role={session.role}
               onChanged={() => loadData()}
               flash={flash}
+              registerLeaveGuard={registerReviewLeaveGuard}
             />
           ) : null}
           {view === "assets" ? (
             <AssetsView
-              assets={data.assets}
-              contents={data.contents}
+              assets={scopedAssets}
+              campaigns={data.campaigns}
+              contents={scopedContents}
+              mediaCapabilities={data.mediaCapabilities}
               role={session.role}
               onChanged={() => loadData()}
               flash={flash}
@@ -1061,10 +1872,14 @@ export function ContentFlowApp() {
           ) : null}
           {view === "publishing" ? (
             <PublishingView
-              publishes={data.publishes}
-              contents={data.contents}
+              key={`${getApiBase()}:${session.user.id}:${session.workspace.id}`}
+              scopeKey={`${session.user.id}:${session.workspace.id}`}
+              publishes={scopedPublishes}
+              campaigns={data.campaigns}
+              contents={scopedContents}
               channels={data.channels}
               role={session.role}
+              onNavigate={setView}
               onChanged={() => loadData()}
               flash={flash}
             />
@@ -1088,8 +1903,9 @@ export function ContentFlowApp() {
           {view === "metrics" ? (
             <MetricsView
               data={data.metrics}
-              publishes={data.publishes}
-              contents={data.contents}
+              publishes={scopedPublishes}
+              campaigns={data.campaigns}
+              contents={scopedContents}
               channels={data.channels}
               role={session.role}
               onChanged={() => loadData()}
@@ -1098,8 +1914,9 @@ export function ContentFlowApp() {
           ) : null}
           {view === "jobs" ? (
             <JobsView
-              jobs={data.jobs}
+              jobs={scopedJobs}
               role={session.role}
+              onNavigate={setView}
               onChanged={() => loadData()}
               flash={flash}
             />
@@ -1110,6 +1927,8 @@ export function ContentFlowApp() {
               workspaces={data.workspaces}
               members={data.members}
               auditLogs={data.auditLogs}
+              storageUsage={data.storageUsage}
+              storageAttention={data.storageAttention}
               promptGovernance={data.promptGovernance}
               promptEval={data.promptEval}
               onWorkspaceCreated={createAndActivateWorkspace}
@@ -1159,15 +1978,80 @@ function DashboardView({
     ["素材处理中", data.dashboard.assets_processing, "assets" as View],
     ["已安排发布", data.dashboard.publishes_scheduled, "publishing" as View],
   ] as const;
+  const hasCampaign = data.campaigns.length > 0;
+  const hasContent = data.contents.length > 0;
+  const hasApproved = data.contents.some((item) => item.status === "approved");
+  const hasReadyAsset = data.assets.some((item) => item.status === "ready");
+  const needsAssetAttention = data.assets.some((item) =>
+    ["planned", "processing", "awaiting_upload", "failed"].includes(item.status),
+  );
+  const hasDelivered = data.publishes.some((item) =>
+    [
+      "draft_created",
+      "submitted",
+      "published",
+      "exported",
+      "script_published",
+    ].includes(item.status),
+  );
+  const nextAction = !hasCampaign
+    ? { view: "campaigns" as View, label: "创建第一个内容活动", copy: "先说明产品、受众和平台，系统会据此生成内容。" }
+    : data.dashboard.contents_needing_review > 0
+      ? { view: "review" as View, label: "审核待处理内容", copy: `有 ${data.dashboard.contents_needing_review} 篇内容等待你确认事实、语气和风险。` }
+      : hasApproved && (!hasReadyAsset || needsAssetAttention)
+        ? { view: "assets" as View, label: "准备发布素材", copy: "内容已通过审核，补齐真实封面后才能进入发布。" }
+        : hasApproved
+          ? { view: "publishing" as View, label: "立即发布或设置时间", copy: "内容与素材已就绪，可以选择立即执行或定时发布。" }
+          : { view: "campaigns" as View, label: "继续生成内容", copy: "活动已经建立，开始一次新的内容生成。" };
+  const workflowSteps = [
+    { label: "创建内容", detail: "活动与生成", done: hasCampaign && hasContent, view: "campaigns" as View },
+    { label: "审核内容", detail: "人工确认", done: hasApproved, view: "review" as View },
+    { label: "准备素材", detail: "封面与视频", done: hasReadyAsset, view: "assets" as View },
+    { label: "发布", detail: "立即或定时", done: hasDelivered, view: "publishing" as View },
+  ];
+  const campaignMap = Object.fromEntries(
+    data.campaigns.map((campaign) => [campaign.id, campaign]),
+  );
 
   return (
     <>
       <PageHeading
         eyebrow="运营总览"
-        title="内容工作流状态"
-        description="查看从生成、审核到分发的关键阻塞点。数据每 15 秒自动更新。"
+        title="今天从哪里继续？"
+        description="按照创建、审核、素材、发布四步完成内容投放；高级配置已收纳到资源与系统。"
       />
-      <section className="metric-grid" aria-label="关键指标">
+      <section className="workflow-guide" aria-label="内容发布主流程">
+        <div className="workflow-next">
+          <p className="eyebrow">建议下一步</p>
+          <h2>{nextAction.label}</h2>
+          <p>{nextAction.copy}</p>
+          <Button onClick={() => onNavigate(nextAction.view)}>
+            继续处理 <span aria-hidden="true">→</span>
+          </Button>
+        </div>
+        <ol>
+          {workflowSteps.map((step, index) => (
+            <li
+              key={step.view}
+              className={
+                step.done
+                  ? "complete"
+                  : step.view === nextAction.view
+                    ? "current"
+                    : "upcoming"
+              }
+              aria-current={step.view === nextAction.view ? "step" : undefined}
+            >
+              <button onClick={() => onNavigate(step.view)}>
+                <span>{step.done ? "✓" : String(index + 1).padStart(2, "0")}</span>
+                <strong>{step.label}</strong>
+                <small>{step.done ? "已完成" : step.detail}</small>
+              </button>
+            </li>
+          ))}
+        </ol>
+      </section>
+      <section className="metric-grid compact-metrics" aria-label="关键指标">
         {metrics.map(([label, value, target], index) => (
           <button key={label} onClick={() => onNavigate(target)}>
             <span>0{index + 1}</span>
@@ -1198,6 +2082,11 @@ function DashboardView({
                       {(PLATFORM[item.platform] || item.platform).slice(0, 1)}
                     </div>
                     <div className="record-main">
+                      <ProjectIdentity
+                        campaign={campaignMap[item.campaign_id]}
+                        fallbackCampaignId={item.campaign_id}
+                        compact
+                      />
                       <strong>{item.title}</strong>
                       <small>
                         {PLATFORM[item.platform]} · 版本 {item.version}
@@ -1220,6 +2109,7 @@ function DashboardView({
           </div>
           <div className="health-list">
             <div><span>运行中</span><strong>{data.dashboard.runs_active}</strong></div>
+            <div><span>待人工核对</span><strong className={data.dashboard.jobs_manual_review ? "danger-text" : ""}>{data.dashboard.jobs_manual_review}</strong></div>
             <div><span>失败任务</span><strong className={data.dashboard.jobs_failed ? "danger-text" : ""}>{data.dashboard.jobs_failed}</strong></div>
             <div><span>发布队列</span><strong>{data.dashboard.publishes_scheduled}</strong></div>
           </div>
@@ -1235,9 +2125,9 @@ function DashboardView({
             </div>
           </div>
           <DataTable
-            headers={["活动", "产品", "平台", "状态", "更新时间"]}
+            headers={["项目", "产品", "平台", "状态", "更新时间"]}
             rows={data.campaigns.slice(0, 6).map((campaign) => [
-              campaign.name,
+              <ProjectIdentity key="project" campaign={campaign} compact />,
               campaign.product_name,
               campaign.platforms.map((item) => PLATFORM[item]).join(" / "),
               <StatusBadge key="status" value={campaign.status} />,
@@ -1271,6 +2161,7 @@ function RunEvidence({ run }: { run: WorkflowRun }) {
         </div>
         <StatusBadge value={run.status} />
       </div>
+      <GenerationProgress run={run} compact />
       <div className="run-evidence-grid">
         <span><small>生成来源</small><b>{source}</b></span>
         <span><small>模型</small><b>{provenance?.model || "等待执行"}</b></span>
@@ -1279,41 +2170,64 @@ function RunEvidence({ run }: { run: WorkflowRun }) {
         <span><small>Token 记录</small><b>{usageLabel}</b></span>
       </div>
       {run.error ? <p className="run-error" role="alert">最近错误：{run.error}</p> : null}
+      <details><summary>任务与操作编号</summary>
+        <p>任务编号：<code>{run.id}</code></p>
+        <p>操作编号：<code>{run.request_json?.generation_request_id || "旧批次，无生成意图回执"}</code></p>
+      </details>
     </article>
   );
 }
 
 function CampaignsView({
+  generationScopeKey,
   campaigns,
+  runs,
+  styleSkills,
+  mediaCapabilities,
   role,
   onChanged,
   flash,
 }: {
+  generationScopeKey: string;
   campaigns: Campaign[];
+  runs: WorkflowRun[];
+  styleSkills: StyleSkill[];
+  mediaCapabilities: MediaCapabilities;
   role: string;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
 }) {
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [showSkillInstaller, setShowSkillInstaller] = useState(false);
   const [busyId, setBusyId] = useState("");
   const [error, setError] = useState("");
   const [expandedCampaignId, setExpandedCampaignId] = useState("");
-  const [runsByCampaign, setRunsByCampaign] = useState<Record<string, WorkflowRun[]>>({});
+  const [imageSource, setImageSource] = useState<MediaSource | "">("");
+
   const canEdit = roleAtLeast(role, "editor");
+
+  const generation = useGenerationRequest(generationScopeKey, async (runId, campaignId) => {
+    flash(`生成任务已确认：${runId}；原编号核对不会创建重复任务`);
+    setExpandedCampaignId(campaignId);
+    await onChanged();
+  });
 
   function closeForm() {
     setShowForm(false);
     setEditingCampaign(null);
+    setImageSource("");
   }
 
   function openCreate() {
     setEditingCampaign(null);
+    setImageSource("");
     setShowForm(true);
   }
 
   function openEdit(campaign: Campaign) {
     setEditingCampaign(campaign);
+    setImageSource(campaign.brief.image_source || "manual");
     setShowForm(true);
   }
 
@@ -1343,6 +2257,11 @@ function CampaignsView({
         .split(/[，,\n]/)
         .map((item) => item.trim())
         .filter(Boolean),
+      style_skill_id: form.get("style_skill_id"),
+      style_notes: form.get("style_notes"),
+      quality_profile: form.get("quality_profile"),
+      image_source: form.get("image_source"),
+      image_search_query: form.get("image_search_query"),
     };
     try {
       await api(
@@ -1357,6 +2276,31 @@ function CampaignsView({
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function installStyleSkill(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusyId("install-skill");
+    setError("");
+    const form = new FormData(event.currentTarget);
+    try {
+      const manifest = JSON.parse(String(form.get("manifest") || ""));
+      await api("/style-skills", {
+        method: "POST",
+        body: { manifest },
+      });
+      flash("风格 Skill 已安装并完成完整性哈希记录");
+      setShowSkillInstaller(false);
+      await onChanged();
+    } catch (caught) {
+      setError(
+        caught instanceof SyntaxError
+          ? "Manifest 不是有效 JSON"
+          : messageOf(caught),
+      );
     } finally {
       setBusyId("");
     }
@@ -1386,48 +2330,20 @@ function CampaignsView({
     }
   }
 
-  async function toggleRuns(campaign: Campaign) {
-    if (expandedCampaignId === campaign.id) {
-      setExpandedCampaignId("");
-      return;
-    }
-    setExpandedCampaignId(campaign.id);
-    if (Object.prototype.hasOwnProperty.call(runsByCampaign, campaign.id)) return;
-    setBusyId(`runs-${campaign.id}`);
-    setError("");
-    try {
-      const runs = await api<WorkflowRun[]>(
-        `/campaigns/${campaign.id}/runs?limit=5`,
-      );
-      setRunsByCampaign((current) => ({ ...current, [campaign.id]: runs }));
-    } catch (caught) {
-      setError(messageOf(caught));
-    } finally {
-      setBusyId("");
-    }
+  function toggleRuns(campaign: Campaign) {
+    setExpandedCampaignId((current) => current === campaign.id ? "" : campaign.id);
+  }
+
+  function campaignRuns(campaignId: string) {
+    return runs.filter((runItem) => runItem.campaign_id === campaignId).slice(0, 5);
+  }
+
+  function activeCampaignRun(campaignId: string) {
+    return campaignRuns(campaignId).find((runItem) => ACTIVE_RUN_STATUSES.has(runItem.status));
   }
 
   async function run(campaign: Campaign) {
-    setBusyId(`run-${campaign.id}`);
-    setError("");
-    try {
-      await api(`/campaigns/${campaign.id}/runs`, {
-        method: "POST",
-        body: {},
-      });
-      flash("内容生成任务已进入队列");
-      setRunsByCampaign((current) => {
-        const next = { ...current };
-        delete next[campaign.id];
-        return next;
-      });
-      setExpandedCampaignId("");
-      await onChanged();
-    } catch (caught) {
-      setError(messageOf(caught));
-    } finally {
-      setBusyId("");
-    }
+    await generation.start(campaign);
   }
 
 
@@ -1438,15 +2354,60 @@ function CampaignsView({
         title="营销活动"
         description="用结构化 Brief 管理目标、人群、平台约束与生成批次。"
         action={canEdit ? (
-          <Button onClick={showForm ? closeForm : openCreate}>
-            <Icon name="plus" />
-            {showForm ? "收起表单" : "新建活动"}
-          </Button>
+          <div className="page-action-group">
+            <Button
+              kind="ghost"
+              onClick={() => setShowSkillInstaller((value) => !value)}
+            >
+              {showSkillInstaller ? "收起 Skill" : "安装风格 Skill"}
+            </Button>
+            <Button onClick={showForm ? closeForm : openCreate}>
+              <Icon name="plus" />
+              {showForm ? "收起表单" : "新建活动"}
+            </Button>
+          </div>
         ) : undefined}
       />
+      <GenerationRequestNotice request={generation} />
       {error ? <p className="inline-error">{error}</p> : null}
       {!canEdit ? (
         <p className="permission-note">当前为只读权限，可查看活动与生成状态。</p>
+      ) : null}
+      {showSkillInstaller && canEdit ? (
+        <section className="panel form-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Declarative Style Skill</p>
+              <h2>安装纯声明式风格包</h2>
+            </div>
+          </div>
+          <form className="stack-form" onSubmit={installStyleSkill}>
+            <p className="form-note">
+              风格包只保存写作规则、平台差异和示例，不执行代码或访问外部工具。
+              slug 与版本组合不可覆盖；更新风格请安装新版本。
+            </p>
+            <label>Manifest JSON
+              <textarea
+                name="manifest"
+                className="skill-manifest"
+                required
+                defaultValue={JSON.stringify(STYLE_SKILL_EXAMPLE, null, 2)}
+              />
+            </label>
+            <div className="form-actions">
+              <Button type="submit" busy={busyId === "install-skill"}>
+                校验并安装
+              </Button>
+              <Button
+                type="button"
+                kind="ghost"
+                onClick={() => setShowSkillInstaller(false)}
+              >
+                取消
+              </Button>
+            </div>
+          </form>
+        </section>
       ) : null}
       {showForm ? (
         <section className="panel form-panel">
@@ -1491,6 +2452,108 @@ function CampaignsView({
               <label>内容语气<input name="tone" defaultValue={editingCampaign?.brief.tone || "清晰、可信、不夸大承诺"} /></label>
               <label>主要城市<input name="city" defaultValue={editingCampaign?.brief.city || "北京"} /></label>
             </div>
+            <div className="form-grid">
+              <label>写作风格 Skill
+                <select
+                  name="style_skill_id"
+                  defaultValue={editingCampaign?.brief.style_skill_id || "builtin:editorial"}
+                >
+                  {styleSkills.map((skill) => (
+                    <option
+                      key={skill.id}
+                      value={skill.id}
+                      disabled={skill.status !== "enabled"}
+                    >
+                      {skill.manifest.name} · v{skill.manifest.version}
+                      {skill.source === "workspace" ? " · 已安装" : ""}
+                    </option>
+                  ))}
+                </select>
+                <small>运行时会冻结版本与 SHA-256，不受之后修改影响</small>
+              </label>
+              <label>生成深度
+                <select
+                  name="quality_profile"
+                  defaultValue={editingCampaign?.brief.quality_profile || "deep"}
+                >
+                  <option value="deep">深度创作 · 审核不达标自动改写一次</option>
+                  <option value="standard">标准创作 · 生成后只评审不改写</option>
+                </select>
+              </label>
+            </div>
+            <label>本次风格补充
+              <textarea
+                name="style_notes"
+                defaultValue={editingCampaign?.brief.style_notes || ""}
+                placeholder="例如：像长期居住在北京的编辑，克制、有细节，不使用网络热梗"
+              />
+              <small>这是本活动补充规则，不会修改已安装 Skill</small>
+            </label>
+            <fieldset className="media-source-fieldset">
+              <legend>封面怎么准备</legend>
+              <p className="field-help">
+                请选择本活动的默认方式。这不是强制上传：内容审核通过后，仍可在素材中心针对单条封面切换路线。
+              </p>
+              <div className="media-source-grid">
+                {([
+                  {
+                    value: "manual",
+                    title: "人工上传",
+                    description: "使用你有权发布的品牌图、实拍图或设计稿。",
+                    badge: "随时可用",
+                  },
+                  {
+                    value: "generate",
+                    title: "AI 生成",
+                    description: "根据内容 Agent 产出的视觉提示词生成封面。",
+                    badge: mediaCapabilities.image_generation_available ? "已配置" : "当前未配置",
+                  },
+                  {
+                    value: "search",
+                    title: "开放图库",
+                    description: "检索候选图，人工核验作者、许可和署名后选用。",
+                    badge: mediaCapabilities.image_search_available ? "已配置" : "当前未配置",
+                  },
+                  {
+                    value: "hybrid",
+                    title: "图库 + AI",
+                    description: "同时准备两类候选，最后由你明确选定。",
+                    badge: mediaCapabilities.image_generation_available && mediaCapabilities.image_search_available
+                      ? "已配置"
+                      : "部分未配置",
+                  },
+                ] as const).map((option) => (
+                  <label
+                    className={`media-source-option ${imageSource === option.value ? "selected" : ""}`}
+                    key={option.value}
+                  >
+                    <input
+                      type="radio"
+                      name="image_source"
+                      value={option.value}
+                      checked={imageSource === option.value}
+                      onChange={() => setImageSource(option.value)}
+                      required
+                    />
+                    <span>
+                      <strong>{option.title}</strong>
+                      <small>{option.description}</small>
+                    </span>
+                    <b>{option.badge}</b>
+                  </label>
+                ))}
+              </div>
+              {!imageSource ? (
+                <small className="field-prompt">请选择一种默认封面来源后再保存活动。</small>
+              ) : null}
+            </fieldset>
+            <label>图片搜索词（选择开放图库时使用，可选）
+              <input
+                name="image_search_query"
+                defaultValue={editingCampaign?.brief.image_search_query || ""}
+                placeholder="留空则由内容 Agent 结合主题自动生成搜索词"
+              />
+            </label>
             <label>产品事实<input name="product_facts" defaultValue={editingCampaign?.brief.product_facts?.join("，")} placeholder="已确认的功能、服务范围或业务事实" /><small>使用逗号分隔，生成和审核只以这些事实为依据</small></label>
             <div className="form-grid">
               <label>必含信息<input name="must_include" defaultValue={editingCampaign?.brief.must_include?.join("，")} placeholder="路线确认，候选地点" /><small>使用逗号分隔</small></label>
@@ -1511,7 +2574,7 @@ function CampaignsView({
           <div className="campaign-list">
             {campaigns.map((campaign) => (
               <article key={campaign.id} className="campaign-row">
-                <div className="campaign-index">{String(campaigns.indexOf(campaign) + 1).padStart(2, "0")}</div>
+                <div className="campaign-index"><span>{String(campaigns.indexOf(campaign) + 1).padStart(2, "0")}</span><strong translate="no">{projectCode(campaign.id)}</strong></div>
                 <div className="campaign-copy">
                   <div className="row-title">
                     <h2>{campaign.name}</h2>
@@ -1521,18 +2584,25 @@ function CampaignsView({
                   <div className="meta-row">
                     <span>{campaign.product_name}</span>
                     <span>{campaign.platforms.map((item) => PLATFORM[item]).join(" / ")}</span>
+                    <span>
+                      {styleSkills.find((skill) => (
+                        skill.id === (campaign.brief.style_skill_id || "builtin:editorial")
+                      ))?.manifest.name || "专业社媒编辑"}
+                    </span>
+                    <span>{campaign.brief.quality_profile === "standard" ? "标准创作" : "深度创作"}</span>
                     <span>{formatDate(campaign.updated_at)}</span>
                   </div>
+                  {activeCampaignRun(campaign.id) ? (
+                    <GenerationProgress run={activeCampaignRun(campaign.id)!} />
+                  ) : null}
                   {expandedCampaignId === campaign.id ? (
                     <section className="run-history" aria-label={`${campaign.name} 的生成记录`}>
                       <div className="run-history-heading">
                         <strong>最近生成记录</strong>
                         <span>最多展示 5 个批次</span>
                       </div>
-                      {busyId === `runs-${campaign.id}` ? (
-                        <p className="run-history-empty">正在读取生成证据…</p>
-                      ) : (runsByCampaign[campaign.id] || []).length ? (
-                        (runsByCampaign[campaign.id] || []).map((runItem) => (
+                      {campaignRuns(campaign.id).length ? (
+                        campaignRuns(campaign.id).map((runItem) => (
                           <RunEvidence key={runItem.id} run={runItem} />
                         ))
                       ) : (
@@ -1546,11 +2616,11 @@ function CampaignsView({
                     <>
                       <Button
                         kind="secondary"
-                        busy={busyId === `run-${campaign.id}`}
+                        busy={(generation.busy && generation.pending?.campaignId === campaign.id) || Boolean(activeCampaignRun(campaign.id))}
                         onClick={() => void run(campaign)}
-                        disabled={campaign.status === "archived"}
+                        disabled={generation.blocked || campaign.status === "archived" || Boolean(activeCampaignRun(campaign.id))}
                       >
-                        生成内容
+                        {activeCampaignRun(campaign.id) ? "生成进行中…" : "生成内容"}
                       </Button>
                       <button type="button" onClick={() => openEdit(campaign)}>编辑 Brief</button>
                       <button
@@ -1569,8 +2639,7 @@ function CampaignsView({
                   ) : null}
                   <button
                     type="button"
-                    disabled={busyId === `runs-${campaign.id}`}
-                    onClick={() => void toggleRuns(campaign)}
+                    onClick={() => toggleRuns(campaign)}
                   >
                     {expandedCampaignId === campaign.id ? "收起记录" : "生成记录"}
                   </button>
@@ -1586,32 +2655,79 @@ function CampaignsView({
   );
 }
 
+function reviewFormValue(form: HTMLFormElement) {
+  const fields = new FormData(form);
+  const layout = JSON.parse(String(fields.get("layout_json") || "{}"));
+  if (!layout || typeof layout !== "object" || Array.isArray(layout)) {
+    throw new Error("平台排版必须是 JSON 对象");
+  }
+  return {
+    title: String(fields.get("title") ?? ""),
+    body: String(fields.get("body") ?? ""),
+    hashtags: String(fields.get("hashtags") ?? "").split(/[，,\s]/)
+      .map((item) => item.replace(/^#/, "").trim()).filter(Boolean),
+    call_to_action: String(fields.get("call_to_action") ?? ""),
+    layout_json: layout,
+  };
+}
+
+function reviewFormDirty(form: HTMLFormElement | null, item: Content | undefined): boolean {
+  if (!form || !item) return false;
+  try {
+    return Object.entries(reviewFormValue(form)).some(([key, value]) =>
+      JSON.stringify(value) !== JSON.stringify(item[key as keyof Content]));
+  } catch {
+    return true;
+  }
+}
+
 function ReviewView({
+  campaigns,
   contents,
   role,
   onChanged,
   flash,
+  registerLeaveGuard,
 }: {
+  campaigns: Campaign[];
   contents: Content[];
   role: string;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
+  registerLeaveGuard: (guard: (() => boolean) | null) => void;
 }) {
   const reviewable = contents.filter((item) =>
     ["needs_review", "blocked"].includes(item.status),
   );
+  const campaignMap = Object.fromEntries(
+    campaigns.map((campaign) => [campaign.id, campaign]),
+  );
   const [showAll, setShowAll] = useState(false);
   const visibleContents = showAll ? contents : reviewable;
   const [selectedId, setSelectedId] = useState(reviewable[0]?.id || "");
-  const selected =
+  const liveSelection =
     visibleContents.find((item) => item.id === selectedId) ||
     visibleContents[0];
+  // Freeze the saved baseline as soon as the user edits. Polling must not
+  // remount an uncontrolled form underneath a draft or approve a newer version.
+  const [draftBase, setDraftBase] = useState<Content | null>(null);
+  const selected = draftBase ?? liveSelection;
+  const latest = contents.find((item) => item.id === selected?.id);
+  const remoteChanged = Boolean(selected && latest && (latest.version > selected.version
+    || (latest.version === selected.version && latest.status !== selected.status)));
+  const formRef = useRef<HTMLFormElement>(null);
+  const actionInFlight = useRef(false);
+  const [dirty, setDirty] = useState(false);
+  const [formEpoch, setFormEpoch] = useState(0);
+  const [warningAccepted, setWarningAccepted] = useState(false);
+  const [reviewReason, setReviewReason] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [revisionState, setRevisionState] = useState<{
     key: string;
     items: ContentRevision[];
-  }>({ key: "", items: [] });
+    evidence: ReviewEvidence[];
+  }>({ key: "", items: [], evidence: [] });
   const canEdit = roleAtLeast(role, "editor");
   const canReview = roleAtLeast(role, "reviewer");
   const needsDecision = Boolean(
@@ -1621,18 +2737,47 @@ function ReviewView({
   const revisionKey = selected ? `${selected.id}:${selected.version}` : "";
   const revisions =
     revisionState.key === revisionKey ? revisionState.items : [];
+  const evidence = revisionState.key === revisionKey ? revisionState.evidence : [];
   const revisionsLoading = Boolean(revisionKey && revisionState.key !== revisionKey);
+  const modelCurrent = selected?.review_json.model_review_current === true;
+  const modelReview = modelCurrent && selected?.review_json.model_review
+    && typeof selected.review_json.model_review === "object"
+    ? selected.review_json.model_review as Record<string, unknown>
+    : {};
+  const ruleReview = selected?.review_json.rule_review as Record<string, unknown> | undefined;
+  const reviewWarnings = [
+    ruleReview?.passed !== true ? "当前版本的本地规则未全部通过。" : "",
+    !modelCurrent ? "AI 审核缺失、未绑定版本或已过期；保存不会自动调用收费模型。" : "",
+    modelCurrent && (modelReview.passed !== true || modelReview.risk_level === "high")
+      ? "当前版本 AI 审核未通过或标为高风险。" : "",
+  ].filter(Boolean);
+  const warningsConfirmed = !reviewWarnings.length
+    || (warningAccepted && Array.from(reviewReason.trim()).length >= 8);
+  const qualityScores = modelReview.scores
+    && typeof modelReview.scores === "object"
+    ? Object.entries(modelReview.scores as Record<string, unknown>)
+    : [];
+  const styleEvidence = selected?.generation_json.style_skill
+    && typeof selected.generation_json.style_skill === "object"
+    ? selected.generation_json.style_skill as Record<string, unknown>
+    : {};
 
   useEffect(() => {
     if (!selected?.id) return;
     let active = true;
-    api<ContentRevision[]>(`/contents/${selected.id}/revisions`)
-      .then((items) => {
+    Promise.all([
+      apiAllPages<ContentRevision>(`/contents/${selected.id}/revisions`),
+      apiAllPages<ReviewEvidence>(`/contents/${selected.id}/review-evidence`),
+    ]).then(([page, reviewPage]) => {
         if (active) {
           setRevisionState({
             key: `${selected.id}:${selected.version}`,
-            items,
+            items: page.items,
+            evidence: reviewPage.items,
           });
+          if (page.truncated || reviewPage.truncated) {
+            setError("修订或审核记录已达到安全加载上限 2000 条，请联系管理员导出完整历史。");
+          }
         }
       })
       .catch((caught) => {
@@ -1641,65 +2786,121 @@ function ReviewView({
     return () => {
       active = false;
     };
-  }, [selected?.id, selected?.version]);
+  }, [selected?.id, selected?.version, selected?.status, formEpoch]);
+
+  const confirmLeave = useCallback(() => {
+    if (actionInFlight.current) {
+      setError("正在保存或审核，请等待回执后再切换。");
+      return false;
+    }
+    return !canEdit || !reviewFormDirty(formRef.current, selected)
+      || window.confirm("有未保存的内容修改。放弃这些修改并离开吗？");
+  }, [selected, canEdit]);
+
+  useEffect(() => {
+    registerLeaveGuard(confirmLeave);
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (actionInFlight.current || (canEdit && reviewFormDirty(formRef.current, selected))) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => {
+      registerLeaveGuard(null);
+      window.removeEventListener("beforeunload", beforeUnload);
+    };
+  }, [confirmLeave, registerLeaveGuard, selected, canEdit]);
+
+  function chooseContent(id: string, all = showAll) {
+    if (!confirmLeave()) return;
+    setShowAll(all);
+    setSelectedId(id);
+    setDraftBase(null);
+    setDirty(false);
+    setWarningAccepted(false);
+    setReviewReason("");
+    setError("");
+  }
+
+  function adoptSaved(item: Content) {
+    setDraftBase(item);
+    setSelectedId(item.id);
+    setFormEpoch((value) => value + 1);
+    setDirty(false);
+    setWarningAccepted(false);
+    setReviewReason("");
+  }
+
+  async function reloadSaved() {
+    if (!selected || !confirmLeave()) return;
+    actionInFlight.current = true;
+    setBusy("reload");
+    setError("");
+    try {
+      adoptSaved(await api<Content>(`/contents/${selected.id}`));
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      actionInFlight.current = false;
+      setBusy("");
+    }
+  }
 
   async function decide(decision: "approve" | "reject") {
-    if (!selected) return;
+    if (!selected || actionInFlight.current) return;
+    if (reviewFormDirty(formRef.current, selected) || remoteChanged) {
+      setError("请先保存当前修改，并确认没有版本冲突后再审核。");
+      return;
+    }
+    if (decision === "approve" && !warningsConfirmed) return;
+    actionInFlight.current = true;
     setBusy(decision);
     setError("");
     try {
       const reason =
         decision === "approve"
-          ? "人工确认事实、表达与平台格式"
+          ? reviewReason.trim() || "人工确认事实、表达与平台格式"
           : window.prompt("请输入驳回原因") || "";
       if (decision === "reject" && !reason) return;
-      await api(`/contents/${selected.id}/review`, {
+      const reviewed = await api<Content>(`/contents/${selected.id}/review`, {
         method: "POST",
-        body: { decision, reason, expected_version: selected.version },
+        body: { decision, reason, expected_version: selected.version,
+          acknowledge_review_warnings: warningAccepted },
       });
-      flash(decision === "approve" ? "内容已通过，素材任务已创建" : "内容已驳回");
-      setSelectedId("");
+      adoptSaved(reviewed);
+      flash(decision === "approve" ? "内容已通过，素材已进入准备流程" : "内容已驳回");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
     } finally {
+      actionInFlight.current = false;
       setBusy("");
     }
   }
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selected) return;
+    if (!selected || actionInFlight.current || remoteChanged) return;
+    actionInFlight.current = true;
     setBusy("save");
-    const form = new FormData(event.currentTarget);
+    setError("");
     try {
-      const layoutJson = JSON.parse(String(form.get("layout_json") || "{}"));
-      if (
-        !layoutJson ||
-        typeof layoutJson !== "object" ||
-        Array.isArray(layoutJson)
-      ) {
-        throw new Error("平台排版必须是 JSON 对象");
-      }
-      await api(`/contents/${selected.id}`, {
+      const saved = await api<Content>(`/contents/${selected.id}`, {
         method: "PATCH",
         body: {
           expected_version: selected.version,
-          title: form.get("title"),
-          body: form.get("body"),
-          hashtags: String(form.get("hashtags") || "")
-            .split(/[，,\s]/)
-            .map((item) => item.replace(/^#/, "").trim())
-            .filter(Boolean),
-          call_to_action: form.get("call_to_action"),
-          layout_json: layoutJson,
+          ...reviewFormValue(event.currentTarget),
         },
       });
-      flash("内容已保存为新版本，需要重新审核");
+      adoptSaved(saved);
+      flash(saved.version === selected.version ? "内容没有变化，已保留原版本" : "内容已保存为新版本，需要重新审核");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
     } finally {
+      actionInFlight.current = false;
       setBusy("");
     }
   }
@@ -1714,16 +2915,14 @@ function ReviewView({
         action={
           <Button
             kind="secondary"
-            onClick={() => {
-              setShowAll((value) => !value);
-              setSelectedId("");
-            }}
+            disabled={Boolean(busy)}
+            onClick={() => chooseContent("", !showAll)}
           >
             {showAll ? `只看待处理（${reviewable.length}）` : `查看全部内容（${contents.length}）`}
           </Button>
         }
       />
-      {error ? <p className="inline-error">{error}</p> : null}
+      {error ? <p className="inline-error" role="alert">{error}</p> : null}
       {!canEdit ? (
         <p className="permission-note">当前为只读权限，可查看内容、校验结果与版本历史。</p>
       ) : canEdit && !canReview ? (
@@ -1742,25 +2941,48 @@ function ReviewView({
               <button
                 key={item.id}
                 className={selected.id === item.id ? "active" : ""}
-                onClick={() => setSelectedId(item.id)}
+                disabled={Boolean(busy)}
+                onClick={() => { if (item.id !== selected.id) chooseContent(item.id); }}
               >
                 <span className="platform-mark">{(PLATFORM[item.platform] || item.platform).slice(0, 1)}</span>
-                <span><strong>{item.title}</strong><small>{PLATFORM[item.platform]} · v{item.version}</small></span>
+                <span className="review-item-copy">
+                  <ProjectIdentity campaign={campaignMap[item.campaign_id]} compact />
+                  <strong className="review-content-title">{item.title}</strong>
+                  <small>{PLATFORM[item.platform]} · v{item.version}</small>
+                </span>
                 <StatusBadge value={item.status} />
               </button>
             ))}
           </section>
           <section className="panel review-editor">
             <div className="panel-heading">
-              <div><p className="eyebrow">{PLATFORM[selected.platform]} · v{selected.version}</p><h2>编辑与确认</h2></div>
+              <div>
+                <ProjectIdentity campaign={campaignMap[selected.campaign_id]} contentTitle={selected.title} compact />
+                <p className="eyebrow">{PLATFORM[selected.platform]} · v{selected.version}</p>
+                <h2>编辑与确认</h2>
+              </div>
               <StatusBadge value={selected.status} />
             </div>
-            <form className="stack-form" onSubmit={save} key={`${selected.id}-${selected.version}`}>
-              <label>标题<input name="title" defaultValue={selected.title} disabled={!canEdit} /></label>
-              <label>正文<textarea className="content-textarea" name="body" defaultValue={selected.body} disabled={!canEdit} /></label>
+            <div aria-live="polite">
+              {dirty ? <p className="permission-note">有未保存修改，请先保存后再审核。</p> : null}
+              {remoteChanged ? <p className="inline-error">服务器上的版本或审核状态已变化。当前输入已保留，请核对后重新载入。</p> : null}
+            </div>
+            <Button type="button" kind="ghost" busy={busy === "reload"} disabled={Boolean(busy)} onClick={() => void reloadSaved()}>重新载入当前版本</Button>
+            <form className="stack-form" ref={formRef} onSubmit={save} key={`${selected.id}-${selected.version}-${formEpoch}`}
+              aria-busy={Boolean(busy)} onChange={(event) => {
+                const target = event.target;
+                if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
+                const name = target.name;
+                if (!["title", "body", "hashtags", "call_to_action", "layout_json"].includes(name)) return;
+                setDraftBase(selected);
+                setDirty(reviewFormDirty(event.currentTarget, selected));
+                setWarningAccepted(false);
+              }}>
+              <label>标题<input name="title" defaultValue={selected.title} disabled={!canEdit || Boolean(busy)} /></label>
+              <label>正文<textarea className="content-textarea" name="body" defaultValue={selected.body} disabled={!canEdit || Boolean(busy)} /></label>
               <div className="form-grid">
-                <label>话题标签<input name="hashtags" defaultValue={selected.hashtags.join("，")} disabled={!canEdit} /></label>
-                <label>行动引导<input name="call_to_action" defaultValue={selected.call_to_action} disabled={!canEdit} /></label>
+                <label>话题标签<input name="hashtags" defaultValue={selected.hashtags.join("，")} disabled={!canEdit || Boolean(busy)} /></label>
+                <label>行动引导<input name="call_to_action" defaultValue={selected.call_to_action} disabled={!canEdit || Boolean(busy)} /></label>
               </div>
               <label>
                 平台排版 / 镜头脚本
@@ -1768,14 +2990,57 @@ function ReviewView({
                   className="layout-textarea"
                   name="layout_json"
                   defaultValue={JSON.stringify(selected.layout_json, null, 2)}
-                  disabled={!canEdit}
+                  disabled={!canEdit || Boolean(busy)}
                 />
                 <small>结构会随内容版本保存，并用于短视频分镜或人工投放包。</small>
               </label>
-              <div className="review-summary">
-                <strong>自动校验记录</strong>
-                <pre>{JSON.stringify(selected.review_json, null, 2)}</pre>
+              <div className="review-summary quality-summary">
+                <div className="quality-heading">
+                  <div>
+                    <strong>内容 Agent 质量评审</strong>
+                    <span>
+                      风格 {String(styleEvidence.slug || "editorial")} ·
+                      {Number(selected.generation_json.revision_count || 0)} 次定向改写
+                    </span>
+                  </div>
+                  <b>{modelCurrent && typeof selected.review_json.quality_score === "number"
+                    ? `${selected.review_json.quality_score.toFixed(1)} / 10` : "当前版本尚无有效 AI 评分"}</b>
+                </div>
+                <div className="quality-score-grid">
+                  {qualityScores.map(([name, value]) => (
+                    <span key={name}>
+                      <small>{name}</small>
+                      <strong>{Number(value || 0).toFixed(1)}</strong>
+                    </span>
+                  ))}
+                </div>
+                {Array.isArray(modelReview.issues) && modelReview.issues.length ? (
+                  <ul>
+                    {modelReview.issues.map((issue) => (
+                      <li key={String(issue)}>{String(issue)}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                <details>
+                  <summary>查看完整自动校验 JSON</summary>
+                  <pre>{JSON.stringify(selected.review_json, null, 2)}</pre>
+                </details>
               </div>
+              {reviewWarnings.length ? (
+                <section className="review-warning" aria-label="本版本审核提示">
+                  <strong>通过前需要人工核验</strong>
+                  <ul>{reviewWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+                  <p>旧评审只作为历史证据，不代表当前稿件已通过。规则例外不会因勾选而变成自动校验通过。</p>
+                  {canReview && needsDecision ? <>
+                    <label>人工核验理由<textarea name="review_reason" value={reviewReason} maxLength={2000}
+                      onChange={(event) => { setReviewReason(event.target.value); setWarningAccepted(false); }}
+                      disabled={Boolean(busy) || dirty || remoteChanged} placeholder="说明已核对的事实、依据和接受例外的原因（至少 8 个字符）" /></label>
+                    <label className="review-warning-ack"><input type="checkbox" checked={warningAccepted}
+                      onChange={(event) => setWarningAccepted(event.target.checked)} disabled={Boolean(busy) || dirty || remoteChanged} />
+                      我已核验当前版本并明确接受上述审核提示</label>
+                  </> : null}
+                </section>
+              ) : null}
               <section className="revision-history" aria-label="内容版本历史">
                 <div className="revision-heading">
                   <strong>版本历史</strong>
@@ -1799,13 +3064,24 @@ function ReviewView({
                 ))}
                 {!revisionsLoading && !revisions.length ? <p>暂无历史版本。</p> : null}
               </section>
+              <section className="revision-history" aria-label="审核证据历史">
+                <div className="revision-heading"><strong>审核证据历史</strong><span>{evidence.length} 条记录</span></div>
+                <p>每条记录绑定当时的版本和内容指纹；旧版或未绑定的模型结果不可用于当前自动评分。</p>
+                {evidence.map((entry) => <details key={entry.id}>
+                  <summary>v{entry.content_version} · {({ generated: "生成评审", superseded: "编辑前原始证据", edited: "编辑后本地复查",
+                    before_human_review: "人工决定前原始证据", human_approve: "人工通过", human_reject: "人工驳回" } as Record<string, string>)[entry.event] || entry.event}
+                    <time>{formatDate(entry.created_at)}</time></summary>
+                  <p>当时的模型证据状态：{entry.model_binding}</p><pre>{JSON.stringify(entry.snapshot_json, null, 2)}</pre>
+                </details>)}
+                {!evidence.length ? <p>暂无已归档审核证据；旧稿将在下一次编辑或人工决定时保留原始记录。</p> : null}
+              </section>
               {canEdit || canReview ? (
                 <div className="form-actions split-actions">
-                  {canEdit ? <Button type="submit" kind="ghost" busy={busy === "save"}>保存修改</Button> : <span />}
+                  {canEdit ? <Button type="submit" kind="ghost" busy={busy === "save"} disabled={Boolean(busy) || remoteChanged || !dirty}>保存修改</Button> : <span />}
                   {canReview && needsDecision ? (
                     <div>
-                      <Button type="button" kind="danger" busy={busy === "reject"} onClick={() => void decide("reject")}>驳回</Button>
-                      <Button type="button" busy={busy === "approve"} onClick={() => void decide("approve")}>确认通过</Button>
+                      <Button type="button" kind="danger" busy={busy === "reject"} disabled={Boolean(busy) || dirty || remoteChanged} onClick={() => void decide("reject")}>驳回</Button>
+                      <Button type="button" busy={busy === "approve"} disabled={Boolean(busy) || dirty || remoteChanged || !warningsConfirmed} onClick={() => void decide("approve")}>确认通过</Button>
                     </div>
                   ) : null}
                 </div>
@@ -1829,15 +3105,79 @@ function ReviewView({
   );
 }
 
+function ProviderInvocationEvidence({
+  attempts,
+  loading,
+  error,
+  truncated,
+  emptyMessage,
+}: {
+  attempts: ProviderInvocationAttempt[];
+  loading: boolean;
+  error: string;
+  truncated: boolean;
+  emptyMessage: string;
+}) {
+  return (
+    <div className="provider-ledger" aria-live="polite">
+      <div className="provider-ledger-heading">
+        <div>
+          <strong>ContentFlow 已保存的调用证据</strong>
+          <p>这里只保存请求/响应摘要、供应商请求号和用量，不保存提示词、正文、媒体地址或密钥。</p>
+        </div>
+        {loading ? <span className="button-spinner" aria-hidden="true" /> : null}
+      </div>
+      {error ? (
+        <p className="inline-error">调用证据读取失败：{error}</p>
+      ) : attempts.length ? (
+        <div className="provider-ledger-list">
+          {truncated ? (
+            <p className="pagination-warning">仅显示最近 1000 条调用证据，请使用 API 分页继续取证。</p>
+          ) : null}
+          {attempts.map((attempt) => (
+            <article className="provider-ledger-row" key={attempt.id}>
+              <div>
+                <strong>{attempt.operation}</strong>
+                <span>{attempt.provider_name} · {attempt.model_name} · 第 {attempt.attempt_number} 次</span>
+              </div>
+              <StatusBadge value={attempt.status} />
+              <dl>
+                <div><dt>请求时间</dt><dd>{formatDateTime(attempt.started_at)}</dd></div>
+                <div><dt>供应商请求号</dt><dd><code>{attempt.provider_request_id || "未返回"}</code></dd></div>
+                <div><dt>请求摘要</dt><dd><code>{attempt.request_sha256.slice(0, 16)}…</code></dd></div>
+                <div><dt>响应摘要</dt><dd><code>{attempt.response_sha256 ? `${attempt.response_sha256.slice(0, 16)}…` : "未记录"}</code></dd></div>
+                <div><dt>响应大小</dt><dd>{attempt.response_bytes == null ? "未报告" : formatBytes(attempt.response_bytes)}</dd></div>
+                <div><dt>Token</dt><dd>{attempt.total_tokens ?? "未报告"}</dd></div>
+              </dl>
+              <p className="provider-ledger-note">
+                {attempt.idempotency_key_sent
+                  ? "已发送 Idempotency-Key；这只证明请求头已发送，不代表供应商确认支持幂等。"
+                  : "此调用未发送 Idempotency-Key；重试安全性必须结合具体操作和领域状态判断。"}
+              </p>
+            </article>
+          ))}
+        </div>
+      ) : loading ? null : (
+        <p className="provider-ledger-empty">{emptyMessage}</p>
+      )}
+    </div>
+  );
+}
+
+
 function AssetsView({
+  campaigns,
   assets,
   contents,
+  mediaCapabilities,
   role,
   onChanged,
   flash,
 }: {
+  campaigns: Campaign[];
   assets: Asset[];
   contents: Content[];
+  mediaCapabilities: MediaCapabilities;
   role: string;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
@@ -1845,11 +3185,169 @@ function AssetsView({
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
+  const [uploadTargetId, setUploadTargetId] = useState("");
+  const [uploadKind, setUploadKind] = useState("image");
+  const [sourceBusyId, setSourceBusyId] = useState("");
+  const [evidenceAssetId, setEvidenceAssetId] = useState("");
+  const [providerInvocations, setProviderInvocations] = useState<ProviderInvocationAttempt[]>([]);
+  const [providerInvocationsLoading, setProviderInvocationsLoading] = useState(false);
+  const [providerInvocationsError, setProviderInvocationsError] = useState("");
+  const [providerInvocationsTruncated, setProviderInvocationsTruncated] = useState(false);
+  const providerEvidenceRequest = useRef(0);
   const canEdit = roleAtLeast(role, "editor");
+  const canReview = roleAtLeast(role, "reviewer");
   const contentMap = useMemo(
     () => Object.fromEntries(contents.map((item) => [item.id, item.title])),
     [contents],
   );
+  const contentById = useMemo(
+    () => Object.fromEntries(contents.map((item) => [item.id, item])),
+    [contents],
+  );
+  const campaignMap = useMemo(
+    () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, campaign])),
+    [campaigns],
+  );
+  const contentVersionMap = useMemo(
+    () => Object.fromEntries(contents.map((item) => [item.id, item.version])),
+    [contents],
+  );
+  const uploadTargets = useMemo(
+    () => assets.filter((asset) => (
+      ["awaiting_upload", "planned", "failed"].includes(asset.status)
+      && Number(asset.metadata_json.content_version || 1)
+        === contentVersionMap[asset.content_item_id || ""]
+    )),
+    [assets, contentVersionMap],
+  );
+  const uploadTarget = uploadTargets.find((asset) => asset.id === uploadTargetId);
+  const systemProcessing = assets.filter((asset) =>
+    ["queued", "generating", "processing"].includes(asset.status),
+  );
+  const awaitingUpload = assets.filter((asset) => asset.status === "awaiting_upload");
+  const awaitingSelection = assets.filter((asset) => asset.status === "awaiting_selection");
+  const sourceChoiceAssets = assets.filter((asset) => (
+    asset.kind === "image"
+    && ["failed", "awaiting_upload", "awaiting_selection"].includes(asset.status)
+    && contentById[asset.content_item_id || ""]?.status === "approved"
+    && Number(asset.metadata_json.content_version || 1)
+      === contentVersionMap[asset.content_item_id || ""]
+    && !asset.metadata_json.candidate_group
+  ));
+  const sourceChoiceIds = new Set(sourceChoiceAssets.map((asset) => asset.id));
+  const otherAwaitingUpload = awaitingUpload.filter((asset) => !sourceChoiceIds.has(asset.id));
+  const otherAwaitingSelection = awaitingSelection.filter((asset) => !sourceChoiceIds.has(asset.id));
+  const needsAction = sourceChoiceAssets.length
+    + otherAwaitingUpload.length
+    + otherAwaitingSelection.length;
+  const readyAssets = assets.filter((asset) => asset.status === "ready");
+  const evidenceAsset = assets.find((asset) => asset.id === evidenceAssetId);
+  const campaignForAsset = (asset: Asset) => {
+    const content = contentById[asset.content_item_id || ""];
+    return content ? campaignMap[content.campaign_id] : undefined;
+  };
+  const selectedUploadKind = uploadTarget?.kind || uploadKind;
+  const uploadAccept = selectedUploadKind === "image"
+    ? "image/png,image/jpeg,image/webp"
+    : selectedUploadKind === "video_storyboard"
+      ? "application/json,.json"
+      : "video/*";
+  function openUpload(targetId = "") {
+    setUploadTargetId(targetId);
+    setUploadKind("image");
+    setShowUpload(true);
+    window.setTimeout(() => {
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      document.getElementById("asset-upload-form")?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+    }, 0);
+  }
+  function sourceOf(asset: Asset): Exclude<MediaSource, "hybrid"> {
+    const recorded = asset.metadata_json.media_source;
+    if (recorded === "manual" || recorded === "generate" || recorded === "search") {
+      return recorded;
+    }
+    if (["manual", "manual-upload"].includes(asset.provider)) return "manual";
+    if (asset.provider === "openverse") return "search";
+    return "generate";
+  }
+  async function changeSource(
+    asset: Asset,
+    source: Exclude<MediaSource, "hybrid">,
+  ) {
+    if (sourceOf(asset) === source) return;
+    if (
+      asset.status === "awaiting_selection"
+      && !window.confirm("切换路线会清除当前图库候选，确认继续？")
+    ) {
+      return;
+    }
+    setSourceBusyId(`${asset.id}-${source}`);
+    setError("");
+    try {
+      await api(`/assets/${asset.id}/source`, {
+        method: "POST",
+        body: { source },
+      });
+      flash(
+        source === "manual"
+          ? "已改为人工上传，你可以继续选择本机文件"
+          : source === "search"
+            ? "已改用开放图库，正在检索候选图片"
+            : "已改用 AI 生成，素材任务已经入队",
+      );
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setSourceBusyId("");
+    }
+  }
+  function sourceChooser(asset: Asset) {
+    const current = sourceOf(asset);
+    const options: Array<{
+      source: Exclude<MediaSource, "hybrid">;
+      label: string;
+      available: boolean;
+    }> = [
+      { source: "manual", label: "人工上传", available: true },
+      {
+        source: "generate",
+        label: mediaCapabilities.image_generation_available ? "AI 生成" : "AI 生成 · 未配置",
+        available: mediaCapabilities.image_generation_available,
+      },
+      {
+        source: "search",
+        label: mediaCapabilities.image_search_available ? "开放图库" : "开放图库 · 未配置",
+        available: mediaCapabilities.image_search_available,
+      },
+    ];
+    return (
+      <div className="asset-source-chooser">
+        <span>这条封面怎么准备</span>
+        <div role="group" aria-label="切换封面来源">
+          {options.map((option) => (
+            <Button
+              type="button"
+              kind={current === option.source ? "secondary" : "ghost"}
+              key={option.source}
+              disabled={current === option.source || !option.available}
+              busy={sourceBusyId === `${asset.id}-${option.source}`}
+              title={!option.available ? "需要管理员先配置对应素材服务" : undefined}
+              onClick={() => void changeSource(asset, option.source)}
+            >
+              {option.label}
+            </Button>
+          ))}
+        </div>
+        {!mediaCapabilities.image_generation_available ? (
+          <small>AI 生成入口已保留；配置真实图片生成 Provider 后即可选择。</small>
+        ) : null}
+      </div>
+    );
+  }
   async function retry(asset: Asset) {
     try {
       await api(`/assets/${asset.id}/retry`, { method: "POST" });
@@ -1859,6 +3357,38 @@ function AssetsView({
       setError(messageOf(caught));
     }
   }
+  async function selectCandidate(
+    asset: Asset,
+    candidate?: ImageSearchCandidate,
+  ) {
+    const needsLicenseCheck = asset.provider === "openverse";
+    if (
+      needsLicenseCheck
+      && !window.confirm(
+        "请先打开原始落地页核验作者、许可和署名要求。确认已核验并选用这张图片？",
+      )
+    ) {
+      return;
+    }
+    try {
+      await api(`/assets/${asset.id}/select`, {
+        method: "POST",
+        body: {
+          candidate_id: candidate?.id || null,
+          acknowledge_license_check: needsLicenseCheck,
+        },
+      });
+      flash(
+        needsLicenseCheck
+          ? "候选图片已进入安全下载与校验队列"
+          : "图片已选用并绑定当前内容版本",
+      );
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    }
+  }
+
   async function uploadAsset(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setUploading(true);
@@ -1869,7 +3399,9 @@ function AssetsView({
       });
       event.currentTarget.reset();
       setShowUpload(false);
-      flash("人工素材已上传");
+      setUploadTargetId("");
+      setUploadKind("image");
+      flash("真实素材已上传并绑定当前内容版本");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -1878,48 +3410,324 @@ function AssetsView({
     }
   }
 
+  async function openProviderEvidence(asset: Asset) {
+    const requestId = ++providerEvidenceRequest.current;
+    setEvidenceAssetId(asset.id);
+    setProviderInvocations([]);
+    setProviderInvocationsError("");
+    setProviderInvocationsTruncated(false);
+    setProviderInvocationsLoading(true);
+    try {
+      const result = await apiAllPages<ProviderInvocationAttempt>(
+        `/assets/${asset.id}/provider-invocations`,
+        { pageLimit: 100, maxPages: 10 },
+      );
+      if (requestId !== providerEvidenceRequest.current) return;
+      setProviderInvocations(result.items);
+      setProviderInvocationsTruncated(result.truncated);
+    } catch (caught) {
+      if (requestId === providerEvidenceRequest.current) {
+        setProviderInvocationsError(messageOf(caught));
+      }
+    } finally {
+      if (requestId === providerEvidenceRequest.current) {
+        setProviderInvocationsLoading(false);
+      }
+    }
+  }
+
   return (
     <>
       <PageHeading
         eyebrow="Media"
         title="素材中心"
-        description="审核通过后才会生成素材；旧内容版本的素材会保留但不可发布。"
+        description="先看系统是否仍在处理，再只完成“等你操作”中的上传或选图；已就绪素材会自动成为发布前置条件。"
         action={canEdit ? (
-          <Button onClick={() => setShowUpload((value) => !value)}>
-            <Icon name="plus" />上传素材
+          <Button onClick={() => openUpload()}>
+            <Icon name="plus" />上传所需素材
           </Button>
         ) : undefined}
       />
       {error ? <p className="inline-error">{error}</p> : null}
       {!canEdit ? <p className="permission-note">当前为只读权限，可查看和下载已就绪素材。</p> : null}
+      {canReview && evidenceAsset ? (
+        <section className="panel" aria-labelledby="asset-provider-evidence-title">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Provider evidence</p>
+              <h2 id="asset-provider-evidence-title">素材调用证据</h2>
+              <p>{contentMap[evidenceAsset.content_item_id || ""] || "未关联内容"} · {evidenceAsset.id.slice(0, 8)}</p>
+            </div>
+            <button
+              className="button button-ghost"
+              type="button"
+              onClick={() => {
+                providerEvidenceRequest.current += 1;
+                setEvidenceAssetId("");
+                setProviderInvocations([]);
+                setProviderInvocationsError("");
+                setProviderInvocationsTruncated(false);
+              }}
+            >
+              关闭
+            </button>
+          </div>
+          <ProviderInvocationEvidence
+            attempts={providerInvocations}
+            loading={providerInvocationsLoading}
+            error={providerInvocationsError}
+            truncated={providerInvocationsTruncated}
+            emptyMessage="该素材暂无调用记录；人工上传和旧任务不会伪造 Provider 证据。"
+          />
+        </section>
+      ) : null}
+      <section className="asset-stage-grid" aria-label="素材准备阶段">
+        <article className="asset-stage-lane">
+          <span className="asset-stage-number">1</span>
+          <div><strong>系统处理中</strong><small>生成或检索会自动刷新，无需重复点击</small></div>
+          <b>{systemProcessing.length}</b>
+        </article>
+        <article className={needsAction ? "asset-stage-lane asset-stage-action" : "asset-stage-lane"}>
+          <span className="asset-stage-number">2</span>
+          <div><strong>等你操作</strong><small>先选素材路线，再上传文件或核验候选图</small></div>
+          <b>{needsAction}</b>
+        </article>
+        <article className="asset-stage-lane">
+          <span className="asset-stage-number">3</span>
+          <div><strong>已就绪</strong><small>素材已绑定当前内容版本，可以进入发布</small></div>
+          <b>{readyAssets.length}</b>
+        </article>
+      </section>
+      {systemProcessing.length ? (
+        <section className="panel asset-processing-panel" aria-live="polite">
+          <div className="panel-heading">
+            <div><p className="eyebrow">System activity</p><h2>系统正在准备素材</h2><p>页面会自动更新；离开此页不会中断任务。</p></div>
+          </div>
+          <div className="asset-processing-list">
+            {systemProcessing.map((asset) => (
+              <div className="asset-processing-row" key={asset.id}>
+                <ProjectIdentity
+                  campaign={campaignForAsset(asset)}
+                  contentTitle={contentMap[asset.content_item_id || ""]}
+                  compact
+                />
+                <div className="asset-processing-state">
+                  <span className="activity-spinner" aria-hidden="true" />
+                  <span>
+                    {asset.provider === "openverse"
+                      ? asset.metadata_json.pending_candidate_selection
+                        ? "正在下载并校验候选图片"
+                        : "正在检索候选图片"
+                      : "正在生成素材"}
+                  </span>
+                </div>
+                <div className="indeterminate-track" aria-label="处理中"><span /></div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+      {needsAction ? (
+        <section className="panel asset-action-panel">
+          <div className="panel-heading">
+            <div><p className="eyebrow">Action required</p><h2>选择素材准备方式</h2><p>人工上传不是必选项。你可以对每条封面单独选择人工上传、AI 生成或开放图库。</p></div>
+          </div>
+          <div className="asset-action-list">
+            {sourceChoiceAssets.map((asset) => {
+              const currentSource = sourceOf(asset);
+              return (
+              <article className="asset-action-card asset-source-card" key={asset.id}>
+                <ProjectIdentity
+                  campaign={campaignForAsset(asset)}
+                  contentTitle={contentMap[asset.content_item_id || ""]}
+                />
+                <div className="asset-action-copy">
+                  <strong>
+                    {asset.status === "failed"
+                      ? "当前封面路线不可用，请重新选择"
+                      : currentSource === "search"
+                        ? "图库候选已经准备好，等待你核验"
+                        : "封面尚未就绪，请选择一种准备方式"}
+                  </strong>
+                  <p>
+                    {asset.error
+                      ? `最近错误：${asset.error}`
+                      : currentSource === "manual"
+                        ? "当前选择人工上传；你也可以直接改用 AI 生成或开放图库。"
+                        : "当前选择开放图库；选用前必须核验作者、许可和署名要求。"}
+                  </p>
+                </div>
+                <div className="asset-source-actions">
+                  {canEdit ? sourceChooser(asset) : null}
+                  {canEdit && currentSource === "manual" ? (
+                    <Button onClick={() => openUpload(asset.id)}>选择文件并上传</Button>
+                  ) : null}
+                  {currentSource === "search" && asset.status === "awaiting_selection" ? (
+                    <a className="button button-primary" href={`#asset-candidates-${asset.id}`}>查看并核验候选图</a>
+                  ) : null}
+                </div>
+              </article>
+              );
+            })}
+            {otherAwaitingUpload.map((asset) => (
+              <article className="asset-action-card" key={asset.id}>
+                <ProjectIdentity
+                  campaign={campaignForAsset(asset)}
+                  contentTitle={contentMap[asset.content_item_id || ""]}
+                />
+                <div className="asset-action-copy">
+                  <strong>需要上传{asset.kind === "video" ? "真实视频" : "分镜 JSON"}</strong>
+                  <p>这个任务不是封面图片，仍需按任务要求提供对应文件。</p>
+                </div>
+                {canEdit ? <Button onClick={() => openUpload(asset.id)}>查看要求并上传</Button> : null}
+              </article>
+            ))}
+            {otherAwaitingSelection.map((asset) => (
+              <article className="asset-action-card" key={asset.id}>
+                <ProjectIdentity
+                  campaign={campaignForAsset(asset)}
+                  contentTitle={contentMap[asset.content_item_id || ""]}
+                />
+                <div className="asset-action-copy">
+                  <strong>混合路线候选等待选择</strong>
+                  <p>活动已同时准备图库与 AI 候选；核验来源后选定其中一张即可。</p>
+                </div>
+                <a className="button button-ghost" href={`#asset-candidates-${asset.id}`}>查看候选图</a>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
       {showUpload && canEdit ? (
-        <section className="panel form-panel">
-          <div className="panel-heading"><div><p className="eyebrow">Upload</p><h2>添加人工或外部 AIGC 素材</h2></div></div>
+        <section className="panel form-panel" id="asset-upload-form">
+          <div className="panel-heading"><div><p className="eyebrow">Upload</p><h2>上传真实素材</h2><p>选择明确的待办后，文件会绑定到对应项目和当前内容版本。</p></div></div>
+          <div className="upload-explainer">
+            <div><strong>为什么需要你上传</strong><span>系统无法凭空获得品牌实拍、产品图或企业授权文件。</span></div>
+            <div><strong>上传什么</strong><span>{selectedUploadKind === "image" ? "PNG、JPEG 或 WebP 的真实封面图" : selectedUploadKind === "video_storyboard" ? "合法 JSON 分镜文件" : "平台可接受的视频文件"}</span></div>
+            <div><strong>完成后会怎样</strong><span>文件校验并绑定当前内容版本，随后才能创建发布任务。</span></div>
+          </div>
           <form className="stack-form" onSubmit={uploadAsset}>
-            <label>关联内容
-              <select name="content_item_id" required defaultValue="">
-                <option value="" disabled>选择内容版本</option>
-                {contents.map((item) => <option key={item.id} value={item.id}>{PLATFORM[item.platform]} · v{item.version} · {item.title}</option>)}
+            <label>待上传任务
+              <select name="asset_id" value={uploadTargetId} onChange={(event) => setUploadTargetId(event.target.value)}>
+                <option value="">补充素材（仅在没有对应待办时使用）</option>
+                {uploadTargets.map((asset) => (
+                  <option key={asset.id} value={asset.id}>
+                    {asset.kind === "image" ? "封面图片" : asset.kind === "video" ? "视频" : "视频分镜 JSON"} · {contentMap[asset.content_item_id || ""] || "未关联"} · {STATUS[asset.status] || asset.status}
+                  </option>
+                ))}
               </select>
             </label>
-            <label>素材类型
-              <select name="kind" defaultValue="image">
-                <option value="image">图片</option>
-                <option value="video_storyboard">视频 / 分镜</option>
-              </select>
+            {!uploadTarget ? (
+              <>
+                <label>关联内容
+                  <select name="content_item_id" required defaultValue="">
+                    <option value="" disabled>选择已审核内容版本</option>
+                    {contents.filter((item) => item.status === "approved").map((item) => <option key={item.id} value={item.id}>{PLATFORM[item.platform]} · v{item.version} · {item.title}</option>)}
+                  </select>
+                </label>
+                <label>素材类型
+                  <select name="kind" value={uploadKind} onChange={(event) => setUploadKind(event.target.value)}>
+                    <option value="image">封面图片</option>
+                    <option value="video">视频</option>
+                    <option value="video_storyboard">视频分镜 JSON</option>
+                  </select>
+                </label>
+              </>
+            ) : (
+              <div className="upload-target-summary">
+                <ProjectIdentity
+                  campaign={campaignForAsset(uploadTarget)}
+                  contentTitle={contentMap[uploadTarget.content_item_id || ""]}
+                />
+                <p className="form-note">只会填充这个项目的当前版本素材任务；上传成功并通过类型校验后才允许发布。</p>
+              </div>
+            )}
+            <label>选择本机文件
+              <input name="file" type="file" accept={uploadAccept} required />
+              <small>接受：{uploadAccept.replaceAll(",", "、")}。请使用清晰、无水印且你有权发布的文件。</small>
             </label>
-            <label>文件<input name="file" type="file" accept="image/*,video/*,.json" required /></label>
-            <div className="form-actions"><Button type="submit" busy={uploading}>上传素材</Button><Button type="button" kind="ghost" onClick={() => setShowUpload(false)}>取消</Button></div>
+            <div className="form-actions"><Button type="submit" busy={uploading}>上传并绑定</Button><Button type="button" kind="ghost" onClick={() => { setShowUpload(false); setUploadTargetId(""); }}>取消</Button></div>
           </form>
         </section>
       ) : null}
+      {assets
+        .filter((asset) => asset.status === "awaiting_selection")
+        .map((asset) => {
+          const candidates = Array.isArray(asset.metadata_json.search_candidates)
+            ? asset.metadata_json.search_candidates as ImageSearchCandidate[]
+            : [];
+          return (
+            <section className="panel media-candidate-panel" id={`asset-candidates-${asset.id}`} key={asset.id}>
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Open-licensed candidates</p>
+                  <ProjectIdentity
+                    campaign={campaignForAsset(asset)}
+                    contentTitle={contentMap[asset.content_item_id || ""] || "图片候选"}
+                  />
+                  <p>
+                    搜索词：{String(asset.metadata_json.search_query || "未记录")}。
+                    Openverse 许可元数据仅作线索，选用前必须打开原始页面核验。
+                  </p>
+                </div>
+              </div>
+              <div className="media-candidate-grid">
+                {candidates.map((candidate) => (
+                  <article className="media-candidate-card" key={candidate.id}>
+                    {candidate.thumbnail_url ? (
+                      <>
+                        {/* The API restricts remote thumbnails to an exact host. */}
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={candidate.thumbnail_url}
+                          alt={candidate.title}
+                          width={320}
+                          height={180}
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                        />
+                      </>
+                    ) : (
+                      <div className="media-candidate-placeholder">无缩略图</div>
+                    )}
+                    <div>
+                      <strong>{candidate.title}</strong>
+                      <p>{candidate.creator} · {candidate.license.toUpperCase()} {candidate.license_version}</p>
+                      <div className="candidate-actions">
+                        {candidate.landing_url ? (
+                          <a href={candidate.landing_url} target="_blank" rel="noreferrer">
+                            核验原始页面
+                          </a>
+                        ) : null}
+                        {canEdit ? (
+                          <button onClick={() => void selectCandidate(asset, candidate)}>
+                            核验后选用
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          );
+        })}
       <section className="panel">
         <DataTable
-          headers={["素材", "关联内容", "生成方式", "大小", "状态", "操作"]}
+          headers={["项目 / 内容", "素材", "生成方式", "大小", "状态", "操作"]}
           rows={assets.map((asset) => [
-            asset.kind === "image" ? "营销图片" : "视频 / 分镜",
-            contentMap[asset.content_item_id || ""] || "未关联",
-            asset.provider,
+            <ProjectIdentity
+              key="project"
+              campaign={campaignForAsset(asset)}
+              contentTitle={contentMap[asset.content_item_id || ""]}
+              compact
+            />,
+            asset.kind === "image" ? "营销图片" : asset.kind === "video" ? "视频" : "视频分镜 JSON",
+            ["manual", "manual-upload"].includes(asset.provider)
+              ? "人工上传"
+              : asset.provider === "openverse"
+                ? "开放授权图库"
+                : "AI 生成",
             formatBytes(asset.size_bytes),
             <StatusBadge key="status" value={asset.status} />,
             <div className="table-actions" key="actions">
@@ -1928,8 +3736,26 @@ function AssetsView({
                   <Icon name="download" />下载
                 </button>
               ) : null}
-              {canEdit && ["failed", "planned", "stale"].includes(asset.status) ? (
-                <button onClick={() => void retry(asset)}>重新生成</button>
+              {canReview ? (
+                <button onClick={() => void openProviderEvidence(asset)}>调用证据</button>
+              ) : null}
+              {canEdit
+              && asset.status === "ready"
+              && Boolean(asset.metadata_json.candidate_optional)
+              && !Boolean(asset.metadata_json.selected) ? (
+                <button onClick={() => void selectCandidate(asset)}>选用此素材</button>
+              ) : null}
+              {Boolean(asset.metadata_json.candidate_optional)
+              && Boolean(asset.metadata_json.selected) ? (
+                <span className="selected-candidate">已选用</span>
+              ) : null}
+              {canEdit && asset.status === "awaiting_upload" ? (
+                <button onClick={() => openUpload(asset.id)}>上传真实素材</button>
+              ) : null}
+              {canEdit && !["manual", "manual-upload"].includes(asset.provider) && ["failed", "planned", "stale"].includes(asset.status) ? (
+                <button onClick={() => void retry(asset)}>
+                  {asset.provider === "openverse" ? "重新搜索" : "重新生成"}
+                </button>
               ) : null}
             </div>,
           ])}
@@ -1941,28 +3767,52 @@ function AssetsView({
 }
 
 function PublishingView({
+  scopeKey,
+  campaigns,
   publishes,
   contents,
   channels,
   role,
+  onNavigate,
   onChanged,
   flash,
 }: {
+  scopeKey: string;
+  campaigns: Campaign[];
   publishes: PublishJob[];
   contents: Content[];
   channels: Channel[];
   role: string;
+  onNavigate: (view: View) => void;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
 }) {
   const approved = contents.filter((item) => item.status === "approved");
   const [creating, setCreating] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const receiptKey = `contentflow-publication:${getApiBase()}:${scopeKey}`;
+  const [prepared, setPrepared] = useState<{ preview: PublicationPreviewData; intent: PublishIntent } | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
   const [pulling, setPulling] = useState("");
   const [cancelling, setCancelling] = useState("");
   const [reconciling, setReconciling] = useState("");
   const [scriptBusy, setScriptBusy] = useState("");
+  const [retrying, setRetrying] = useState("");
+  const [publishTiming, setPublishTiming] = useState<"immediate" | "scheduled">(
+    "immediate",
+  );
+  const [selectedContentId, setSelectedContentId] = useState("");
+  const [selectedChannelId, setSelectedChannelId] = useState("");
+  const [publishRequestId, setPublishRequestId] = useState(() =>
+    crypto.randomUUID(),
+  );
   const [error, setError] = useState("");
+  const publication = usePublicationRequest(receiptKey, async (id) => {
+    setPrepared(null); setCreating(false); setSelectedContentId(""); setSelectedChannelId("");
+    setPublishRequestId(crypto.randomUUID());
+    flash(`已取得发布任务回执 ${id}；不要重复新建任务`);
+    await onChanged();
+  }, () => { setPrepared(null); setPublishRequestId(crypto.randomUUID()); });
+  const busy = previewBusy || publication.busy;
   const [evidenceJobId, setEvidenceJobId] = useState("");
   const [evidence, setEvidence] = useState<PublishEvidence[]>([]);
   const [confirmations, setConfirmations] = useState<PublishConfirmation[]>([]);
@@ -1975,33 +3825,61 @@ function PublishingView({
     () => Object.fromEntries(contents.map((item) => [item.id, item])),
     [contents],
   );
+  const campaignMap = useMemo(
+    () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, campaign])),
+    [campaigns],
+  );
   const channelMap = useMemo(
     () => Object.fromEntries(channels.map((item) => [item.id, item])),
     [channels],
   );
-  async function schedule(event: FormEvent<HTMLFormElement>) {
+  const selectedContent = contentMap[selectedContentId];
+  const matchingChannels = selectedContent
+    ? channels.filter((item) => item.platform === selectedContent.platform)
+    : [];
+  const selectedChannel = channelMap[selectedChannelId];
+  const invalidPublishSwitch = selectedChannel?.platform === "wechat"
+    && selectedChannel.config_json.auto_publish !== undefined
+    && typeof selectedChannel.config_json.auto_publish !== "boolean";
+
+  async function createPublish(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusy(true);
+    if (publication.blocked || previewBusy) return;
+    setPreviewBusy(true);
+    setError("");
     const form = new FormData(event.currentTarget);
+    const publishNow = publishTiming === "immediate";
     try {
-      await api("/publishing/jobs", {
+      const intent = {
+        content_item_id: String(form.get("content_item_id")), channel_id: String(form.get("channel_id")),
+        delivery_mode: String(form.get("delivery_mode")) as PublishIntent["delivery_mode"], publish_now: publishNow, request_id: publishRequestId,
+        ...(publishNow ? {} : { scheduled_at: new Date(String(form.get("scheduled_at"))).toISOString() }),
+      };
+      const preview = await api<PublicationPreviewData>("/publishing/preview", {
         method: "POST",
-        body: {
-          content_item_id: form.get("content_item_id"),
-          channel_id: form.get("channel_id"),
-          delivery_mode: form.get("delivery_mode"),
-          scheduled_at: new Date(String(form.get("scheduled_at"))).toISOString(),
-        },
+        body: intent,
+        signal: AbortSignal.timeout(30_000),
       });
-      setCreating(false);
-      flash("发布任务已排期");
+      setPrepared({ preview, intent: { ...intent, preview_token: preview.preview_token } });
+    } catch (caught) {
+      setError(messageOf(caught)); setPrepared(null);
+    } finally { setPreviewBusy(false); }
+  }
+
+  async function retrySafely(job: PublishJob) {
+    setRetrying(job.id);
+    setError("");
+    try {
+      await api(`/publishing/jobs/${job.id}/retry`, { method: "POST" });
+      flash("已确认在平台写入前失败，任务正在安全重试");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
     } finally {
-      setBusy(false);
+      setRetrying("");
     }
   }
+
   async function pullMetrics(job: PublishJob) {
     setPulling(job.id);
     try {
@@ -2015,12 +3893,15 @@ function PublishingView({
     }
   }
   async function cancel(job: PublishJob) {
-    if (!window.confirm("取消这条发布排期？取消后不会自动分发。")) return;
+    const prompt = job.publish_timing === "immediate"
+      ? "取消这条尚未执行的立即发布任务？取消后不会自动分发。"
+      : "取消这条发布排期？取消后不会自动分发。";
+    if (!window.confirm(prompt)) return;
     setCancelling(job.id);
     setError("");
     try {
       await api(`/publishing/jobs/${job.id}/cancel`, { method: "POST" });
-      flash("发布排期已取消");
+      flash(job.publish_timing === "immediate" ? "立即发布任务已取消" : "发布排期已取消");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -2093,13 +3974,16 @@ function PublishingView({
     setEvidenceBusy(true);
     setError("");
     try {
-      const [items, reviews] = await Promise.all([
-        api<PublishEvidence[]>(`/publishing/jobs/${job.id}/evidence`),
-        api<PublishConfirmation[]>(`/publishing/jobs/${job.id}/confirmations`),
+      const [evidencePage, confirmationPage] = await Promise.all([
+        apiAllPages<PublishEvidence>(`/publishing/jobs/${job.id}/evidence`),
+        apiAllPages<PublishConfirmation>(`/publishing/jobs/${job.id}/confirmations`),
       ]);
       setEvidenceJobId(job.id);
-      setEvidence(items);
-      setConfirmations(reviews);
+      setEvidence(evidencePage.items);
+      setConfirmations(confirmationPage.items);
+      if (evidencePage.truncated || confirmationPage.truncated) {
+        setError("发布证据历史已达到安全加载上限 2000 条，请联系管理员导出完整记录。");
+      }
     } catch (caught) {
       setError(messageOf(caught));
     } finally {
@@ -2122,7 +4006,7 @@ function PublishingView({
       const job = publishes.find((item) => item.id === evidenceJobId);
       if (job) await openEvidence(job);
       await onChanged();
-      flash("Evidence verified and bound to the current script package");
+      flash("证据已校验并绑定到当前脚本任务包");
     } catch (caught) {
       setError(messageOf(caught));
     } finally {
@@ -2178,46 +4062,146 @@ function PublishingView({
   return (
     <>
       <PageHeading
-        eyebrow="Distribution"
-        title="发布管理"
-        description="审核通过后可选择官方 API、脚本辅助或人工导出；平台结果不确定时必须先对账，禁止直接切换以免重复发布。"
-        action={canSchedule ? <Button onClick={() => setCreating((value) => !value)}><Icon name="plus" />安排发布</Button> : undefined}
+        eyebrow="4 · 发布"
+        title="把已审核内容交付到平台"
+        description="默认立即执行；需要预约时再切换为定时发布。公众号连接关闭自动发布时，只会创建草稿。"
+        action={
+          canSchedule ? (
+            <Button
+              onClick={() => {
+                setCreating((value) => !value);
+                setPrepared(null);
+                setPublishRequestId(crypto.randomUUID());
+              }}
+            >
+              <Icon name="plus" />新建发布
+            </Button>
+          ) : undefined
+        }
       />
-      {error ? <p className="inline-error">{error}</p> : null}
-      {!canSchedule ? <p className="permission-note">当前可查看发布状态与下载投放包；安排分发需要审核人员权限。</p> : null}
+      <section className="publish-quick-guide" aria-label="发布前检查">
+        <span><b>1</b> 内容已审核</span>
+        <span><b>2</b> 素材已就绪</span>
+        <span><b>3</b> 渠道已连接</span>
+        <span><b>4</b> 立即或定时执行</span>
+      </section>
+      {error ? <p className="inline-error" role="alert">{error}</p> : null}
+      <PublicationRequestNotice request={publication} />
+      {!canSchedule ? <p className="permission-note">当前可查看发布状态与下载投放包；执行发布需要审核人员权限。</p> : null}
       {creating && canSchedule ? (
-        <section className="panel form-panel">
-          <div className="panel-heading"><div><p className="eyebrow">Schedule</p><h2>创建发布任务</h2></div></div>
-          <form className="stack-form" onSubmit={schedule}>
-            <label>已审核内容
-              <select name="content_item_id" required defaultValue="">
-                <option value="" disabled>选择内容</option>
-                {approved.map((item) => <option key={item.id} value={item.id}>{PLATFORM[item.platform]} · {item.title}</option>)}
-              </select>
-            </label>
-            <label>平台连接
-              <select name="channel_id" required defaultValue="">
-                <option value="" disabled>选择连接器</option>
-                {channels.map((item) => <option key={item.id} value={item.id}>{PLATFORM[item.platform]} · {item.display_name}</option>)}
-              </select>
-            </label>
-            <label>发布方式
-              <select name="delivery_mode" required defaultValue="connector">
-                <option value="connector">官方 API</option>
-                <option value="script">本机脚本辅助（最终点击由人工完成）</option>
-                <option value="manual_export">人工导出（仅小红书）</option>
-              </select>
-              <small>若 API 结果不确定，系统会要求先人工对账，不会静默降级到脚本。</small>
-            </label>
-            <label>发布时间
-              <input
-                name="scheduled_at"
-                type="datetime-local"
-                required
-                defaultValue={defaultSchedule}
-              />
-            </label>
-            <div className="form-actions"><Button type="submit" busy={busy}>确认排期</Button><Button type="button" kind="ghost" onClick={() => setCreating(false)}>取消</Button></div>
+        <section className="panel form-panel publish-composer">
+          <div className="panel-heading">
+            <div><p className="eyebrow">创建发布任务</p><h2>什么时候执行？</h2></div>
+            <Button kind="ghost" type="button" onClick={() => setCreating(false)}>关闭</Button>
+          </div>
+          <form className="stack-form" onSubmit={createPublish}>
+            <fieldset className="publication-inputs" disabled={busy || publication.blocked} onChange={() => setPrepared(null)}>
+            <div className="timing-switch" role="group" aria-label="发布时间选择">
+              <button
+                type="button"
+                className={publishTiming === "immediate" ? "active" : ""}
+                aria-pressed={publishTiming === "immediate"}
+                onClick={() => { setPublishTiming("immediate"); setPrepared(null); }}
+              >
+                <strong>立即执行</strong>
+                <small>保存后马上进入可靠队列</small>
+              </button>
+              <button
+                type="button"
+                className={publishTiming === "scheduled" ? "active" : ""}
+                aria-pressed={publishTiming === "scheduled"}
+                onClick={() => { setPublishTiming("scheduled"); setPrepared(null); }}
+              >
+                <strong>定时发布</strong>
+                <small>到指定时间再进入分发</small>
+              </button>
+            </div>
+            <div className="form-grid">
+              <label>已审核内容
+                <select
+                  name="content_item_id"
+                  required
+                  value={selectedContentId}
+                  onChange={(event) => {
+                    setSelectedContentId(event.target.value);
+                    setSelectedChannelId("");
+                  }}
+                >
+                  <option value="" disabled>选择要发布的内容</option>
+                  {approved.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {projectCode(item.campaign_id)} · {campaignMap[item.campaign_id]?.name || "未知项目"} · {PLATFORM[item.platform]} · {item.title}
+                    </option>
+                  ))}
+                </select>
+                {!approved.length ? <small>还没有已审核内容，请先完成第 2 步。</small> : null}
+              </label>
+              <label>平台连接
+                <select
+                  name="channel_id"
+                  required
+                  value={selectedChannelId}
+                  disabled={!selectedContentId}
+                  onChange={(event) => setSelectedChannelId(event.target.value)}
+                >
+                  <option value="" disabled>
+                    {selectedContentId ? "选择匹配的平台连接" : "先选择内容"}
+                  </option>
+                  {matchingChannels.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.display_name} · {STATUS[item.status] || item.status}
+                    </option>
+                  ))}
+                </select>
+                {selectedContentId && !matchingChannels.length ? (
+                  <small>没有匹配连接，请先到“平台连接”完成配置。</small>
+                ) : null}
+              </label>
+            </div>
+            {invalidPublishSwitch ? (
+              <p className="inline-error" role="alert">
+                该渠道的发布开关格式无效，已禁止提交。请由管理员检查配置，不会把异常值当作“只创建草稿”。
+              </p>
+            ) : selectedChannel?.platform === "wechat"
+              && selectedChannel.config_json.auto_publish !== true ? (
+              <p className="safe-notice">
+                当前公众号连接为安全模式：执行后只创建草稿，不会公开发布。
+              </p>
+            ) : null}
+            <p className="safe-notice">
+              请先完成素材准备并选好封面。创建任务会固定当前正文、选用素材和渠道配置；排期后改稿、换图或更改渠道配置，需要重新确认并创建发布任务。
+            </p>
+            {publishTiming === "scheduled" ? (
+              <label>计划执行时间
+                <input
+                  name="scheduled_at"
+                  type="datetime-local"
+                  required
+                  defaultValue={defaultSchedule}
+                />
+                <small>时间使用当前设备时区，保存后可在执行前取消。</small>
+              </label>
+            ) : null}
+            <details className="advanced-options">
+              <summary>高级发布方式</summary>
+              <label>发布方式
+                <select name="delivery_mode" required defaultValue="connector">
+                  <option value="connector">官方 API（推荐）</option>
+                  <option value="script">本机脚本辅助（人工最终点击）</option>
+                  <option value="manual_export">人工导出（仅小红书）</option>
+                </select>
+                <small>API 结果不确定时必须先对账，系统不会静默切换发布方式。</small>
+              </label>
+            </details>
+            </fieldset>
+            {prepared && !publication.blocked ? <PublicationPreview key={prepared.preview.fingerprint}
+              preview={prepared.preview} busy={busy} onConfirm={() => void publication.send(prepared.intent)} /> : null}
+            <div className="form-actions">
+              <Button type="submit" busy={busy} disabled={publication.blocked || invalidPublishSwitch}>
+                {prepared ? "重新获取预览" : "预览发布内容"}
+              </Button>
+              <Button type="button" kind="ghost" onClick={() => setCreating(false)}>取消</Button>
+            </div>
           </form>
         </section>
       ) : null}
@@ -2230,23 +4214,23 @@ function PublishingView({
         <section className="panel form-panel">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">Publication evidence</p>
-              <h2>Script publication evidence and confirmations</h2>
+              <p className="eyebrow">发布证据</p>
+              <h2>脚本发布证据与确认</h2>
             </div>
-            <Button kind="ghost" onClick={() => setEvidenceJobId("")}>Close</Button>
+            <Button kind="ghost" onClick={() => setEvidenceJobId("")}>关闭</Button>
           </div>
           {canSchedule
             && publishes.find((item) => item.id === evidenceJobId)?.status === "script_ready"
             && !publishes.find((item) => item.id === evidenceJobId)?.script_confirmation_expired ? (
             <form className="stack-form" onSubmit={uploadEvidence}>
               <div className="form-grid">
-                <label>Evidence type
+                <label>证据类型
                   <select name="kind" defaultValue="screenshot">
-                    <option value="screenshot">Platform screenshot (PNG/JPEG/WebP)</option>
-                    <option value="platform_export">Platform export (JSON)</option>
+                    <option value="screenshot">平台截图（PNG/JPEG/WebP）</option>
+                    <option value="platform_export">平台导出（JSON）</option>
                   </select>
                 </label>
-                <label>Evidence file
+                <label>证据文件
                   <input
                     name="file"
                     type="file"
@@ -2255,8 +4239,8 @@ function PublishingView({
                   />
                 </label>
               </div>
-              <small>The server decodes, normalizes, and hashes every file. Evidence freezes after the first confirmation.</small>
-              <Button type="submit" busy={evidenceBusy}>Upload and verify</Button>
+              <small>服务端会解码、规范化并计算哈希；首次确认后证据将被冻结。</small>
+              <Button type="submit" busy={evidenceBusy}>上传并校验</Button>
             </form>
           ) : null}
           <div className="record-list">
@@ -2271,11 +4255,11 @@ function PublishingView({
                   `/publishing/jobs/${item.publish_job_id}/evidence/${item.id}/download`,
                   `evidence-${item.id}`,
                 )}>
-                  <Icon name="download" />Download
+                  <Icon name="download" />下载
                 </button>
               </div>
             ))}
-            {!evidence.length ? <p className="form-note">Upload at least one evidence file before confirming the result.</p> : null}
+            {!evidence.length ? <p className="form-note">确认结果前至少上传一份证据文件。</p> : null}
           </div>
           {confirmations.length ? (
             <div className="record-list">
@@ -2283,9 +4267,9 @@ function PublishingView({
                 <div className="record-row" key={item.id}>
                   <div className="document-icon">{index + 1}</div>
                   <div className="record-main">
-                    <strong>{item.decision === "confirmed_published" ? "Confirmed published" : "Confirmed not published"}</strong>
+                    <strong>{item.decision === "confirmed_published" ? "确认已发布" : "确认未发布"}</strong>
                     <small>
-                      Reviewer {item.confirmed_by_user_id.slice(0, 8)} · Manifest {item.evidence_manifest_sha256.slice(0, 16)}…
+                      审核人 {item.confirmed_by_user_id.slice(0, 8)} · 清单 {item.evidence_manifest_sha256.slice(0, 16)}…
                     </small>
                   </div>
                   <span>{formatDateTime(item.created_at)}</span>
@@ -2297,15 +4281,47 @@ function PublishingView({
       ) : null}
       <section className="panel">
         <DataTable
-          headers={["内容", "平台连接", "发布方式", "计划时间", "尝试", "状态", "结果"]}
+          headers={["项目 / 内容", "平台", "方式", "执行时间", "尝试", "状态", "下一步"]}
           rows={publishes.map((job) => [
-            contentMap[job.content_item_id]?.title || job.content_item_id,
+            <ProjectIdentity
+              key="project"
+              campaign={campaignMap[contentMap[job.content_item_id]?.campaign_id]}
+              contentTitle={contentMap[job.content_item_id]?.title || job.content_item_id}
+              compact
+            />,
             channelMap[job.channel_id]?.display_name || job.channel_id,
             DELIVERY_MODE[job.delivery_mode] || job.delivery_mode,
-            formatDateTime(job.scheduled_at),
+            <div className="timing-cell" key="timing">
+              <strong>{job.publish_timing === "immediate" ? "立即" : "定时"}</strong>
+              <small>{formatDateTime(job.scheduled_at)}</small>
+              <small>任务：{job.id}</small>
+              {job.request_id ? <small>操作：{job.request_id}</small> : null}
+            </div>,
             job.attempts,
-            <StatusBadge key="status" value={job.status} />,
+            <div className="status-stack" key="status">
+              <StatusBadge value={job.status} />
+              {job.retry_safe ? (
+                <small>
+                  可安全重试 · {PUBLISH_FAILURE_STAGE[job.failure_stage || ""] || job.failure_stage}
+                </small>
+              ) : null}
+            </div>,
             <div className="table-actions" key="actions">
+              {job.error ? <span className="publish-error">{job.error}</span> : null}
+              {canSchedule && job.retry_safe ? (
+                channelMap[job.channel_id]?.status === "connected" ? (
+                  <button
+                    disabled={retrying === job.id}
+                    onClick={() => void retrySafely(job)}
+                  >
+                    安全重试
+                  </button>
+                ) : (
+                  <button onClick={() => onNavigate("channels")}>
+                    先复测渠道
+                  </button>
+                )
+              ) : null}
               {job.status === "exported" || (job.script_package_available && !job.script_confirmation_expired) ? (
                 <button onClick={() => void download(`/publishing/jobs/${job.id}/artifact`, `contentflow-${job.id}.zip`)}>
                   <Icon name="download" />{job.delivery_mode === "script" ? "下载脚本包" : "下载投放包"}
@@ -2317,7 +4333,7 @@ function PublishingView({
                     disabled={evidenceBusy}
                     onClick={() => void openEvidence(job)}
                   >
-                    Evidence {job.script_evidence_count} · Confirmations {job.script_confirmation_count}/{job.script_confirmation_required}
+                    证据 {job.script_evidence_count} · 确认 {job.script_confirmation_count}/{job.script_confirmation_required}
                   </button>
                   <span>
                     {job.script_confirmation_expired
@@ -2370,7 +4386,7 @@ function PublishingView({
               ) : null}
               {canSchedule && (
                 (["script_ready", "script_confirmation_pending"].includes(job.status) && job.script_confirmation_expired)
-                || job.status === "failed"
+                || (job.status === "failed" && !job.retry_safe)
                 || (job.delivery_mode !== "script" && ["scheduled", "queued", "exported"].includes(job.status))
               ) ? (
                 <button
@@ -2386,13 +4402,13 @@ function PublishingView({
                   disabled={cancelling === job.id}
                   onClick={() => void cancel(job)}
                 >
-                  取消排期
+                  {job.publish_timing === "immediate" ? "取消执行" : "取消排期"}
                 </button>
               ) : null}
               {!["scheduled", "queued", "exported", "script_ready"].includes(job.status) && job.external_id ? (
                 <span>ID {job.external_id}</span>
               ) : null}
-              {!job.external_id && !["scheduled", "queued", "reconciliation_required", "script_ready"].includes(job.status) ? <span>—</span> : null}
+              {!job.external_id && !job.error && !["scheduled", "queued", "reconciliation_required", "script_ready"].includes(job.status) ? <span>—</span> : null}
             </div>,
           ])}
           empty="还没有发布任务"
@@ -2619,6 +4635,7 @@ function ChannelsView({
 function MetricsView({
   data,
   publishes,
+  campaigns,
   contents,
   channels,
   role,
@@ -2627,6 +4644,7 @@ function MetricsView({
 }: {
   data: MetricsSummary;
   publishes: PublishJob[];
+  campaigns: Campaign[];
   contents: Content[];
   channels: Channel[];
   role: string;
@@ -2641,6 +4659,10 @@ function MetricsView({
   const contentMap = useMemo(
     () => Object.fromEntries(contents.map((item) => [item.id, item])),
     [contents],
+  );
+  const campaignMap = useMemo(
+    () => Object.fromEntries(campaigns.map((campaign) => [campaign.id, campaign])),
+    [campaigns],
   );
   const channelMap = useMemo(
     () => Object.fromEntries(channels.map((item) => [item.id, item])),
@@ -2681,6 +4703,21 @@ function MetricsView({
   }
 
 
+  if (data.load_error) {
+    return (
+      <>
+        <PageHeading eyebrow="Review" title="数据复盘" description="当前统计数据不可用。" />
+        <section className="panel form-panel" role="alert">
+          <p>{data.load_error}</p>
+          <Button busy={busy} onClick={async () => {
+            setBusy(true);
+            try { await onChanged(); } finally { setBusy(false); }
+          }}>重新加载指标</Button>
+        </section>
+      </>
+    );
+  }
+
   return (
     <>
       <PageHeading
@@ -2693,6 +4730,12 @@ function MetricsView({
           </Button>
         ) : undefined}
       />
+      {(data.excluded_snapshot_count || 0) > 0 ? (
+        <p className="inline-error" role="alert">
+          有 {data.excluded_snapshot_count} 条历史指标异常，原值已保留并从汇总中排除。
+          下方仅显示有效记录，数据不完整，暂不提供复盘建议；请联系管理员核对原始记录。
+        </p>
+      ) : null}
       {error ? <p className="inline-error">{error}</p> : null}
       {!canEdit ? <p className="permission-note">当前为只读权限，可查看统一口径的指标与复盘建议。</p> : null}
       {showManual && canEdit ? (
@@ -2710,7 +4753,7 @@ function MetricsView({
                   const channel = channelMap[job.channel_id];
                   return (
                     <option key={job.id} value={job.id}>
-                      {PLATFORM[channel?.platform || content?.platform] || channel?.platform} · {content?.title || job.content_item_id} · {STATUS[job.status] || job.status}
+                      {content ? projectCode(content.campaign_id) : "SYSTEM"} · {content ? campaignMap[content.campaign_id]?.name || "未知项目" : "系统任务"} · {PLATFORM[channel?.platform || content?.platform] || channel?.platform} · {content?.title || job.content_item_id} · {STATUS[job.status] || job.status}
                     </option>
                   );
                 })}
@@ -2755,7 +4798,9 @@ function MetricsView({
         ))}
       </section>
       <section className="panel">
-        {hasData ? (
+        {(data.excluded_snapshot_count || 0) > 0 ? (
+          <EmptyState title="暂不生成复盘建议" description="历史异常尚未核对，当前汇总不能代表完整结果。" />
+        ) : hasData ? (
           <div className="analysis-copy">
             <p className="eyebrow">当前结果</p>
             <h2>基于 {data.sample_count} 条指标快照的下一轮建议</h2>
@@ -2777,6 +4822,8 @@ function AdministrationView({
   workspaces,
   members,
   auditLogs,
+  storageUsage,
+  storageAttention,
   promptGovernance,
   promptEval,
   onWorkspaceCreated,
@@ -2787,6 +4834,8 @@ function AdministrationView({
   workspaces: WorkspaceAccess[];
   members: Member[];
   auditLogs: AuditLog[];
+  storageUsage: StorageUsage | null;
+  storageAttention: StorageObjectAllocation[];
   promptGovernance: PromptGovernance | null;
   promptEval: PromptEvalGovernance | null;
   onWorkspaceCreated: (name: string) => Promise<void>;
@@ -2795,6 +4844,47 @@ function AdministrationView({
 }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [auditIntegrity, setAuditIntegrity] = useState<AuditIntegrity | null>(null);
+  const [auditChecking, setAuditChecking] = useState(true);
+  const [discardStorageId, setDiscardStorageId] = useState("");
+  const [discardStorageNote, setDiscardStorageNote] = useState("");
+  const [discardStorageConfirmed, setDiscardStorageConfirmed] = useState(false);
+  const [promptDraftSource, setPromptDraftSource] = useState<
+    "active" | "builtin"
+  >("active");
+  const promptDraftBase = promptDraftSource === "builtin"
+    ? promptGovernance?.builtin
+    : promptGovernance?.active;
+  const singleOperator = promptGovernance?.approval_policy === "single_operator_private";
+  const singleOperatorEval = promptEval?.approval_policy === "single_operator_private";
+
+  const checkAuditIntegrity = useCallback(async () => {
+    setAuditChecking(true);
+    try {
+      setAuditIntegrity(await api<AuditIntegrity>("/admin/audit-integrity"));
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setAuditChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    api<AuditIntegrity>("/admin/audit-integrity")
+      .then((result) => {
+        if (active) setAuditIntegrity(result);
+      })
+      .catch((caught) => {
+        if (active) setError(messageOf(caught));
+      })
+      .finally(() => {
+        if (active) setAuditChecking(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function createWorkspace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2831,6 +4921,55 @@ function AdministrationView({
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function reconcileStorage(deleteOrphans: boolean) {
+    if (
+      deleteOrphans
+      && !window.confirm(
+        "确认清理孤儿对象？系统只会删除超过安全宽限期、且不在账本中的对象；该操作无法撤销。",
+      )
+    ) return;
+    const busyKey = deleteOrphans ? "storage-cleanup" : "storage-reconcile";
+    setBusy(busyKey);
+    setError("");
+    try {
+      await api<QueueJob>("/admin/storage/reconcile", {
+        method: "POST",
+        body: { delete_orphans: deleteOrphans },
+      });
+      flash(
+        deleteOrphans
+          ? "存储核对与孤儿对象清理已加入任务队列"
+          : "存储核对已加入任务队列",
+      );
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function discardStagedStorage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!discardStorageId || !discardStorageConfirmed || discardStorageNote.trim().length < 8 || busy) return;
+    const id = discardStorageId;
+    if (!window.confirm("确认排队删除这个待确认文件？物理删除无法撤销；系统仍会检查原任务、安全等待期和引用。")) return;
+    setBusy(`storage-discard:${id}`);
+    setError("");
+    try {
+      await api<QueueJob>(`/admin/storage/objects/${id}/discard-staged`, {
+        method: "POST", body: { confirmed_no_inflight_write: true, note: discardStorageNote.trim() },
+      });
+      setDiscardStorageId("");
+      flash("清理请求已接受；实际删除成功前仍占用额度。原生成/发布任务不会因此重试。");
+      await onChanged();
+    } catch (caught) {
+      setError(`${messageOf(caught)}。若请求结果不明，请先刷新存储记录核对；同一对象重发只返回原清理任务。`);
     } finally {
       setBusy("");
     }
@@ -2894,7 +5033,9 @@ function AdministrationView({
         },
       });
       formElement.reset();
-      flash("Eval 套件草稿已创建，需由另一名管理员激活");
+      flash(singleOperatorEval
+        ? "Eval 套件草稿已创建，需填写本人确认说明后激活"
+        : "Eval 套件草稿已创建，需由另一名管理员激活");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -2908,12 +5049,17 @@ function AdministrationView({
     if (!window.confirm(
       `确认${verb} ${suite.version}？现有 Prompt 的旧评测证据将立即失效。`,
     )) return;
+    let note: string | undefined;
+    if (singleOperatorEval && suite.created_by_user_id === currentSession.user.id) {
+      note = window.prompt("单人内测：你将确认自己创建的评测套件，没有独立第二人复核。请填写确认说明（至少 3 个字符）")?.trim();
+      if (!note || note.length < 3) return;
+    }
     setBusy(`eval-suite-${suite.id}`);
     setError("");
     try {
       await api<PromptEvalSuite>(
         `/admin/prompt-eval/suites/${suite.id}/activate`,
-        { method: "POST" },
+        { method: "POST", ...(note ? { body: { note } } : {}) },
       );
       flash(`${suite.version} 已成为当前 Eval 门禁`);
       await onChanged();
@@ -2968,7 +5114,9 @@ function AdministrationView({
         },
       });
       formElement.reset();
-      flash("Prompt 草稿已创建，需由另一名管理员审批后才能发布");
+      flash(singleOperator
+        ? "Prompt 草稿已创建，须通过真实评测并由本人明确确认后才能激活"
+        : "Prompt 草稿已创建，需由另一名管理员审批后才能发布");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
@@ -2987,7 +5135,13 @@ function AdministrationView({
       if (!reason?.trim()) return;
       body = { note: reason.trim() };
     } else if (action === "approve") {
-      body = { note: "" };
+      if (singleOperator && release.created_by_user_id === currentSession.user.id) {
+        const note = window.prompt("单人内测：这是本人确认，不是双人审批。请先核对评测结果并填写确认说明（至少 3 个字符）")?.trim();
+        if (!note || note.length < 3) return;
+        body = { note };
+      } else {
+        body = { note: "" };
+      }
     } else {
       const verb = release.status === "retired" ? "回滚到" : "激活";
       if (!window.confirm(
@@ -3029,7 +5183,7 @@ function AdministrationView({
       <PageHeading
         eyebrow="Administration"
         title="团队、Prompt 治理与审计"
-        description="管理协作边界、Prompt 双人审批与回滚，以及关键操作记录。只有管理员可以访问本页。"
+        description="管理协作边界、Prompt 审批策略与回滚，以及关键操作记录。只有管理员可以访问本页。"
       />
       {error ? <p className="inline-error" role="alert">{error}</p> : null}
       <section className="admin-form-grid">
@@ -3071,6 +5225,112 @@ function AdministrationView({
         </article>
       </section>
 
+      <section className="panel admin-section">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Storage governance</p>
+            <h2>对象存储配额与一致性</h2>
+          </div>
+          <div className="storage-actions">
+            <Button
+              type="button"
+              kind="ghost"
+              busy={busy === "storage-reconcile"}
+              onClick={() => void reconcileStorage(false)}
+            >
+              核对账本
+            </Button>
+            <Button
+              type="button"
+              kind="danger"
+              busy={busy === "storage-cleanup"}
+              onClick={() => void reconcileStorage(true)}
+            >
+              清理孤儿对象
+            </Button>
+          </div>
+        </div>
+        {storageUsage ? (
+          <>
+            <div className="metric-grid storage-metrics" aria-label="工作区存储统计">
+              <div>
+                <span>已计费容量</span>
+                <strong>{formatBytes(storageUsage.used_bytes)}</strong>
+                <small>上限 {formatBytes(storageUsage.max_bytes)}</small>
+              </div>
+              <div>
+                <span>已计费对象</span>
+                <strong>{storageUsage.used_objects.toLocaleString()}</strong>
+                <small>上限 {storageUsage.max_objects.toLocaleString()} 个</small>
+              </div>
+              <div>
+                <span>写入预留</span>
+                <strong>{storageUsage.reserved_objects.toLocaleString()}</strong>
+                <small>{formatBytes(storageUsage.reserved_bytes)} 尚未转为正式对象</small>
+              </div>
+              <div>
+                <span>需要关注</span>
+                <strong>{storageAttention.length.toLocaleString()}</strong>
+                <small>
+                  缺失 {storageUsage.missing_objects} · 待删 {storageUsage.delete_pending_objects}
+                  {storageUsage.integrity_error_objects
+                    ? ` · 完整性异常 ${storageUsage.integrity_error_objects}`
+                    : ""}
+                  {storageUsage.staging_objects ? ` · 写入待确认 ${storageUsage.staging_objects}` : ""}
+                  {storageUsage.abandoned_reservations
+                    ? ` · 已释放 ${storageUsage.abandoned_reservations}`
+                    : ""}
+                </small>
+              </div>
+            </div>
+            <p className="form-note storage-note" role="status">
+              {storageUsage.unverified_objects
+                ? `${storageUsage.unverified_objects} 个历史对象尚未验证大小；完成核对前会阻止新增上传。`
+                : "账本中的对象大小已记录。"}
+              {storageUsage.staging_objects
+                ? " 写入待确认对象可能仍在上传或在上次中断后未完成入库，继续占用额度；请先核对关联任务，孤儿清理不会删除它们。"
+                : ""}
+              {storageUsage.last_reconciled_at
+                ? ` 最近一次完成核对：${formatDateTime(storageUsage.last_reconciled_at)}。`
+                : " 尚未完成过全量核对。"}
+            </p>
+          </>
+        ) : (
+          <p className="form-note" role="status">正在读取当前工作区的存储账本…</p>
+        )}
+        <DataTable
+          headers={["状态", "文件", "归属", "大小", "重试 / 原因", "更新时间", "核对"]}
+          rows={storageAttention.map((item) => [
+            <StatusBadge key="status" value={item.status} />,
+            <span key="file"><strong>{item.filename}</strong><br /><small>{item.category}</small></span>,
+            <span key="owner"><code>{item.owner_type} · {item.owner_id.slice(0, 8)}</code>
+              {item.write_job_id ? <small>来源任务：<code>{item.write_job_id}</code></small> : null}</span>,
+            item.size_verified ? formatBytes(item.size_bytes) : "待验证",
+            item.last_error
+              ? `${item.delete_attempts} 次 · ${item.last_error}`
+              : item.delete_attempts
+                ? `${item.delete_attempts} 次`
+                : "—",
+            formatDateTime(item.updated_at),
+            item.status === "staging" ? <Button key="discard" kind="ghost" disabled={Boolean(busy)} onClick={() => {
+              setDiscardStorageId(item.id); setDiscardStorageNote(""); setDiscardStorageConfirmed(false);
+            }}>核对后申请清理</Button> : "—",
+          ])}
+          empty="当前没有写入待确认、缺失、完整性异常、待删除或已释放的对象"
+        />
+        {discardStorageId ? (
+          <form className="form-grid" onSubmit={(event) => void discardStagedStorage(event)} aria-label="核对待确认写入">
+            <p className="form-note">对象编号：<code>{discardStorageId}</code>。先核对原 Worker 已停止、没有在途上传且文件不再需要；无法确认时保留记录。来源任务须已终止或进入人工核对，并经过配置的存储安全等待期。此操作只清理文件，不取消或重试原任务。</p>
+            <label>核对说明<textarea value={discardStorageNote} onChange={(event) => setDiscardStorageNote(event.target.value)} minLength={8} maxLength={2000} required disabled={Boolean(busy)} /></label>
+            <label><input type="checkbox" checked={discardStorageConfirmed} onChange={(event) => setDiscardStorageConfirmed(event.target.checked)} disabled={Boolean(busy)} />我已确认旧 Worker 和在途存储写入均已停止，此文件可以删除</label>
+            <Button type="submit" disabled={Boolean(busy) || !discardStorageConfirmed || discardStorageNote.trim().length < 8}>
+              {busy === `storage-discard:${discardStorageId}` ? <span className="button-spinner" aria-hidden="true" /> : null}确认排队清理
+            </Button>
+            <Button type="button" kind="ghost" disabled={Boolean(busy)} onClick={() => setDiscardStorageId("")}>保留文件，关闭核对</Button>
+          </form>
+        ) : null}
+      </section>
+
 
       <section className="panel admin-section">
         <div className="panel-heading">
@@ -3086,6 +5346,12 @@ function AdministrationView({
         </div>
         {promptGovernance ? (
           <>
+            {singleOperator ? (
+              <p className="permission-note" role="status">
+                当前工作区为单人内测审批：没有独立第二人复核，操作会记录为本人确认。
+                真实模型评测、内容人工审核和发布门禁仍然有效。其他工作区默认双人审批。
+              </p>
+            ) : null}
             {!promptGovernance.ready_for_generation ? (
               <p className="permission-note" role="status">
                 生成已被治理策略阻断：{promptGovernance.generation_block_reason}
@@ -3094,8 +5360,9 @@ function AdministrationView({
             {promptGovernance.governance_required
               && promptGovernance.active.source === "builtin" ? (
                 <p className="form-note">
-                  生产初始化顺序：添加第二名管理员；创建 Eval 套件并由对方激活；
-                  创建 Prompt 草稿；使用当前目标模型运行评测；最后由另一名管理员审批并激活。
+                  {singleOperator
+                    ? "单人内测初始化：创建 Eval 套件并填写说明激活；创建 Prompt 草稿；使用当前目标模型评测；通过后由本人确认并激活。"
+                    : "生产初始化顺序：添加第二名管理员；创建 Eval 套件并由对方激活；创建 Prompt 草稿；使用当前目标模型运行评测；最后由另一名管理员审批并激活。"}
                 </p>
               ) : null}
             <div className="prompt-active-summary">
@@ -3125,17 +5392,36 @@ function AdministrationView({
               </div>
             </div>
             <form
-              key={promptGovernance.active.version}
+              key={`${promptGovernance.active.version}-${promptDraftSource}`}
               className="stack-form prompt-release-form"
               onSubmit={createPromptRelease}
             >
-              <div>
-                <p className="eyebrow">Immutable draft</p>
-                <h3>基于当前生效版本创建新草稿</h3>
-                <p className="form-note">
-                  草稿创建后不可修改；创建者不能自行审批，必须由另一名管理员复核。
-                  审批与激活前还必须通过当前 Eval 套件。审计日志只保存版本与哈希，不保存 Prompt 正文。
-                </p>
+              <div className="prompt-draft-toolbar">
+                <div>
+                  <p className="eyebrow">Immutable draft</p>
+                  <h3>
+                    {promptDraftSource === "builtin"
+                      ? "基于最新内容 Agent 基线创建草稿"
+                      : "基于当前生效版本创建新草稿"}
+                  </h3>
+                  <p className="form-note">
+                    {singleOperator
+                      ? "草稿创建后不可修改；单人内测允许创建者填写确认说明后审批，不代表独立复核。"
+                      : "草稿创建后不可修改；创建者不能自行审批，必须由另一名管理员复核。"}
+                    审批与激活前还必须通过当前 Eval 套件。审计日志只保存版本与哈希，不保存 Prompt 正文。
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  kind="ghost"
+                  onClick={() => setPromptDraftSource((source) => (
+                    source === "active" ? "builtin" : "active"
+                  ))}
+                >
+                  {promptDraftSource === "active"
+                    ? `载入最新 Agent 基线 ${promptGovernance.builtin.version}`
+                    : "改回当前生效版本"}
+                </Button>
               </div>
               <label>
                 变更摘要
@@ -3156,10 +5442,10 @@ function AdministrationView({
                       required
                       minLength={20}
                       maxLength={20000}
-                      defaultValue={promptGovernance.active.prompts[stage]}
+                      defaultValue={promptDraftBase?.prompts[stage] || ""}
                     />
                     <small>
-                      SHA-256 {promptGovernance.active.prompt_hashes[stage].slice(0, 12)}…
+                      SHA-256 {promptDraftBase?.prompt_hashes[stage].slice(0, 12)}…
                     </small>
                   </label>
                 ))}
@@ -3211,7 +5497,10 @@ function AdministrationView({
             <h3>创建不可变 Eval 套件草稿</h3>
             <p className="form-note">
               套件必须覆盖 plan、generate、review，并为每个用例提供确定性断言。
-              创建者不能自行激活；运行结果不保存模型正文，只保存哈希、字节数与失败项。
+              {singleOperatorEval
+                ? "单人内测允许创建者填写确认说明后激活；"
+                : "创建者不能自行激活；"}
+              运行结果不保存模型正文，只保存哈希、字节数与失败项。
             </p>
           </div>
           <div className="form-grid">
@@ -3250,10 +5539,10 @@ function AdministrationView({
             <StatusBadge key="status" value={suite.status} />,
             <div className="table-actions" key="actions">
               {suite.status === "active" ? <span>当前门禁</span> : null}
-              {suite.status !== "active" && suite.created_by_user_id === currentSession.user.id
+              {suite.status !== "active" && !singleOperatorEval && suite.created_by_user_id === currentSession.user.id
                 ? <span>等待其他管理员</span>
                 : null}
-              {suite.status !== "active" && suite.created_by_user_id !== currentSession.user.id ? (
+              {suite.status !== "active" && (singleOperatorEval || suite.created_by_user_id !== currentSession.user.id) ? (
                 <button
                   className="table-link"
                   disabled={busy === `eval-suite-${suite.id}`}
@@ -3264,7 +5553,9 @@ function AdministrationView({
               ) : null}
             </div>,
           ])}
-          empty="还没有 Eval 套件；创建并由另一名管理员激活后才能审批 Prompt"
+          empty={singleOperatorEval
+            ? "还没有 Eval 套件；创建并填写本人确认说明激活后，才能运行 Prompt 评测"
+            : "还没有 Eval 套件；创建并由另一名管理员激活后才能审批 Prompt"}
         />
       </section>
 
@@ -3337,7 +5628,7 @@ function AdministrationView({
             <StatusBadge key="status" value={release.status} />,
             <div className="table-actions" key="actions">
               {release.status === "draft"
-                && release.created_by_user_id !== currentSession.user.id ? (
+                && (singleOperator || release.created_by_user_id !== currentSession.user.id) ? (
                   <>
                     <button
                       className="table-link"
@@ -3348,7 +5639,7 @@ function AdministrationView({
                       title={currentEvalRun(release.id)?.status === "passed" ? "审批" : "需先通过当前 Eval 套件"}
                       onClick={() => void reviewPromptRelease(release, "approve")}
                     >
-                      审批
+                      {singleOperator && release.created_by_user_id === currentSession.user.id ? "本人确认" : "审批"}
                     </button>
                     <button
                       className="table-link danger-text"
@@ -3360,6 +5651,7 @@ function AdministrationView({
                   </>
                 ) : null}
               {release.status === "draft"
+                && !singleOperator
                 && release.created_by_user_id === currentSession.user.id ? (
                   <span>等待其他管理员</span>
                 ) : null}
@@ -3464,10 +5756,39 @@ function AdministrationView({
             <p className="eyebrow">Audit trail</p>
             <h2>最近 {auditLogs.length} 条审计记录</h2>
           </div>
+          <div className="table-actions">
+            {auditIntegrity ? (
+              <StatusBadge value={auditIntegrity.valid ? "passed" : "blocked"} />
+            ) : null}
+            <Button
+              type="button"
+              kind="ghost"
+              busy={auditChecking}
+              onClick={() => void checkAuditIntegrity()}
+            >
+              重新核验
+            </Button>
+          </div>
         </div>
+        {auditIntegrity?.valid ? (
+          <p className="form-note" role="status">
+            已验证 {auditIntegrity.checked_entries} 条连续记录，链头序号 {auditIntegrity.head_sequence}
+            {auditIntegrity.head_hash ? ` · SHA-256 ${auditIntegrity.head_hash.slice(0, 16)}…` : ""}。
+          </p>
+        ) : auditIntegrity ? (
+          <p className="permission-note" role="alert">
+            审计链完整性异常：{auditIntegrity.reason || "unknown"}
+            {auditIntegrity.first_invalid_sequence
+              ? `，首个异常序号 ${auditIntegrity.first_invalid_sequence}`
+              : ""}。请暂停高风险操作并保留数据库与对象存储快照。
+          </p>
+        ) : null}
         <DataTable
-          headers={["时间", "操作者", "动作", "对象", "详情"]}
+          headers={["序号 / 哈希", "时间", "操作者", "动作", "对象", "详情"]}
           rows={auditLogs.map((log) => [
+            <code key="integrity">
+              #{log.chain_sequence} · {log.entry_hash.slice(0, 12)}…
+            </code>,
             formatDateTime(log.created_at),
             log.actor_display_name || "系统任务",
             log.action,
@@ -3488,23 +5809,105 @@ function AdministrationView({
 function JobsView({
   jobs,
   role,
+  onNavigate,
   onChanged,
   flash,
 }: {
   jobs: QueueJob[];
   role: string;
+  onNavigate: (view: View) => void;
   onChanged: () => Promise<void> | void;
   flash: (message: string) => void;
 }) {
   const [error, setError] = useState("");
+  const [reviewJobId, setReviewJobId] = useState("");
+  const [requestingReviewId, setRequestingReviewId] = useState("");
+  const [providerChecked, setProviderChecked] = useState(false);
+  const [reviewNote, setReviewNote] = useState("");
+  const [reviewBusy, setReviewBusy] = useState<"retry" | "abandon" | "">("");
+  const [providerInvocations, setProviderInvocations] = useState<ProviderInvocationAttempt[]>([]);
+  const [providerInvocationsLoading, setProviderInvocationsLoading] = useState(false);
+  const [providerInvocationsError, setProviderInvocationsError] = useState("");
+  const [providerInvocationsTruncated, setProviderInvocationsTruncated] = useState(false);
   const canRetry = roleAtLeast(role, "editor");
+  const canReview = roleAtLeast(role, "reviewer");
+  const reviewJob = jobs.find((job) => job.id === reviewJobId && job.status === "manual_review");
+
   async function retry(job: QueueJob) {
+    setError("");
     try {
       await api(`/jobs/${job.id}/retry`, { method: "POST" });
       flash("失败任务已重置并进入重试队列");
       await onChanged();
     } catch (caught) {
       setError(messageOf(caught));
+    }
+  }
+
+  async function requestReview(job: QueueJob) {
+    if (requestingReviewId) return;
+    setRequestingReviewId(job.id);
+    setError("");
+    try {
+      const reviewedJob = await api<QueueJob>(`/jobs/${job.id}/request-manual-review`, {
+        method: "POST",
+      });
+      await onChanged();
+      await openReview(reviewedJob);
+      flash("已进入人工核对；没有重试或新增供应商调用");
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setRequestingReviewId("");
+    }
+  }
+
+  async function openReview(job: QueueJob) {
+    setReviewJobId(job.id);
+    setProviderChecked(false);
+    setReviewNote("");
+    setError("");
+    setProviderInvocations([]);
+    setProviderInvocationsError("");
+    setProviderInvocationsTruncated(false);
+    setProviderInvocationsLoading(true);
+    try {
+      const result = await apiAllPages<ProviderInvocationAttempt>(
+        `/jobs/${job.id}/provider-invocations`,
+        { pageLimit: 100, maxPages: 10 },
+      );
+      setProviderInvocations(result.items);
+      setProviderInvocationsTruncated(result.truncated);
+    } catch (caught) {
+      setProviderInvocationsError(messageOf(caught));
+    } finally {
+      setProviderInvocationsLoading(false);
+    }
+  }
+
+  async function resolveReview(decision: "retry" | "abandon") {
+    if (!reviewJob || !providerChecked || reviewNote.trim().length < 8) return;
+    if (decision === "abandon" && !window.confirm("确认放弃此任务？任务会保留为失败记录，不会再次调用供应商。")) return;
+    setReviewBusy(decision);
+    setError("");
+    try {
+      await api(`/jobs/${reviewJob.id}/manual-review`, {
+        method: "POST",
+        body: {
+          decision,
+          provider_checked: true,
+          note: reviewNote.trim(),
+        },
+      });
+      flash(decision === "retry" ? "核对记录已保存，任务进入重试队列" : "核对记录已保存，任务已放弃");
+      setReviewJobId("");
+      setProviderChecked(false);
+      setReviewNote("");
+      await onChanged();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setReviewBusy("");
     }
   }
 
@@ -3517,16 +5920,163 @@ function JobsView({
       />
       {error ? <p className="inline-error">{error}</p> : null}
       {!canRetry ? <p className="permission-note">当前为只读权限，可查看任务状态与错误信息。</p> : null}
+      {canRetry && !canReview ? <p className="permission-note">你可以重试普通失败任务；供应商结果不确定的任务需由审核者核对后处置。</p> : null}
+      {reviewJob ? (
+        <section className="panel manual-review-panel" aria-labelledby="manual-review-title">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Provider safety checkpoint</p>
+              <h2 id="manual-review-title">核对供应商结果后再决定</h2>
+              <p>{reviewJob.context.campaign_name || reviewJob.context.content_title || reviewJob.job_type} · {reviewJob.id.slice(0, 8)}</p>
+            </div>
+            <StatusBadge value="manual_review" />
+          </div>
+          <div className="manual-review-body">
+            <div className="manual-review-warning">
+              <strong>为什么被拦截</strong>
+              <p>{reviewJob.manual_review?.context_json.possible_side_effect || "供应商可能已接收或计费，但系统没有保存最终结果。"}</p>
+              <code>{reviewJob.manual_review?.reason_code || "provider_outcome_unknown"}</code>
+            </div>
+            <div className="provider-ledger" aria-live="polite">
+              <div className="provider-ledger-heading">
+                <div>
+                  <strong>ContentFlow 已保存的调用证据</strong>
+                  <p>这里只保存请求/响应摘要、供应商请求号和用量，不保存提示词、正文或密钥。</p>
+                </div>
+                {providerInvocationsLoading ? <span className="button-spinner" aria-hidden="true" /> : null}
+              </div>
+              {providerInvocationsError ? (
+                <p className="inline-error">调用证据读取失败：{providerInvocationsError}</p>
+              ) : providerInvocations.length ? (
+                <div className="provider-ledger-list">
+                  {providerInvocationsTruncated ? (
+                    <p className="pagination-warning">仅显示最近 1000 条调用证据，请使用 API 分页继续取证。</p>
+                  ) : null}
+                  {providerInvocations.map((attempt) => (
+                    <article className="provider-ledger-row" key={attempt.id}>
+                      <div>
+                        <strong>{attempt.operation}</strong>
+                        <span>{attempt.provider_name} · {attempt.model_name} · 第 {attempt.attempt_number} 次</span>
+                      </div>
+                      <StatusBadge value={attempt.status} />
+                      <dl>
+                        <div><dt>请求时间</dt><dd>{formatDateTime(attempt.started_at)}</dd></div>
+                        <div><dt>供应商请求号</dt><dd><code>{attempt.provider_request_id || "未返回"}</code></dd></div>
+                        <div><dt>请求摘要</dt><dd><code>{attempt.request_sha256.slice(0, 16)}…</code></dd></div>
+                        <div><dt>Token</dt><dd>{attempt.total_tokens ?? "未报告"}</dd></div>
+                      </dl>
+                      <p className="provider-ledger-note">
+                        {attempt.idempotency_key_sent
+                          ? "已发送 Idempotency-Key；这只证明请求头已发送，不代表供应商确认支持幂等。"
+                          : "供应商适配器未发送 Idempotency-Key，必须以供应商控制台记录为准。"}
+                      </p>
+                    </article>
+                  ))}
+                </div>
+              ) : providerInvocationsLoading ? null : (
+                <p className="provider-ledger-empty">没有可用调用证据。旧任务或账本提交前中断的任务仍需按下方步骤到供应商控制台核对。</p>
+              )}
+            </div>
+            <ol>
+              {(reviewJob.manual_review?.context_json.required_checks || [
+                "打开当前供应商控制台，查看该时间窗口内的调用记录。",
+                "确认是否已有对应请求、计费或结果。",
+                "仅在确认没有结果时重试；已有结果或无法确认时应放弃并人工对账。",
+              ]).map((step) => <li key={step}>{step}</li>)}
+            </ol>
+            <div className="stack-form">
+              <label className="manual-review-confirmation">
+                <input
+                  type="checkbox"
+                  checked={providerChecked}
+                  onChange={(event) => setProviderChecked(event.target.checked)}
+                />
+                <span>我已在供应商控制台核对请求、计费和结果，不是仅凭本页错误文字判断。</span>
+              </label>
+              <label>
+                核对记录
+                <textarea
+                  value={reviewNote}
+                  onChange={(event) => setReviewNote(event.target.value)}
+                  maxLength={2000}
+                  placeholder="至少 8 个字符：核对了哪个时间窗口、看到什么结果、为什么选择重试或放弃。"
+                />
+                <small>{reviewNote.trim().length} / 2000；该记录会与处置人、时间和结论一起保留。</small>
+              </label>
+              <div className="form-actions">
+                <button
+                  className="button button-primary"
+                  type="button"
+                  disabled={!providerChecked || reviewNote.trim().length < 8 || Boolean(reviewBusy)}
+                  onClick={() => void resolveReview("retry")}
+                >
+                  {reviewBusy === "retry" ? <span className="button-spinner" aria-hidden="true" /> : null}
+                  确认没有结果，允许重试
+                </button>
+                <button
+                  className="button button-danger"
+                  type="button"
+                  disabled={!providerChecked || reviewNote.trim().length < 8 || Boolean(reviewBusy)}
+                  onClick={() => void resolveReview("abandon")}
+                >
+                  {reviewBusy === "abandon" ? <span className="button-spinner" aria-hidden="true" /> : null}
+                  已有或无法确认，放弃任务
+                </button>
+                <button
+                  className="button button-ghost"
+                  type="button"
+                  disabled={Boolean(reviewBusy)}
+                  onClick={() => {
+                    setReviewJobId("");
+                    setProviderInvocations([]);
+                    setProviderInvocationsError("");
+                    setProviderInvocationsTruncated(false);
+                  }}
+                >
+                  暂不处理
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
       <section className="panel">
         <DataTable
-          headers={["任务类型", "执行时间", "尝试次数", "状态", "最近错误", "操作"]}
+          headers={["项目 / 内容", "任务类型", "执行时间", "尝试次数", "状态", "执行结果 / 最近错误", "操作"]}
           rows={jobs.map((job) => [
+            <ProjectIdentity key="project" context={job.context} compact />,
             job.job_type,
             formatDateTime(job.run_at),
             `${job.attempts} / ${job.max_attempts}`,
-            <StatusBadge key="status" value={job.status} />,
-            job.last_error || "—",
-            canRetry && job.status === "failed" ? <button className="table-link" key="retry" onClick={() => void retry(job)}>重试</button> : "—",
+            <StatusBadge key="status" value={job.status === "succeeded" && job.result_json?.outcome === "superseded" ? "superseded" : job.status} />,
+            job.status === "succeeded" && job.result_json?.outcome === "superseded"
+              ? "内容或素材已变化，旧结果未采用；如有暂存对象，请在存储管理核对。"
+              : job.last_error || "—",
+            job.status === "manual_review" ? (
+              canReview ? (
+                <button className="table-link" key="review" onClick={() => void openReview(job)}>核对处理</button>
+              ) : <span key="review-required">需审核者处理</span>
+            ) : canRetry && job.status === "failed" ? (
+              job.job_type === "publish.dispatch" ? (
+                <button className="table-link" key="publish" onClick={() => onNavigate("publishing")}>
+                  到发布页处理
+                </button>
+              ) : ["asset.generate", "asset.poll"].includes(job.job_type) ? (
+                canReview ? (
+                  <button
+                    type="button"
+                    className="table-link"
+                    key="request-review"
+                    disabled={Boolean(requestingReviewId)}
+                    onClick={() => void requestReview(job)}
+                  >
+                    {requestingReviewId === job.id ? "正在发起核对…" : "发起人工核对"}
+                  </button>
+                ) : <span key="reviewer-needed">生成结果需审核者核对</span>
+              ) : (
+                <button className="table-link" key="retry" onClick={() => void retry(job)}>重试</button>
+              )
+            ) : "—",
           ])}
           empty="任务队列为空"
         />
@@ -3580,10 +6130,12 @@ function formatDateTime(value: string): string {
 }
 
 function formatBytes(value: number | null): string {
-  if (!value) return "—";
+  if (value === null) return "—";
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value < 1024 ** 4) return `${(value / 1024 ** 3).toFixed(1)} GB`;
+  return `${(value / 1024 ** 4).toFixed(1)} TB`;
 }
 
 function toLocalInput(date: Date): string {

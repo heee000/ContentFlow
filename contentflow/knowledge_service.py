@@ -13,6 +13,7 @@ from .embeddings import EmbeddingProvider
 from .models import RetrievedChunk
 from .object_storage import ObjectStorage
 from .rag import HashEmbedding, cosine_similarity
+from .provider_resources import ProviderResourceLimitError
 
 
 def local_path_from_uri(uri: str) -> Path:
@@ -25,31 +26,41 @@ def local_path_from_uri(uri: str) -> Path:
     return Path(raw_path)
 
 
-def split_text(text: str, max_chars: int = 900, overlap: int = 120) -> list[str]:
-    blocks = [
-        block.strip()
-        for block in re.split(r"\n\s*\n|(?<=[。！？!?])\s*", text)
-        if block.strip()
-    ]
+def split_text(text: str, max_chars: int = 900, overlap: int = 120,
+               max_chunks: int | None = None) -> list[str]:
+    def blocks():
+        start = 0
+        for match in re.finditer(r"\n\s*\n|(?<=[。！？!?])\s*", text):
+            block = text[start:match.start()].strip()
+            if block:
+                yield block
+            start = match.end()
+        block = text[start:].strip()
+        if block:
+            yield block
     chunks: list[str] = []
+    def append(chunk):
+        if max_chunks is not None and len(chunks) >= max_chunks:
+            raise ProviderResourceLimitError("knowledge_chunk_limit")
+        chunks.append(chunk)
     current = ""
-    for block in blocks:
+    for block in blocks():
         if len(current) + len(block) + 1 <= max_chars:
             current = f"{current}\n{block}".strip()
             continue
         if current:
-            chunks.append(current)
+            append(current)
         if len(block) <= max_chars:
             current = block
             continue
         start = 0
         step = max(1, max_chars - overlap)
         while start < len(block):
-            chunks.append(block[start : start + max_chars])
+            append(block[start : start + max_chars])
             start += step
         current = ""
     if current:
-        chunks.append(current)
+        append(current)
     return chunks
 
 
@@ -58,34 +69,51 @@ def index_document(
     document: KnowledgeDocument,
     embedder: EmbeddingProvider | HashEmbedding | None = None,
     storage: ObjectStorage | None = None,
+    embedding_batch_size: int = 32,
+    max_chunks: int = 2000,
 ) -> int:
+    if any(type(value) is not int or value < 1 for value in (embedding_batch_size, max_chunks)):
+        raise ValueError("Index limits must be positive integers")
     if not document.storage_uri:
         raise ValueError("知识文档没有可读取的存储地址")
     if storage is not None:
         raw = storage.read(document.storage_uri, max_bytes=20 * 1024 * 1024)
     else:
         path = local_path_from_uri(document.storage_uri)
-        raw = path.read_bytes()
+        with path.open("rb") as stream:
+            raw = stream.read(20 * 1024 * 1024 + 1)
+    if len(raw) > 20 * 1024 * 1024:
+        raise ProviderResourceLimitError("provider_request_too_large")
     try:
         document_text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         document_text = raw.decode("gb18030")
-    chunks = split_text(document_text)
+    chunks = split_text(document_text, max_chunks=max_chunks)
     if not chunks:
         raise ValueError("文档没有可索引文本")
 
     embedder = embedder or HashEmbedding()
+    encode_many = getattr(embedder, "encode_many", None)
+    embeddings = []
+    for start in range(0, len(chunks), embedding_batch_size):
+        batch = chunks[start:start + embedding_batch_size]
+        vectors = encode_many(batch) if callable(encode_many) else [embedder.encode(chunk) for chunk in batch]
+        if len(vectors) != len(batch):
+            raise RuntimeError("Embedding provider 返回的向量数量与知识分块不一致")
+        embeddings.extend(vectors)
+    if len(embeddings) != len(chunks):
+        raise RuntimeError("Embedding provider 返回的向量数量与知识分块不一致")
     session.execute(
         delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
     )
-    for index, chunk in enumerate(chunks):
+    for index, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=True)):
         session.add(
             KnowledgeChunk(
                 workspace_id=document.workspace_id,
                 document_id=document.id,
                 chunk_index=index,
                 text=chunk,
-                embedding=embedder.encode(chunk),
+                embedding=embedding,
                 embedding_model=getattr(
                     embedder,
                     "model_name",
@@ -97,13 +125,11 @@ def index_document(
     session.flush()
     if session.bind and session.bind.dialect.name == "postgresql":
         for chunk in session.scalars(
-            select(KnowledgeChunk).where(
-                KnowledgeChunk.document_id == document.id
-            )
+            select(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id)
         ):
-            vector_literal = "[" + ",".join(
-                f"{value:.9g}" for value in chunk.embedding
-            ) + "]"
+            vector_literal = (
+                "[" + ",".join(f"{value:.9g}" for value in chunk.embedding) + "]"
+            )
             session.execute(
                 text(
                     """
@@ -135,9 +161,7 @@ def search_workspace_knowledge(
     embedder = embedder or HashEmbedding()
     query_vector = embedder.encode(query)
     if session.bind and session.bind.dialect.name == "postgresql":
-        vector_literal = "[" + ",".join(
-            f"{value:.9g}" for value in query_vector
-        ) + "]"
+        vector_literal = "[" + ",".join(f"{value:.9g}" for value in query_vector) + "]"
         rows = session.execute(
             text(
                 """
@@ -153,7 +177,7 @@ def search_workspace_knowledge(
                 ORDER BY kv.embedding <=> CAST(:embedding AS vector)
                 LIMIT :limit
                 """
-            ),
+            ).execution_options(contentflow_readonly=True),
             {
                 "workspace_id": workspace_id,
                 "embedding": vector_literal,
@@ -164,8 +188,7 @@ def search_workspace_knowledge(
             RetrievedChunk(
                 chunk_id=row["id"],
                 source=str(
-                    (row["metadata_json"] or {}).get("source")
-                    or row["document_id"]
+                    (row["metadata_json"] or {}).get("source") or row["document_id"]
                 ),
                 text=row["text"],
                 score=float(row["score"]),
@@ -174,9 +197,7 @@ def search_workspace_knowledge(
         ]
     chunks = list(
         session.scalars(
-            select(KnowledgeChunk).where(
-                KnowledgeChunk.workspace_id == workspace_id
-            )
+            select(KnowledgeChunk).where(KnowledgeChunk.workspace_id == workspace_id)
         )
     )
     scored = [

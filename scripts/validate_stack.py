@@ -62,6 +62,13 @@ def main() -> None:
         headers = {
             "Authorization": f"Bearer {register.json()['access_token']}"
         }
+        def confirm_publication(payload: dict) -> httpx.Response:
+            payload = {**payload, "request_id": str(uuid.uuid4())}
+            preview = client.post(f"{api}/publishing/preview", headers=headers, json=payload)
+            preview.raise_for_status()
+            return client.post(f"{api}/publishing/jobs", headers=headers, json={
+                **payload, "preview_token": preview.json()["preview_token"],
+            })
         primary_workspace_id = register.json()["workspace_id"]
 
         secondary = client.post(
@@ -180,8 +187,8 @@ def main() -> None:
         archived_campaign.raise_for_status()
         archived_run = client.post(
             f"{api}/campaigns/{campaign_id}/runs",
-            headers=headers,
-            json={},
+            headers={**headers, "Idempotency-Key": str(uuid.uuid4())},
+            json={"expected_campaign_updated_at": archived_campaign.json()["updated_at"]},
         )
         if archived_run.status_code != 409:
             raise RuntimeError("Archived campaign unexpectedly accepted a run.")
@@ -194,8 +201,8 @@ def main() -> None:
 
         workflow_run = client.post(
             f"{api}/campaigns/{campaign_id}/runs",
-            headers=headers,
-            json={},
+            headers={**headers, "Idempotency-Key": str(uuid.uuid4())},
+            json={"expected_campaign_updated_at": restored_campaign.json()["updated_at"]},
         )
         workflow_run.raise_for_status()
         run_id = workflow_run.json()["id"]
@@ -295,17 +302,13 @@ def main() -> None:
         )
         channel.raise_for_status()
 
-        cancellable = client.post(
-            f"{api}/publishing/jobs",
-            headers=headers,
-            json={
+        cancellable = confirm_publication({
                 "content_item_id": content_id,
                 "channel_id": channel.json()["id"],
                 "scheduled_at": (
                     datetime.now(timezone.utc) + timedelta(hours=1)
                 ).isoformat(),
-            },
-        )
+            })
         cancellable.raise_for_status()
         cancelled = client.post(
             f"{api}/publishing/jobs/{cancellable.json()['id']}/cancel",
@@ -316,15 +319,11 @@ def main() -> None:
             raise RuntimeError("Publish schedule cancellation was not persisted.")
 
         scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=5)
-        publish_job = client.post(
-            f"{api}/publishing/jobs",
-            headers=headers,
-            json={
+        publish_job = confirm_publication({
                 "content_item_id": content_id,
                 "channel_id": channel.json()["id"],
                 "scheduled_at": scheduled_at.isoformat(),
-            },
-        )
+            })
         publish_job.raise_for_status()
         publish_job_id = publish_job.json()["id"]
 

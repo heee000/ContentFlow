@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -11,8 +11,10 @@ from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
 from ..entities import ChannelConnection, Job
 from ..job_queue import enqueue_job
+from ..pagination import DEFAULT_PAGE_LIMIT, PageCursor, PageLimit, paginate
 from ..schemas import ChannelCreate, ChannelResponse, JobResponse
 from ..security import encrypt_credentials
+from ..channel_config import validate_channel_config
 
 
 router = APIRouter(prefix="/channels", tags=["channels"])
@@ -70,13 +72,23 @@ def validate_channel_payload(payload: ChannelCreate) -> str:
 
 
 @router.get("", response_model=list[ChannelResponse])
-def list_channels(principal: CurrentPrincipal, session: Db):
-    return list(
-        session.scalars(
-            select(ChannelConnection)
-            .where(ChannelConnection.workspace_id == principal.workspace_id)
-            .order_by(ChannelConnection.created_at.desc())
-        )
+def list_channels(
+    principal: CurrentPrincipal,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    return paginate(
+        session,
+        select(ChannelConnection).where(
+            ChannelConnection.workspace_id == principal.workspace_id
+        ),
+        timestamp_column=ChannelConnection.created_at,
+        id_column=ChannelConnection.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
     )
 
 
@@ -144,6 +156,7 @@ def test_channel(
     channel = session.scalar(channel_query)
     if channel is None:
         raise HTTPException(status_code=404, detail="连接器不存在")
+    validate_channel_config(channel.platform, channel.config_json)
     if channel.status in {"script_only", "export_only"}:
         raise HTTPException(status_code=409, detail="该连接不需要远程 API 测试")
     if channel.status == "pending_test":

@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .ai_provenance import AIProvenanceRecorder
+from .model_output import MODEL_OUTPUT_SCHEMA_VERSION, complete_model_json
 from .audit import record_audit
 from .entities import PromptEvalRun, PromptEvalSuite, PromptRelease
 from .prompt_governance import prompt_set_from_release
@@ -208,6 +209,12 @@ def require_current_passed_eval(
     suite = get_active_eval_suite(session, release.workspace_id)
     if suite is None:
         raise ValueError("当前工作区没有生效的 Prompt Eval 套件")
+    verify_eval_approval_policy(suite, settings)
+    if (
+        settings.prompt_approval_policy_for(release.workspace_id) == "dual_control"
+        and release.reviewed_by_user_id == release.created_by_user_id
+    ):
+        raise ValueError("当前双人策略不接受单人审批的 Prompt；请建立独立审核的新版本")
     verify_eval_suite(suite)
     prompt_set = prompt_set_from_release(release)
     target_provider = build_text_provider(settings, provider_override)
@@ -225,6 +232,8 @@ def require_current_passed_eval(
             PromptEvalRun.suite_hash == suite.suite_hash,
             PromptEvalRun.provider == target_provider_name,
             PromptEvalRun.model == target_model_name,
+            PromptEvalRun.result_json["model_output_schema_version"].as_integer()
+            == MODEL_OUTPUT_SCHEMA_VERSION,
         )
         .order_by(PromptEvalRun.completed_at.desc())
     )
@@ -232,9 +241,18 @@ def require_current_passed_eval(
         raise ValueError(
             "Prompt 版本尚未通过当前评测套件 "
             f"{eval_suite_version(suite.version_number)} 的目标模型门禁 "
-            f"({target_provider_name}/{target_model_name})"
+            f"({target_provider_name}/{target_model_name})；"
+            f"评测必须覆盖当前输出契约 v{MODEL_OUTPUT_SCHEMA_VERSION}"
         )
     return suite, run
+
+
+def verify_eval_approval_policy(suite: PromptEvalSuite, settings: Settings) -> None:
+    if (
+        settings.prompt_approval_policy_for(suite.workspace_id) == "dual_control"
+        and suite.activated_by_user_id == suite.created_by_user_id
+    ):
+        raise ValueError("当前双人策略不接受单人激活的 Eval；请由另一名管理员激活新套件")
 
 
 def _resolve_path(value: Any, path: str) -> Any:
@@ -316,6 +334,7 @@ def execute_prompt_eval_run(
         raise ValueError("评测运行关联对象不存在或工作区不一致")
 
     cases = verify_eval_suite(suite)
+    verify_eval_approval_policy(suite, settings)
     prompt_set = prompt_set_from_release(release)
     if run.suite_hash != suite.suite_hash:
         raise EvalIntegrityError("评测运行绑定的套件哈希不一致")
@@ -324,21 +343,47 @@ def execute_prompt_eval_run(
 
     run.status = "running"
     run.started_at = datetime.now(timezone.utc)
-    session.flush()
+    session.commit()
     provider = build_text_provider(settings, run.requested_provider)
     recorder = AIProvenanceRecorder(
         provider,
         embedding_provider="not_used",
         embedding_model="not_used",
         prompt_set=prompt_set,
+        ledger_session=(
+            session if getattr(provider, "provider_name", "") == "openai-compatible" else None
+        ),
+        workspace_id=run.workspace_id,
+        entity_type="prompt_eval_run",
+        entity_id=run.id,
     )
     results = []
-    for case in cases:
-        output = recorder.complete_json(
-            case["stage"],
-            dict(case["input_json"]),
-        )
-        results.append(evaluate_case_output(case, output))
+    try:
+        for case in cases:
+            output = complete_model_json(
+                recorder,
+                case["stage"],
+                dict(case["input_json"]),
+            )
+            results.append(evaluate_case_output(case, output))
+    except Exception as error:
+        # Pass hash-only assertion evidence through the worker rollback. The
+        # worker persists it only after checking its lease; no extra model call,
+        # partial pass, or resumable-output cache is implied.
+        error.prompt_eval_partial_result = {
+            "schema_version": 1,
+            "model_output_schema_version": MODEL_OUTPUT_SCHEMA_VERSION,
+            "suite_version": eval_suite_version(suite.version_number),
+            "suite_hash": suite.suite_hash,
+            "case_count": len(cases),
+            "completed_case_count": len(results),
+            "uncompleted_case_count": len(cases) - len(results),
+            "passed_count": sum(item["passed"] for item in results),
+            "failed_count": sum(not item["passed"] for item in results),
+            "cases": results,
+            "partial": True,
+        }
+        raise
 
     passed_count = sum(item["passed"] for item in results)
     run.provider = recorder.provider_name
@@ -348,6 +393,7 @@ def execute_prompt_eval_run(
     run.error = None
     run.result_json = {
         "schema_version": 1,
+        "model_output_schema_version": MODEL_OUTPUT_SCHEMA_VERSION,
         "suite_version": eval_suite_version(suite.version_number),
         "suite_hash": suite.suite_hash,
         "case_count": len(results),

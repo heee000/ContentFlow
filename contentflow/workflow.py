@@ -18,33 +18,86 @@ def build_asset_tasks(
     brief: CampaignBrief,
     plan: dict[str, Any],
     draft: dict[str, Any],
+    *,
+    image_source: str = "manual",
+    image_search_query: str = "",
 ) -> list[dict[str, Any]]:
-    base_prompt = (
-        f"{brief.city}城市出行场景，{plan['asset_direction']}，"
-        f"画面服务于主题“{draft['title']}”，避免展示虚构优惠或未确认功能"
+    media_brief = (
+        draft.get("media_brief")
+        if isinstance(draft.get("media_brief"), dict)
+        else {}
     )
-    tasks = [
-        {
-            "type": "image",
-            "model_input": base_prompt,
-            "ratio": "3:4" if platform == "xiaohongshu" else "16:9",
-            "status": "pending_generation",
-        }
-    ]
+    generation_prompt = str(
+        media_brief.get("generation_prompt")
+        or plan.get("image_generation_prompt")
+        or plan.get("asset_direction")
+        or ""
+    ).strip()
+    base_prompt = (
+        f"{brief.city}城市内容视觉，{generation_prompt}，"
+        f"画面服务于主题“{draft['title']}”，不得出现虚构优惠、未确认产品界面、"
+        "无法核验的文字或品牌标识；构图应为社媒封面留出标题安全区"
+    )
+    search_query = str(
+        image_search_query
+        or media_brief.get("search_query")
+        or plan.get("image_search_query")
+        or f"{brief.city} {draft['title']}"
+    ).strip()[:500]
+    ratio = {
+        "xiaohongshu": "3:4",
+        "douyin": "9:16",
+        "wechat": "16:9",
+    }.get(platform, "1:1")
+    source = (
+        image_source
+        if image_source in {"manual", "generate", "search", "hybrid"}
+        else "manual"
+    )
+    providers = {
+        "manual": ["manual"],
+        "generate": ["configured-image-generation"],
+        "search": ["openverse"],
+        "hybrid": ["openverse", "configured-image-generation"],
+    }[source]
+    tasks = []
+    for provider in providers:
+        tasks.append(
+            {
+                "type": "image",
+                "provider": provider,
+                "media_source": (
+                    "search"
+                    if provider == "openverse"
+                    else "generate"
+                    if provider == "configured-image-generation"
+                    else "manual"
+                ),
+                "model_input": base_prompt,
+                "search_query": search_query,
+                "ratio": ratio,
+                "candidate_group": "cover" if source == "hybrid" else None,
+                "candidate_optional": source == "hybrid",
+                "selected": False if source == "hybrid" else True,
+                "status": "pending_generation",
+            }
+        )
     if platform == "douyin":
         layout = draft.get("layout") if isinstance(draft.get("layout"), dict) else {}
         generated_shots = layout.get("shots")
         tasks.append(
             {
                 "type": "video_storyboard",
+                "provider": "configured-video-generation",
+                "media_source": "generate",
                 "duration_seconds": 20,
                 "shots": generated_shots
                 if isinstance(generated_shots, list) and generated_shots
                 else [
-                    "0-3 秒：提出夜游路线选择困难",
-                    "3-12 秒：展示地点整理与路线调整",
-                    "12-17 秒：展示确认后的路线结果",
-                    "17-20 秒：CTA 与人工确认提示",
+                    "0-3 秒：提出具体冲突或展示结果",
+                    "3-12 秒：展示关键操作和信息变化",
+                    "12-17 秒：说明结果与适用边界",
+                    "17-20 秒：自然衔接 CTA 与人工确认提示",
                 ],
                 "aspect_ratio": layout.get("aspect_ratio") or "9:16",
                 "status": "pending_generation",

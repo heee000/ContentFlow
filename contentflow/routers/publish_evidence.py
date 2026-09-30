@@ -3,20 +3,22 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+from ..diagnostics import log_exception
 from datetime import datetime, timezone
 from typing import Annotated
 
 from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..db import get_db
 from ..dependencies import AppSettings, CurrentPrincipal, Principal, require_role
-from ..entities import PublishConfirmation, PublishEvidence, PublishJob
+from ..entities import PublishConfirmation, PublishEvidence, PublishJob, new_id
 from ..object_storage import build_object_storage
+from ..pagination import DEFAULT_PAGE_LIMIT, PageCursor, PageLimit, paginate
 from ..publish_evidence import (
     PublishEvidenceError,
     evidence_manifest_sha256,
@@ -28,12 +30,18 @@ from ..schemas import (
     PublishJobResponse,
     PublishScriptResultRequest,
 )
+from ..storage_ledger import (
+    StorageLedgerUnverified,
+    StorageQuotaExceeded,
+    build_ledgered_object_storage,
+)
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/publishing", tags=["publishing"])
 Db = Annotated[Session, Depends(get_db)]
 Reviewer = Annotated[Principal, Depends(require_role("reviewer"))]
+MAX_EVIDENCE_MANIFEST_ITEMS = 100
 
 
 def _publish_job(
@@ -97,8 +105,28 @@ def _current_evidence(
                 PublishEvidence.script_attempt_id == script_attempt_id,
             )
             .order_by(PublishEvidence.created_at, PublishEvidence.id)
+            .limit(MAX_EVIDENCE_MANIFEST_ITEMS + 1)
         )
     )
+
+
+def _current_evidence_usage(
+    session: Session,
+    *,
+    job: PublishJob,
+    script_attempt_id: str,
+) -> tuple[int, int]:
+    count, total_bytes = session.execute(
+        select(
+            func.count(PublishEvidence.id),
+            func.coalesce(func.sum(PublishEvidence.size_bytes), 0),
+        ).where(
+            PublishEvidence.workspace_id == job.workspace_id,
+            PublishEvidence.publish_job_id == job.id,
+            PublishEvidence.script_attempt_id == script_attempt_id,
+        )
+    ).one()
+    return int(count), int(total_bytes)
 
 
 @router.get(
@@ -109,6 +137,9 @@ def list_publish_evidence(
     publish_job_id: str,
     principal: CurrentPrincipal,
     session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
 ):
     job = _publish_job(
         session,
@@ -116,10 +147,19 @@ def list_publish_evidence(
         workspace_id=principal.workspace_id,
     )
     script_attempt_id, _, _ = _script_context(job)
-    return _current_evidence(
+    return paginate(
         session,
-        job=job,
-        script_attempt_id=script_attempt_id,
+        select(PublishEvidence).where(
+            PublishEvidence.workspace_id == principal.workspace_id,
+            PublishEvidence.publish_job_id == job.id,
+            PublishEvidence.script_attempt_id == script_attempt_id,
+        ),
+        timestamp_column=PublishEvidence.created_at,
+        id_column=PublishEvidence.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        ascending=True,
     )
 
 
@@ -179,7 +219,36 @@ async def upload_publish_evidence(
             detail="Equivalent evidence is already attached to this script attempt",
         )
 
-    storage = build_object_storage(settings)
+    evidence_count, evidence_total_bytes = _current_evidence_usage(
+        session,
+        job=job,
+        script_attempt_id=script_attempt_id,
+    )
+    if evidence_count >= settings.publish_evidence_max_items:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Script attempt evidence item quota reached "
+                f"({settings.publish_evidence_max_items})"
+            ),
+        )
+    projected_total_bytes = evidence_total_bytes + len(normalized.data)
+    if projected_total_bytes > settings.publish_evidence_max_total_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Script attempt evidence storage quota exceeded "
+                f"({settings.publish_evidence_max_total_bytes} bytes)"
+            ),
+        )
+
+    evidence_id = new_id()
+    storage = build_ledgered_object_storage(
+        session,
+        settings,
+        owner_type="publish_evidence",
+        owner_id=evidence_id,
+    )
     stored = None
     try:
         stored = storage.put(
@@ -193,18 +262,24 @@ async def upload_publish_evidence(
             normalized.data
         ):
             raise ValueError("post-storage integrity verification failed")
+    except (StorageQuotaExceeded, StorageLedgerUnverified) as error:
+        raise HTTPException(
+            status_code=413 if isinstance(error, StorageQuotaExceeded) else 409,
+            detail=str(error),
+        ) from error
     except (OSError, ValueError) as error:
         if stored is not None:
             try:
                 storage.delete(stored.uri)
             except (OSError, ValueError):
-                logger.exception("failed to compensate invalid evidence object")
+                log_exception(logger, "failed to compensate invalid evidence object")
         raise HTTPException(
             status_code=503, detail="Evidence storage failed"
         ) from error
 
     try:
         evidence = PublishEvidence(
+            id=evidence_id,
             workspace_id=principal.workspace_id,
             publish_job_id=job.id,
             script_attempt_id=script_attempt_id,
@@ -220,12 +295,8 @@ async def upload_publish_evidence(
         )
         session.add(evidence)
         session.flush()
-        evidence_items = _current_evidence(
-            session,
-            job=job,
-            script_attempt_id=script_attempt_id,
-        )
-        response_json["script_evidence_count"] = len(evidence_items)
+        response_json["script_evidence_count"] = evidence_count + 1
+        response_json["script_evidence_total_bytes"] = projected_total_bytes
         job.response_json = response_json
         record_audit(
             session,
@@ -250,7 +321,7 @@ async def upload_publish_evidence(
         try:
             storage.delete(stored.uri)
         except Exception:
-            logger.exception("failed to compensate uncommitted evidence object")
+            log_exception(logger, "failed to compensate uncommitted evidence object")
         raise
     session.refresh(evidence)
     return evidence
@@ -319,6 +390,9 @@ def list_publish_confirmations(
     publish_job_id: str,
     principal: CurrentPrincipal,
     session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
 ):
     job = _publish_job(
         session,
@@ -326,16 +400,19 @@ def list_publish_confirmations(
         workspace_id=principal.workspace_id,
     )
     script_attempt_id, _, _ = _script_context(job)
-    return list(
-        session.scalars(
-            select(PublishConfirmation)
-            .where(
-                PublishConfirmation.workspace_id == principal.workspace_id,
-                PublishConfirmation.publish_job_id == job.id,
-                PublishConfirmation.script_attempt_id == script_attempt_id,
-            )
-            .order_by(PublishConfirmation.created_at, PublishConfirmation.id)
-        )
+    return paginate(
+        session,
+        select(PublishConfirmation).where(
+            PublishConfirmation.workspace_id == principal.workspace_id,
+            PublishConfirmation.publish_job_id == job.id,
+            PublishConfirmation.script_attempt_id == script_attempt_id,
+        ),
+        timestamp_column=PublishConfirmation.created_at,
+        id_column=PublishConfirmation.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        ascending=True,
     )
 
 
@@ -377,6 +454,11 @@ def confirm_script_publish_result(
         job=job,
         script_attempt_id=script_attempt_id,
     )
+    if len(evidence_items) > MAX_EVIDENCE_MANIFEST_ITEMS:
+        raise HTTPException(
+            status_code=409,
+            detail="Evidence set exceeds the supported manifest safety limit",
+        )
     if not evidence_items:
         raise HTTPException(
             status_code=409,

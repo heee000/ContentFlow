@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -27,6 +27,10 @@ dependencies = [
 s3 = [
   "boto3>=1.43.82,<2.0",
 ]
+local-embeddings = [
+  "sentence-transformers>=5.7,<6.0",
+  "torch>=2.12.1,<3.0",
+]
 security = [
   "pip-audit>=2.10,<3.0",
 ]
@@ -38,14 +42,25 @@ test = [
 ]
 
 
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.ruff]
 line-length = 88
 target-version = "py311"
 
 [project.scripts]
 contentflow = "contentflow.cli:main"
+contentflow-bootstrap-admin = "contentflow.bootstrap_admin:main"
 contentflow-media-conformance = "contentflow.media_conformance:main"
 contentflow-migrate = "contentflow.migrate:main"
+contentflow-prepare-embedding-cache = "contentflow.embedding_cache:main"
+contentflow-s3-conformance = "contentflow.s3_conformance:main"
 contentflow-worker = "contentflow.worker:main"
 
 [tool.ruff.lint]
@@ -54,3 +69,8 @@ select = ["E4", "E7", "E9", "F"]
 
 [tool.setuptools.packages.find]
 include = ["contentflow*"]
+
+[tool.setuptools.data-files]
+"share/contentflow" = ["alembic.ini"]
+"share/contentflow/migrations" = ["migrations/env.py", "migrations/script.py.mako"]
+"share/contentflow/migrations/versions" = ["migrations/versions/*.py"]

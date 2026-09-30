@@ -3,22 +3,45 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
+from .diagnostics import log_exception, safe_error_receipt
+from .media_validation import require_video_decoders, validate_media, validation_error_receipt
+from .review_evidence import resolve_brief
+from .provider_resources import ProviderResourceLimitError, ProviderResourceLimits, resource_limit_receipt
 import os
+import random
 import signal
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from io import BytesIO
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import literal, or_, select
+from sqlalchemy.exc import (
+    DBAPIError,
+    DataError,
+    DisconnectionError,
+    IntegrityError,
+    InterfaceError,
+    OperationalError,
+    ProgrammingError,
+    TimeoutError as SQLAlchemyTimeoutError,
+)
+from sqlalchemy.orm import Session, sessionmaker
 
 from . import db
+from .database_schema import verify_database_schema
+from .metric_values import MetricValues
 from .audit import record_audit
-from .connectors import build_connector
+from .asset_operations import lock_asset_for_mutation
+from .asset_work import ASSET_WORK_SESSION_KEY, AssetWork, AssetWorkSuperseded
+from .connectors import ConnectorPublishError, build_connector
+from .connector_errors import CONNECTOR_JOB_TYPES, safe_connector_failure, connector_diagnostic
+from .channel_config import ChannelConfigurationError
 from .entities import (
     Asset,
     ChannelConnection,
@@ -32,26 +55,65 @@ from .entities import (
     WorkerNode,
 )
 from .embeddings import build_embedding_provider
+from .execution_fence import ExecutionFence, ExecutionTransactionOpen, execution_scope
+from .image_search import build_image_search_provider
+from .job_recovery import (
+    JOB_RECOVERY_POLICIES,
+    MANUAL_REVIEW_JOB_TYPES as MANUAL_REVIEW_JOB_TYPES,
+    JobRecoveryPolicy,
+    manual_review_job_types,
+)
 from .job_queue import (
     JobLeaseLost,
     claim_next_job,
     complete_job,
     enqueue_job,
+    fail_expired_manual_review_leases,
     fail_exhausted_leases,
     fail_job,
     renew_job_lease,
 )
 from .knowledge_service import index_document
 from .media_providers import (
+    MediaConfigurationError,
+    MediaGeneration,
     MediaProviderError,
     build_media_provider,
     download_generated_media,
     media_provider_profile_fingerprint,
+    media_configuration_receipt,
+    validate_media_download_url,
 )
-from .object_storage import build_object_storage
+from .object_storage import build_object_storage, is_managed_storage_uri
 from .prompt_eval import execute_prompt_eval_run
+from .publish_evidence import PublishEvidenceError
+from .publish_manifest import (
+    ManifestObjectStorage,
+    PublishManifestConflict,
+    detached_copy,
+    load_release_inputs,
+    require_publish_manifest,
+)
+from .provider_invocations import (
+    LedgeredEmbeddingProvider,
+    LedgeredMediaDownloader,
+    LedgeredMediaProvider,
+    LedgeredSearchProvider,
+    ProviderInvocationLedger,
+    provider_job_context,
+)
 from .script_publishing import build_script_package, store_script_package
 from .settings import Settings, get_settings
+from .storage_ledger import (
+    StorageLedgerInvariantError,
+    StorageLedgerUnverified,
+    StorageQuotaExceeded,
+    build_ledgered_object_storage,
+    delete_storage_allocation,
+    reconcile_workspace_storage,
+    request_storage_deletion,
+    schedule_due_storage_reconciliations,
+)
 from .workflow_service import execute_workflow_run
 
 
@@ -65,12 +127,164 @@ def configure_worker_logging() -> None:
     logger.setLevel(logging.INFO)
 
 
+DATABASE_AVAILABILITY_ERRORS = (
+    DisconnectionError,
+    InterfaceError,
+    OperationalError,
+    SQLAlchemyTimeoutError,
+)
+DATABASE_PERMANENT_ERRORS = (DataError, IntegrityError, ProgrammingError)
+
+
+class DatabaseErrorKind(StrEnum):
+    """Operational categories used by the worker recovery policy."""
+
+    AVAILABILITY = "availability"
+    TRANSACTION_RETRYABLE = "transaction_retryable"
+    LOCK_CONTENTION = "lock_contention"
+    QUERY_INTERRUPTED = "query_interrupted"
+    PERMANENT = "permanent"
+
+
+POSTGRES_AVAILABILITY_SQLSTATES = {
+    "53300",  # too_many_connections
+    "57P01",  # admin_shutdown
+    "57P02",  # crash_shutdown
+    "57P03",  # cannot_connect_now
+    "57P04",  # database_dropped
+    "58030",  # io_error
+}
+POSTGRES_TRANSACTION_RETRYABLE_SQLSTATES = {
+    "40001",  # serialization_failure
+    "40P01",  # deadlock_detected
+}
+POSTGRES_LOCK_CONTENTION_SQLSTATES = {"55P03"}  # lock_not_available
+POSTGRES_QUERY_INTERRUPTED_SQLSTATES = {"57014"}  # query_canceled
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    pending = [error]
+    ordered: list[BaseException] = []
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        ordered.append(current)
+        for related in (
+            getattr(current, "orig", None),
+            current.__cause__,
+            current.__context__,
+        ):
+            if isinstance(related, BaseException) and id(related) not in seen:
+                pending.append(related)
+    return ordered
+
+
+def database_error_sqlstate(error: BaseException) -> str | None:
+    """Extract a PostgreSQL SQLSTATE without formatting the exception body."""
+
+    for current in _exception_chain(error):
+        candidates = [
+            getattr(current, "sqlstate", None),
+            getattr(current, "pgcode", None),
+        ]
+        diagnostic = getattr(current, "diag", None)
+        if diagnostic is not None:
+            candidates.append(getattr(diagnostic, "sqlstate", None))
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            normalized = candidate.strip().upper()
+            if len(normalized) == 5 and normalized.isalnum():
+                return normalized
+    return None
+
+
+def classify_database_error(error: BaseException) -> DatabaseErrorKind | None:
+    """Classify SQLAlchemy/DBAPI failures for safe worker recovery.
+
+    Known PostgreSQL states take precedence over the broad SQLAlchemy
+    ``OperationalError`` wrapper. Drivers that do not expose a SQLSTATE retain
+    the previous conservative availability behavior.
+    """
+
+    chain = _exception_chain(error)
+    sqlstate = database_error_sqlstate(error)
+    if sqlstate is not None:
+        if sqlstate.startswith("08") or sqlstate in POSTGRES_AVAILABILITY_SQLSTATES:
+            return DatabaseErrorKind.AVAILABILITY
+        if sqlstate in POSTGRES_TRANSACTION_RETRYABLE_SQLSTATES:
+            return DatabaseErrorKind.TRANSACTION_RETRYABLE
+        if sqlstate in POSTGRES_LOCK_CONTENTION_SQLSTATES:
+            return DatabaseErrorKind.LOCK_CONTENTION
+        if sqlstate in POSTGRES_QUERY_INTERRUPTED_SQLSTATES:
+            return DatabaseErrorKind.QUERY_INTERRUPTED
+
+    if any(
+        isinstance(item, DBAPIError) and item.connection_invalidated
+        for item in chain
+    ):
+        return DatabaseErrorKind.AVAILABILITY
+    if any(isinstance(item, DATABASE_PERMANENT_ERRORS) for item in chain):
+        return DatabaseErrorKind.PERMANENT
+    if sqlstate is not None and any(isinstance(item, DBAPIError) for item in chain):
+        return DatabaseErrorKind.PERMANENT
+    if any(isinstance(item, DATABASE_AVAILABILITY_ERRORS) for item in chain):
+        return DatabaseErrorKind.AVAILABILITY
+    return None
+
+
+def is_database_availability_error(error: BaseException) -> bool:
+    """Return whether an exception represents a retryable database outage.
+
+    Constraint, data, and programming errors intentionally stay outside this
+    classifier so a broken migration or invariant cannot become an infinite
+    availability retry loop.
+    """
+
+    return classify_database_error(error) == DatabaseErrorKind.AVAILABILITY
+
+
+def is_worker_database_retryable_error(error: BaseException) -> bool:
+    """Return whether a failed worker DB operation can use bounded backoff."""
+
+    return classify_database_error(error) in {
+        DatabaseErrorKind.AVAILABILITY,
+        DatabaseErrorKind.TRANSACTION_RETRYABLE,
+        DatabaseErrorKind.LOCK_CONTENTION,
+        DatabaseErrorKind.QUERY_INTERRUPTED,
+    }
+
+
+def sanitized_database_error(error: BaseException) -> str:
+    """Return an operator-useful message without SQL, parameters, or DSNs."""
+
+    kind = classify_database_error(error)
+    sqlstate = database_error_sqlstate(error) or "unknown"
+    kind_value = kind.value if kind is not None else "unknown"
+    return (
+        "Database operation failed "
+        f"(kind={kind_value}, sqlstate={sqlstate}, "
+        f"error_type={type(error).__name__})"
+    )
+
+
 class JobNotReady(RuntimeError):
     """The external task is healthy but has not reached a terminal state."""
 
 
+class WorkerDatabaseUnavailable(RuntimeError):
+    """Sanitized terminal error after the database retry budget is exhausted."""
+
+
 class PublishReconciliationRequired(RuntimeError):
     """The remote outcome is uncertain and requires reconciliation before retry."""
+
+
+class PublishRetrySafeFailure(RuntimeError):
+    """The dispatch stopped before any external platform write was attempted."""
 
 
 class LeaseHeartbeat:
@@ -82,11 +296,14 @@ class LeaseHeartbeat:
         worker_id: str,
         attempt: int,
         lease_seconds: int,
+        lease_token: str,
     ):
         self.session_factory = session_factory
         self.job_id = job_id
         self.worker_id = worker_id
         self.attempt = attempt
+        self.lease_seconds = lease_seconds
+        self.lease_token = lease_token
         self.interval_seconds = max(0.25, min(30.0, lease_seconds / 3))
         self._stop = threading.Event()
         self._lost = threading.Event()
@@ -117,6 +334,8 @@ class LeaseHeartbeat:
                         job_id=self.job_id,
                         worker_id=self.worker_id,
                         attempt=self.attempt,
+                        lease_seconds=self.lease_seconds,
+                        lease_token=self.lease_token,
                     )
                     if not renewed:
                         session.rollback()
@@ -129,14 +348,40 @@ class LeaseHeartbeat:
                         )
                         return
                     session.commit()
-            except Exception:
+            except Exception as error:
                 self._lost.set()
-                logger.exception(
-                    "job lease heartbeat failed id=%s worker=%s attempt=%s",
-                    self.job_id,
-                    self.worker_id,
-                    self.attempt,
-                )
+                database_error_kind = classify_database_error(error)
+                if database_error_kind == DatabaseErrorKind.AVAILABILITY:
+                    logger.error(
+                        "job lease heartbeat database unavailable "
+                        "id=%s worker=%s attempt=%s kind=%s sqlstate=%s "
+                        "error_type=%s",
+                        self.job_id,
+                        self.worker_id,
+                        self.attempt,
+                        database_error_kind.value,
+                        database_error_sqlstate(error) or "unknown",
+                        type(error).__name__,
+                    )
+                elif database_error_kind is not None:
+                    logger.error(
+                        "job lease heartbeat database operation failed "
+                        "id=%s worker=%s attempt=%s kind=%s sqlstate=%s "
+                        "error_type=%s",
+                        self.job_id,
+                        self.worker_id,
+                        self.attempt,
+                        database_error_kind.value,
+                        database_error_sqlstate(error) or "unknown",
+                        type(error).__name__,
+                    )
+                else:
+                    log_exception(logger,
+                        "job lease heartbeat failed id=%s worker=%s attempt=%s",
+                        self.job_id,
+                        self.worker_id,
+                        self.attempt,
+                    )
                 return
 
 
@@ -149,12 +394,14 @@ class WorkerNodeHeartbeat:
         interval_seconds: float,
         hostname: str | None = None,
         process_id: int | None = None,
+        release_sha: str = "development",
     ):
         self.session_factory = session_factory
         self.worker_id = worker_id
         self.interval_seconds = interval_seconds
         self.hostname = hostname or socket.gethostname()
         self.process_id = process_id or os.getpid()
+        self.release_sha = release_sha
         self.started_at = datetime.now(timezone.utc)
         self._stop = threading.Event()
         self._started = False
@@ -210,18 +457,45 @@ class WorkerNodeHeartbeat:
                     node.process_id = self.process_id
                     node.status = status
                     node.heartbeat_at = now
+                node.metadata_json = {
+                    **(node.metadata_json or {}),
+                    "heartbeat_interval_seconds": self.interval_seconds,
+                    "release_sha": self.release_sha,
+                }
                 if status == "stopped":
                     node.stopped_at = now
                 else:
                     node.stopped_at = None
                 session.commit()
             return True
-        except Exception:
-            logger.exception(
-                "worker node heartbeat failed id=%s status=%s",
-                self.worker_id,
-                status,
-            )
+        except Exception as error:
+            database_error_kind = classify_database_error(error)
+            if database_error_kind == DatabaseErrorKind.AVAILABILITY:
+                logger.error(
+                    "worker node heartbeat database unavailable "
+                    "id=%s status=%s kind=%s sqlstate=%s error_type=%s",
+                    self.worker_id,
+                    status,
+                    database_error_kind.value,
+                    database_error_sqlstate(error) or "unknown",
+                    type(error).__name__,
+                )
+            elif database_error_kind is not None:
+                logger.error(
+                    "worker node heartbeat database operation failed "
+                    "id=%s status=%s kind=%s sqlstate=%s error_type=%s",
+                    self.worker_id,
+                    status,
+                    database_error_kind.value,
+                    database_error_sqlstate(error) or "unknown",
+                    type(error).__name__,
+                )
+            else:
+                log_exception(logger,
+                    "worker node heartbeat failed id=%s status=%s",
+                    self.worker_id,
+                    status,
+                )
             return False
 
     def _run(self) -> None:
@@ -236,11 +510,25 @@ def handle_knowledge_index(
     if document is None:
         raise ValueError("知识文档不存在")
     document.status = "indexing"
+    session.commit()
+    embedder = build_embedding_provider(settings)
+    if settings.embedding_provider == "openai-compatible":
+        embedder = LedgeredEmbeddingProvider(
+            embedder,
+            ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
+            workspace_id=document.workspace_id,
+            entity_type="knowledge_document",
+            entity_id=document.id,
+            operation="embedding.knowledge_index",
+            provider_name=settings.embedding_provider,
+        )
     count = index_document(
         session,
         document,
-        embedder=build_embedding_provider(settings),
+        embedder=embedder,
         storage=build_object_storage(settings),
+        embedding_batch_size=settings.embedding_api_batch_size,
+        max_chunks=settings.knowledge_max_chunks,
     )
     record_audit(
         session,
@@ -312,19 +600,356 @@ def handle_connector_test(
     }
 
 
+def handle_asset_search(
+    session: Session, payload: dict[str, Any], settings: Settings
+) -> dict[str, Any]:
+    asset = session.get(Asset, payload["asset_id"])
+    if asset is None:
+        raise ValueError("素材任务不存在")
+    if asset.status in {"ready", "awaiting_selection", "stale"}:
+        return {"asset_id": asset.id, "status": asset.status}
+    if asset.kind != "image" or asset.provider != "openverse":
+        raise MediaProviderError("素材任务不是开放图库搜索任务", retryable=False)
+    work = AssetWork.begin(session, asset)
+    asset = work.require_current(session)
+    metadata = dict(asset.metadata_json or {})
+    query = str(metadata.get("search_query") or "").strip()
+    provider = LedgeredSearchProvider(
+        build_image_search_provider(settings),
+        ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
+        workspace_id=asset.workspace_id,
+        entity_id=asset.id,
+        model_name="openverse-images-v1",
+    )
+    candidates = provider.search(query=query)
+    asset = work.require_current(session, lock=True)
+    metadata = dict(asset.metadata_json or {})
+    asset.status = "awaiting_selection"
+    asset.error = None
+    asset.metadata_json = {
+        **metadata,
+        "search_provider": provider.provider_name,
+        "search_query": query,
+        "search_candidates": candidates,
+        "candidate_count": len(candidates),
+        "license_review_required": True,
+        "license_notice": (
+            "Openverse 汇总的许可元数据可能不准确；使用前必须打开原始落地页核验"
+        ),
+    }
+    record_audit(
+        session,
+        action="asset.search",
+        entity_type="asset",
+        entity_id=asset.id,
+        workspace_id=asset.workspace_id,
+        actor_user_id=None,
+        metadata={
+            "provider": provider.provider_name,
+            "candidate_count": len(candidates),
+        },
+    )
+    return {
+        "asset_id": asset.id,
+        "status": asset.status,
+        "candidate_count": len(candidates),
+    }
+
+
+def handle_asset_download(
+    session: Session, payload: dict[str, Any], settings: Settings
+) -> dict[str, Any]:
+    asset_id = str(payload.get("asset_id") or "")
+    candidate_id = str(payload.get("candidate_id") or "")
+    if not asset_id or not candidate_id:
+        raise MediaProviderError("素材下载任务参数无效", retryable=False)
+    asset = session.get(Asset, asset_id)
+    if asset is None:
+        raise ValueError("素材任务不存在")
+    metadata = dict(asset.metadata_json or {})
+    selected_candidate = metadata.get("selected_candidate")
+    if (
+        asset.status == "ready"
+        and isinstance(selected_candidate, dict)
+        and selected_candidate.get("id") == candidate_id
+    ):
+        return {"asset_id": asset.id, "status": asset.status}
+    if asset.status == "stale":
+        return {"asset_id": asset.id, "status": asset.status}
+    if asset.kind != "image" or asset.provider != "openverse":
+        raise MediaProviderError("素材任务不是开放图库下载任务", retryable=False)
+    if asset.status not in {"queued", "failed"}:
+        raise MediaProviderError("素材当前状态不能下载图库候选", retryable=False)
+    pending = metadata.get("pending_candidate_selection")
+    if not isinstance(pending, dict) or pending.get("candidate_id") != candidate_id:
+        raise MediaProviderError("素材下载选择凭证无效", retryable=False)
+    try:
+        requested_version = int(payload.get("content_version"))
+    except (TypeError, ValueError) as error:
+        raise MediaProviderError("素材下载内容版本无效", retryable=False) from error
+    if requested_version < 1 or asset.content_version != requested_version:
+        raise MediaProviderError("素材下载内容版本已变化", retryable=False)
+    candidates = metadata.get("search_candidates")
+    if not isinstance(candidates, list):
+        raise MediaProviderError("图片搜索候选元数据无效", retryable=False)
+    candidate = next(
+        (
+            item
+            for item in candidates
+            if isinstance(item, dict) and item.get("id") == candidate_id
+        ),
+        None,
+    )
+    if candidate is None:
+        raise MediaProviderError("图片搜索候选不存在", retryable=False)
+    work = AssetWork.begin(session, asset)
+    asset = work.require_current(session)
+    generation = MediaGeneration(
+        status="ready",
+        download_url=str(candidate.get("download_url") or ""),
+        mime_type="image/jpeg",
+        filename="searched-image.jpg",
+    )
+    allowed_hosts = tuple(settings.image_search_download_allowed_hosts)
+    call_metadata: dict[str, Any] = {}
+    downloader = LedgeredMediaDownloader(
+        ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
+        workspace_id=asset.workspace_id,
+        entity_id=asset.id,
+        provider_name="openverse",
+        model_name="openverse-image-download-v1",
+        operation="search.download",
+    )
+    try:
+        validate_media_download_url(
+            generation.download_url, allowed_hosts, require_https=True,
+        )
+        raw = downloader.download(
+            request={
+                "candidate_id": candidate_id,
+                "download_url": generation.download_url,
+                "max_bytes": settings.max_upload_bytes,
+                "allowed_hosts": sorted(allowed_hosts),
+                "require_https": True,
+                "max_redirects": 5,
+            },
+            invoke=lambda: download_generated_media(
+                generation,
+                max_bytes=settings.max_upload_bytes,
+                allowed_hosts=allowed_hosts,
+                require_https=True,
+                call_metadata=call_metadata,
+            ),
+            call_metadata=call_metadata,
+        )
+        normalized = validate_media(
+            raw,
+            filename="searched-image.jpg",
+            kind="image",
+            mime_type=None,
+            max_bytes=settings.max_upload_bytes,
+            max_pixels=settings.publish_evidence_max_pixels,
+        )
+    except MediaProviderError:
+        raise
+    except (PublishEvidenceError, ValueError):
+        raise MediaProviderError(
+            "所选图片无法通过安全下载或图片规范校验",
+            retryable=False,
+        ) from None
+
+    content_query = select(ContentItem).where(
+        ContentItem.id == asset.content_item_id,
+        ContentItem.workspace_id == asset.workspace_id,
+    )
+    # A read-only preflight avoids an unnecessary PUT. Do not hold content/asset
+    # locks across storage I/O; the definitive locked check is after PUT.
+    asset = work.require_current(session)
+    content = session.scalar(content_query.execution_options(populate_existing=True))
+    if asset is None or content is None:
+        raise MediaProviderError("素材或关联内容已不存在", retryable=False)
+    if asset.status == "stale":
+        return {"asset_id": asset.id, "status": asset.status}
+    current_metadata = dict(asset.metadata_json or {})
+    current_pending = current_metadata.get("pending_candidate_selection")
+    if (
+        asset.status != "queued"
+        or asset.provider != "openverse"
+        or asset.content_version != requested_version
+        or content.version != requested_version
+        or content.status != "approved"
+        or not isinstance(current_pending, dict)
+        or current_pending.get("candidate_id") != candidate_id
+    ):
+        raise MediaProviderError(
+            "下载完成前素材或内容状态已经变化，结果未写入",
+            retryable=False,
+        )
+
+    storage = build_ledgered_object_storage(
+        session,
+        settings,
+        owner_type="asset",
+        owner_id=asset.id,
+    )
+    stored = storage.put(
+        workspace_id=asset.workspace_id,
+        category="assets",
+        filename=f"openverse-cover.{normalized.extension}",
+        stream=BytesIO(normalized.data),
+        content_type=normalized.mime_type,
+    )
+    asset = work.require_current(session, lock=True)
+    content = session.scalar(content_query.execution_options(populate_existing=True))
+    current_metadata = dict(asset.metadata_json or {})
+    current_pending = current_metadata["pending_candidate_selection"]
+    try:
+        cleanup_job_id = None
+        if (
+            is_managed_storage_uri(settings, asset.storage_uri)
+            and asset.storage_uri != stored.uri
+        ):
+            previous_checksum = current_metadata.get("checksum")
+            if not isinstance(previous_checksum, str) or len(previous_checksum) != 64:
+                previous_checksum = None
+            _allocation, cleanup_job = request_storage_deletion(
+                session,
+                settings=settings,
+                workspace_id=asset.workspace_id,
+                storage_uri=asset.storage_uri,
+                owner_type="asset",
+                owner_id=asset.id,
+                category="assets",
+                filename=f"{asset.id}.object",
+                size_bytes=asset.size_bytes,
+                checksum=previous_checksum,
+                mime_type=asset.mime_type,
+            )
+            cleanup_job_id = cleanup_job.id if cleanup_job is not None else None
+        asset.status = "ready"
+        asset.storage_uri = stored.uri
+        asset.mime_type = stored.mime_type
+        asset.size_bytes = stored.size_bytes
+        asset.error = None
+        current_metadata.pop("pending_candidate_selection", None)
+        asset.metadata_json = {
+            **current_metadata,
+            "selected": True,
+            "selected_candidate": {
+                key: value
+                for key, value in candidate.items()
+                if key != "download_url"
+            },
+            "license_checked_by_user_id": current_pending.get(
+                "license_checked_by_user_id"
+            ),
+            "license_checked_at": current_pending.get("license_checked_at"),
+            "checksum": stored.checksum,
+            "source_checksum": normalized.source_sha256,
+            "media_validation": normalized.evidence,
+        }
+        candidate_group = current_metadata.get("candidate_group")
+        if candidate_group:
+            siblings = list(
+                session.scalars(
+                    select(Asset)
+                    .where(
+                        Asset.content_item_id == content.id,
+                        Asset.workspace_id == asset.workspace_id,
+                        Asset.content_version == content.version,
+                        Asset.id != asset.id,
+                    )
+                    .limit(settings.asset_max_items_per_content_version + 1)
+                )
+            )
+            if len(siblings) > settings.asset_max_items_per_content_version:
+                raise MediaProviderError(
+                    "当前内容版本素材数量超过配置上限",
+                    retryable=False,
+                )
+            for sibling in siblings:
+                sibling_metadata = dict(sibling.metadata_json or {})
+                if sibling_metadata.get("candidate_group") == candidate_group:
+                    sibling_metadata["selected"] = False
+                    sibling.metadata_json = sibling_metadata
+        record_audit(
+            session,
+            action="asset.select",
+            entity_type="asset",
+            entity_id=asset.id,
+            workspace_id=asset.workspace_id,
+            actor_user_id=current_pending.get("license_checked_by_user_id"),
+            metadata={
+                "content_item_id": content.id,
+                "candidate_group": candidate_group,
+                "provider": asset.provider,
+                "cleanup_job_id": cleanup_job_id,
+            },
+        )
+        session.flush()
+    except Exception:
+        try:
+            storage.delete(stored.uri)
+        except Exception:
+            pass
+        raise
+    return {"asset_id": asset.id, "status": asset.status}
+
+
 def _store_generation(
     *,
+    session: Session,
     asset: Asset,
     settings: Settings,
     generation,
+    work: AssetWork | None = None,
 ) -> None:
+    if work is not None:
+        asset = work.require_current(session)
+    allowed_hosts = tuple(settings.media_download_allowed_hosts)
     try:
-        data = download_generated_media(
-            generation,
-            max_bytes=settings.max_upload_bytes,
-            allowed_hosts=tuple(settings.media_download_allowed_hosts),
-            require_https=settings.production,
-        )
+        if generation.content is None and generation.download_url:
+            validate_media_download_url(
+                generation.download_url,
+                allowed_hosts,
+                require_https=settings.production,
+            )
+            call_metadata: dict[str, Any] = {}
+            model_name = (
+                settings.image_model if asset.kind == "image" else settings.video_model
+            )
+            downloader = LedgeredMediaDownloader(
+                ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
+                workspace_id=asset.workspace_id,
+                entity_id=asset.id,
+                provider_name=asset.provider,
+                model_name=model_name,
+                operation="media.download",
+            )
+            data = downloader.download(
+                request={
+                    "download_url": generation.download_url,
+                    "max_bytes": settings.max_upload_bytes,
+                    "allowed_hosts": sorted(allowed_hosts),
+                    "require_https": settings.production,
+                    "max_redirects": 5,
+                },
+                invoke=lambda: download_generated_media(
+                    generation,
+                    max_bytes=settings.max_upload_bytes,
+                    allowed_hosts=allowed_hosts,
+                    require_https=settings.production,
+                    call_metadata=call_metadata,
+                ),
+                call_metadata=call_metadata,
+            )
+        else:
+            data = download_generated_media(
+                generation,
+                max_bytes=settings.max_upload_bytes,
+                allowed_hosts=allowed_hosts,
+                require_https=settings.production,
+            )
     except MediaProviderError:
         raise
     except ValueError:
@@ -335,13 +960,51 @@ def _store_generation(
     filename = generation.filename or (
         "asset.png" if asset.kind == "image" else "asset.mp4"
     )
-    stored = build_object_storage(settings).put(
+    forbidden_phrases = ()
+    if asset.kind == "video_storyboard" and generation.mime_type == "application/json":
+        content = session.get(ContentItem, asset.content_item_id)
+        forbidden_phrases = tuple(resolve_brief(session, content).forbidden_phrases)
+    normalized = validate_media(data, kind=asset.kind, mime_type=generation.mime_type,
+        filename=filename, max_bytes=settings.max_upload_bytes,
+        max_pixels=settings.publish_evidence_max_pixels, forbidden_phrases=forbidden_phrases)
+    data = normalized.data
+    filename = f"asset.{normalized.extension}"
+    work = work or AssetWork.begin(session, asset)
+    asset = work.require_current(session)
+    stored = build_ledgered_object_storage(
+        session,
+        settings,
+        owner_type="asset",
+        owner_id=asset.id,
+    ).put(
         workspace_id=asset.workspace_id,
         category="assets",
         filename=filename,
         stream=BytesIO(data),
-        content_type=generation.mime_type,
+        content_type=normalized.mime_type,
     )
+    asset = work.require_current(session, lock=True)
+    if (
+        is_managed_storage_uri(settings, asset.storage_uri)
+        and asset.storage_uri != stored.uri
+    ):
+        previous_metadata = dict(asset.metadata_json or {})
+        previous_checksum = previous_metadata.get("checksum")
+        if not isinstance(previous_checksum, str) or len(previous_checksum) != 64:
+            previous_checksum = None
+        request_storage_deletion(
+            session,
+            settings=settings,
+            workspace_id=asset.workspace_id,
+            storage_uri=asset.storage_uri,
+            owner_type="asset",
+            owner_id=asset.id,
+            category="assets",
+            filename=f"{asset.id}.object",
+            size_bytes=asset.size_bytes,
+            checksum=previous_checksum,
+            mime_type=asset.mime_type,
+        )
     asset.status = "ready"
     asset.storage_uri = stored.uri
     asset.mime_type = stored.mime_type
@@ -351,6 +1014,8 @@ def _store_generation(
         **(asset.metadata_json or {}),
         **generation.metadata,
         "checksum": stored.checksum,
+        "source_checksum": normalized.source_sha256,
+        "media_validation": normalized.evidence,
     }
 
 
@@ -358,7 +1023,7 @@ def media_generation_idempotency_key(asset: Asset) -> str:
     """Return a stable opaque key for one asset content version."""
 
     try:
-        content_version = int((asset.metadata_json or {}).get("content_version", 1))
+        content_version = int(asset.content_version)
     except (TypeError, ValueError) as error:
         raise MediaProviderError(
             "素材内容版本格式无效",
@@ -384,10 +1049,52 @@ def handle_asset_generate(
     asset = session.get(Asset, payload["asset_id"])
     if asset is None:
         raise ValueError("素材任务不存在")
+    if asset.status == "stale":
+        return {"asset_id": asset.id, "status": asset.status}
     if asset.status == "ready":
         return {"asset_id": asset.id, "status": asset.status}
-    asset.status = "generating"
+    work = AssetWork.begin(session, asset)
+    asset = work.require_current(session)
+    configured_provider = (
+        settings.image_provider if asset.kind == "image" else settings.video_provider
+    )
+    if asset.provider in {"manual", "manual-upload"}:
+        asset = work.require_current(session, lock=True)
+        asset.provider = "manual"
+        asset.status = "awaiting_upload"
+        asset.error = None
+        asset.metadata_json = {
+            **(asset.metadata_json or {}),
+            "manual_upload_required": True,
+        }
+        record_audit(
+            session,
+            action="asset.awaiting_upload",
+            entity_type="asset",
+            entity_id=asset.id,
+            workspace_id=asset.workspace_id,
+            actor_user_id=None,
+        )
+        return {"asset_id": asset.id, "status": asset.status}
+    if configured_provider == "manual" or (
+        asset.provider in {"http", "mock"} and asset.provider != configured_provider
+    ):
+        raise MediaConfigurationError("media_source_configuration_changed")
+    if configured_provider == "http" and asset.kind != "image":
+        require_video_decoders()
     provider = build_media_provider(settings, asset.kind)
+    if configured_provider == "http":
+        model_name = (
+            settings.image_model if asset.kind == "image" else settings.video_model
+        )
+        provider = LedgeredMediaProvider(
+            provider,
+            ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
+            workspace_id=asset.workspace_id,
+            entity_id=asset.id,
+            provider_name=configured_provider,
+            model_name=model_name,
+        )
     provider_profile = media_provider_profile_fingerprint(settings, asset.kind)
     generation = provider.generate(
         kind=asset.kind,
@@ -402,6 +1109,7 @@ def handle_asset_generate(
     if generation.status == "processing":
         if not generation.external_task_id:
             raise RuntimeError("异步素材任务没有 external_task_id")
+        asset = work.require_current(session, lock=True)
         asset.status = "processing"
         asset.external_task_id = generation.external_task_id
         asset.metadata_json = {
@@ -418,7 +1126,13 @@ def handle_asset_generate(
             max_attempts=60,
         )
     elif generation.status == "ready":
-        _store_generation(asset=asset, settings=settings, generation=generation)
+        _store_generation(
+            session=session,
+            asset=asset,
+            settings=settings,
+            generation=generation,
+            work=work,
+        )
     else:
         raise RuntimeError(f"未知素材生成状态: {generation.status}")
     record_audit(
@@ -439,6 +1153,8 @@ def handle_asset_poll(
     asset = session.get(Asset, payload["asset_id"])
     if asset is None:
         raise ValueError("素材任务不存在")
+    if asset.status == "stale":
+        return {"asset_id": asset.id, "status": asset.status}
     if asset.status == "ready":
         return {"asset_id": asset.id, "status": asset.status}
     if not asset.external_task_id:
@@ -448,15 +1164,38 @@ def handle_asset_poll(
     )
     current_profile = media_provider_profile_fingerprint(settings, asset.kind)
     if not isinstance(expected_profile, str) or expected_profile != current_profile:
-        raise MediaProviderError(
-            "异步素材任务的 Provider 配置已变化或缺少目标指纹，请人工核对",
-            retryable=False,
-        )
+        raise MediaConfigurationError("media_poll_configuration_changed")
+    work = AssetWork.begin(session, asset)
+    asset = work.require_current(session)
+    configured_provider = (
+        settings.image_provider if asset.kind == "image" else settings.video_provider
+    )
+    if configured_provider == "http" and asset.kind != "image":
+        require_video_decoders()
     provider = build_media_provider(settings, asset.kind)
+    if configured_provider == "http":
+        model_name = (
+            settings.image_model if asset.kind == "image" else settings.video_model
+        )
+        provider = LedgeredMediaProvider(
+            provider,
+            ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
+            workspace_id=asset.workspace_id,
+            entity_id=asset.id,
+            provider_name=configured_provider,
+            model_name=model_name,
+        )
     generation = provider.poll(asset.external_task_id)
+    asset = work.require_current(session)
     if generation.status == "processing":
         raise JobNotReady("素材仍在生成中")
-    _store_generation(asset=asset, settings=settings, generation=generation)
+    _store_generation(
+        session=session,
+        asset=asset,
+        settings=settings,
+        generation=generation,
+        work=work,
+    )
     record_audit(
         session,
         action="asset.complete",
@@ -547,21 +1286,32 @@ def schedule_pending_publish_reconciliations(
     session: Session,
     *,
     settings: Settings,
-    limit: int = 100,
+    limit: int | None = None,
 ) -> int:
+    batch_size = (
+        settings.publish_reconciliation_sweep_batch_size if limit is None else limit
+    )
+    if not 1 <= batch_size <= 1000:
+        raise ValueError("publish reconciliation sweep batch is invalid")
+    reconciliation_key = literal("publish.reconcile:") + PublishJob.id
     query = (
         select(PublishJob)
         .join(
             ChannelConnection,
             ChannelConnection.id == PublishJob.channel_id,
         )
+        .outerjoin(Job, Job.idempotency_key == reconciliation_key)
         .where(
             PublishJob.status == "submitted",
             PublishJob.external_id.is_not(None),
             ChannelConnection.platform == "wechat",
+            or_(
+                Job.id.is_(None),
+                Job.status.in_(("succeeded", "failed")),
+            ),
         )
-        .order_by(PublishJob.updated_at.asc())
-        .limit(limit)
+        .order_by(PublishJob.updated_at.asc(), PublishJob.id.asc())
+        .limit(batch_size)
     )
     if session.bind and session.bind.dialect.name == "postgresql":
         query = query.with_for_update(of=PublishJob, skip_locked=True)
@@ -576,6 +1326,26 @@ def schedule_pending_publish_reconciliations(
         )
         scheduled += int(created)
     return scheduled
+
+
+def uncertain_connector_dispatch(session: Session, publish_job: PublishJob,
+                                 channel: ChannelConnection, error: Exception) -> None:
+    publish_job = session.get(PublishJob, publish_job.id)
+    if publish_job is not None:
+        publish_job.status = "reconciliation_required"
+        publish_job.error = (
+            "平台调用已开始但结果不确定，禁止自动重试：" + safe_connector_failure(error)
+        )
+        publish_job.response_json = {**dict(publish_job.response_json or {}),
+            "dispatch_diagnostic": connector_diagnostic(error)}
+        record_audit(session, action="publish.reconciliation_required",
+            entity_type="publish_job", entity_id=publish_job.id,
+            workspace_id=publish_job.workspace_id, actor_user_id=None,
+            metadata={"channel_id": channel.id, "error_type": type(error).__name__})
+        session.commit()
+    raise PublishReconciliationRequired(
+        "平台分发结果不确定，需要人工对账后再决定是否重试"
+    ) from None
 
 
 def handle_publish_dispatch(
@@ -611,28 +1381,18 @@ def handle_publish_dispatch(
         session.commit()
         raise PublishReconciliationRequired(publish_job.error)
 
-    content = session.get(ContentItem, publish_job.content_item_id)
-    channel = session.get(ChannelConnection, publish_job.channel_id)
-    if content is None or channel is None:
-        raise ValueError("发布任务关联的内容或连接器不存在")
-    if content.status != "approved":
-        raise ValueError("发布前内容必须保持人工审核通过状态")
+    content, channel, assets = load_release_inputs(
+        session, workspace_id=publish_job.workspace_id,
+        content_id=publish_job.content_item_id, channel_id=publish_job.channel_id,
+        settings=settings,
+    )
     if content.version != int(publish_job.request_json.get("content_version", 0)):
         raise ValueError("内容版本已变化，请重新审核并创建发布任务")
-    all_assets = list(
-        session.scalars(select(Asset).where(Asset.content_item_id == content.id))
-    )
-    assets = [
-        asset
-        for asset in all_assets
-        if int((asset.metadata_json or {}).get("content_version") or 1)
-        == content.version
-    ]
-    if not assets:
-        raise ValueError("当前内容版本没有可发布素材")
-    unfinished = [asset.id for asset in assets if asset.status != "ready"]
-    if unfinished:
-        raise ValueError(f"仍有素材未就绪: {', '.join(unfinished)}")
+    manifest = require_publish_manifest(publish_job, content, channel, assets, settings)
+    forbidden_phrases = tuple(resolve_brief(session, content).forbidden_phrases)
+    content = detached_copy(content)
+    channel_snapshot = detached_copy(channel)
+    assets = [detached_copy(asset) for asset in assets]
     delivery_mode = publish_job.delivery_mode
     # Jobs queued before delivery modes were introduced used the connector default
     # for Xiaohongshu's export-only channel. Preserve that already-supported path.
@@ -652,12 +1412,19 @@ def handle_publish_dispatch(
     if delivery_mode == "manual_export" and channel.platform != "xiaohongshu":
         raise ValueError("人工导出目前只适用于小红书")
 
-    storage = build_object_storage(settings)
     if delivery_mode == "script":
         requested_by = (publish_job.request_json or {}).get("script_requested_by")
         if not isinstance(requested_by, str) or not requested_by:
             raise ValueError("脚本发布尝试缺少可审计的发起人")
         script_attempt_id = str(uuid.uuid4())
+        storage = build_ledgered_object_storage(
+            session,
+            settings,
+            owner_type="publish_job",
+            owner_id=f"{publish_job.id}:{script_attempt_id}",
+        )
+        storage = ManifestObjectStorage(storage, manifest, max_bytes=settings.max_upload_bytes,
+            max_pixels=settings.publish_evidence_max_pixels, forbidden_phrases=forbidden_phrases)
         expires_at = datetime.now(timezone.utc) + timedelta(
             minutes=settings.script_confirmation_ttl_minutes
         )
@@ -669,7 +1436,7 @@ def handle_publish_dispatch(
         package = build_script_package(
             publish_job=publish_job,
             content=content,
-            channel=channel,
+            channel=channel_snapshot,
             assets=assets,
             script_attempt_id=script_attempt_id,
             expires_at=expires_at,
@@ -699,6 +1466,7 @@ def handle_publish_dispatch(
             "script_confirmation_count": 0,
             "script_confirmation_decision": None,
             "script_evidence_count": 0,
+            "script_evidence_total_bytes": 0,
             "script_evidence_frozen": False,
         }
         publish_job.error = None
@@ -727,7 +1495,7 @@ def handle_publish_dispatch(
             try:
                 storage.delete(stored.uri)
             except Exception:
-                logger.exception("failed to compensate uncommitted script package")
+                log_exception(logger, "failed to compensate uncommitted script package")
             raise
         return {
             "publish_job_id": publish_job.id,
@@ -736,7 +1504,15 @@ def handle_publish_dispatch(
             "external_url": publish_job.external_url,
         }
 
-    connector = build_connector(channel=channel, settings=settings, storage=storage)
+    storage = build_ledgered_object_storage(
+        session,
+        settings,
+        owner_type="publish_job",
+        owner_id=publish_job.id,
+    )
+    storage = ManifestObjectStorage(storage, manifest, max_bytes=settings.max_upload_bytes,
+        max_pixels=settings.publish_evidence_max_pixels, forbidden_phrases=forbidden_phrases)
+    connector = build_connector(channel=channel_snapshot, settings=settings, storage=storage)
 
     request_json = dict(publish_job.request_json or {})
     request_json["dispatch_token"] = (
@@ -770,30 +1546,58 @@ def handle_publish_dispatch(
             content=content,
             assets=assets,
         )
-    except Exception as error:
+    except (StorageQuotaExceeded, StorageLedgerUnverified):
+        raise
+    except ConnectorPublishError as error:
+        if not error.retry_safe:
+            uncertain_connector_dispatch(session, publish_job, channel, error)
         publish_job = session.get(PublishJob, publish_job.id)
         if publish_job is not None:
-            publish_job.status = "reconciliation_required"
+            response_json = dict(publish_job.response_json or {})
+            previous_failure = response_json.get("dispatch_failure")
+            history = list(response_json.get("dispatch_failure_history") or [])
+            if isinstance(previous_failure, dict):
+                history.append(previous_failure)
+            if history:
+                response_json["dispatch_failure_history"] = history[-20:]
+            response_json["dispatch_failure"] = {
+                "retry_safe": True,
+                "stage": error.stage,
+                "message": safe_connector_failure(error),
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+                "channel_invalidated": error.invalidate_channel,
+            }
+            response_json["dispatch_diagnostic"] = connector_diagnostic(error)
+            publish_job.response_json = response_json
+            publish_job.status = "failed"
             publish_job.error = (
-                "平台调用已开始但结果不确定，禁止自动重试："
-                f"{type(error).__name__}: {error}"
+                "外部平台写入前失败，可在修复原因后安全重试："
+                f"{safe_connector_failure(error)}"
             )[:8000]
+            publish_job.external_id = None
+            publish_job.external_url = None
+            publish_job.published_at = None
+            if error.invalidate_channel:
+                channel.status = "invalid"
             record_audit(
                 session,
-                action="publish.reconciliation_required",
+                action="publish.dispatch_failed_retry_safe",
                 entity_type="publish_job",
                 entity_id=publish_job.id,
                 workspace_id=publish_job.workspace_id,
                 actor_user_id=None,
                 metadata={
                     "channel_id": channel.id,
-                    "error_type": type(error).__name__,
+                    "stage": error.stage,
+                    "channel_invalidated": error.invalidate_channel,
                 },
             )
             session.commit()
-        raise PublishReconciliationRequired(
-            "平台分发结果不确定，需要人工对账后再决定是否重试"
-        ) from error
+        raise PublishRetrySafeFailure(
+            "发布在外部写入前失败，可在修复原因后安全重试"
+        ) from None
+    except Exception as error:
+        uncertain_connector_dispatch(session, publish_job, channel, error)
 
     publish_job.status = result.status
     publish_job.external_id = result.external_id
@@ -1044,16 +1848,12 @@ def handle_metrics_pull(
         settings=settings,
         storage=build_object_storage(settings),
     )
-    values = connector.pull_metrics(publish_job)
+    values = MetricValues.model_validate(connector.pull_metrics(publish_job)).model_dump()
     snapshot = MetricSnapshot(
         workspace_id=publish_job.workspace_id,
         publish_job_id=publish_job.id,
         captured_at=datetime.now(timezone.utc),
-        impressions=float(values.get("impressions", 0)),
-        clicks=float(values.get("clicks", 0)),
-        likes=float(values.get("likes", 0)),
-        comments=float(values.get("comments", 0)),
-        shares=float(values.get("shares", 0)),
+        **values,
         raw_json={"source": channel.platform, **values},
     )
     session.add(snapshot)
@@ -1093,9 +1893,13 @@ HANDLERS: dict[str, Handler] = {
     "workflow.execute": handle_workflow_execute,
     "connector.test": handle_connector_test,
     "asset.generate": handle_asset_generate,
+    "asset.search": handle_asset_search,
+    "asset.download": handle_asset_download,
     "asset.poll": handle_asset_poll,
     "publish.dispatch": handle_publish_dispatch,
     "publish.reconcile": handle_publish_reconcile,
+    "storage.delete": delete_storage_allocation,
+    "storage.reconcile": reconcile_workspace_storage,
     "metrics.pull": handle_metrics_pull,
 }
 
@@ -1106,7 +1910,9 @@ def mark_domain_failure(
     message: str,
     *,
     publish_outcome_uncertain: bool = False,
+    publish_outcome_reason: str = "worker_lease_exhausted",
     ai_provenance: dict[str, Any] | None = None,
+    prompt_eval_partial_result: dict[str, Any] | None = None,
 ) -> None:
     payload = dict(job.payload_json or {})
     if job.job_type == "prompt_eval.execute" and payload.get("run_id"):
@@ -1116,6 +1922,7 @@ def mark_domain_failure(
             run.error = message[:2000]
             run.completed_at = datetime.now(timezone.utc)
             run.result_json = {
+                **(prompt_eval_partial_result or {}),
                 "schema_version": 1,
                 **({"ai_provenance": ai_provenance} if ai_provenance else {}),
             }
@@ -1153,7 +1960,27 @@ def mark_domain_failure(
                 "error": message[:2000],
             }
     elif job.job_type.startswith("asset.") and payload.get("asset_id"):
-        asset = session.get(Asset, payload["asset_id"])
+        asset = lock_asset_for_mutation(session, job.workspace_id, payload["asset_id"])
+        work = session.info.get(ASSET_WORK_SESSION_KEY)
+        if isinstance(work, AssetWork):
+            try:
+                asset = work.require_current(session, lock=True)
+            except AssetWorkSuperseded:
+                # Preserve the edit/replacement, but keep the Job's unknown
+                # outcome/manual-review disposition and provider evidence.
+                return
+        elif asset is not None:
+            # Lease recovery has no original in-memory snapshot. Never rewrite
+            # a terminal/replaced asset or an unapproved content version.
+            if asset.status in {"stale", "ready", "awaiting_upload"}:
+                return
+            if asset.content_item_id is not None:
+                content = session.scalar(select(ContentItem).where(
+                    ContentItem.id == asset.content_item_id,
+                    ContentItem.workspace_id == asset.workspace_id,
+                ).execution_options(populate_existing=True))
+                if content is None or content.status != "approved" or content.version != asset.content_version:
+                    return
         if asset:
             asset.status = "failed"
             asset.error = message[:8000]
@@ -1171,7 +1998,8 @@ def mark_domain_failure(
         ):
             publish_job.status = "reconciliation_required"
             publish_job.error = (
-                f"Worker 在发布结果落库前失联，禁止自动重试；请先人工对账。{message}"
+                "发布结果落库前处理被中断，禁止自动重试；"
+                f"请先人工对账。{message}"
             )[:8000]
             record_audit(
                 session,
@@ -1180,7 +2008,7 @@ def mark_domain_failure(
                 entity_id=publish_job.id,
                 workspace_id=publish_job.workspace_id,
                 actor_user_id=None,
-                metadata={"reason": "worker_lease_exhausted"},
+                metadata={"reason": publish_outcome_reason},
             )
         elif publish_job and publish_job.status in {
             "scheduled",
@@ -1233,14 +2061,40 @@ class Worker:
         self.worker_id = worker_id or (
             f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         )
-        self.session_factory = session_factory or db.SessionLocal
+        self._owned_engine = db.build_engine(self.settings.database_url) if session_factory is None else None
+        self.session_factory = session_factory if session_factory is not None else sessionmaker(
+            bind=self._owned_engine,
+            expire_on_commit=False, future=True,
+        )
         self.handlers = handlers or HANDLERS
+        self.manual_review_job_types = manual_review_job_types(self.settings)
         self._stop_event = stop_event or threading.Event()
         self._shutdown_signal: int | None = None
+        self._next_storage_reconciliation_sweep_at = 0.0
+        self._next_publish_reconciliation_sweep_at = 0.0
+        if self.settings.production:
+            try:
+                verify_database_schema(self.session_factory)
+            except Exception:
+                self.close()
+                raise
 
     @property
     def stop_requested(self) -> bool:
         return self._stop_event.is_set()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def close(self) -> None:
+        """Release owned resources after execution has stopped, never a caller's pool."""
+        self._stop_event.set()
+        if self._owned_engine is not None:
+            self._owned_engine.dispose()
+            self._owned_engine = None
 
     def request_stop(self, signum: int | None = None) -> None:
         self._shutdown_signal = signum
@@ -1249,48 +2103,75 @@ class Worker:
     def run_once(self) -> bool:
         if self.stop_requested:
             return False
+        if self.settings.production:
+            # Do not claim work or call providers after an incompatible migration
+            # or structural drift. Startup validation alone becomes stale.
+            verify_database_schema(self.session_factory)
 
-        expired_job_refs: list[tuple[str, str]] = []
+        expired_job_refs: list[tuple[str, str, JobRecoveryPolicy]] = []
         with self.session_factory() as session:
-            scheduled_reconciliations = schedule_pending_publish_reconciliations(
-                session,
-                settings=self.settings,
-            )
-            if scheduled_reconciliations:
+            scheduled_storage_reconciliations = 0
+            monotonic_now = time.monotonic()
+            if monotonic_now >= self._next_storage_reconciliation_sweep_at:
+                self._next_storage_reconciliation_sweep_at = monotonic_now + (
+                    self.settings.storage_reconcile_schedule_poll_seconds
+                )
+                scheduled_storage_reconciliations = (
+                    schedule_due_storage_reconciliations(
+                        session,
+                        settings=self.settings,
+                    )
+                )
+            scheduled_reconciliations = 0
+            if monotonic_now >= self._next_publish_reconciliation_sweep_at:
+                self._next_publish_reconciliation_sweep_at = monotonic_now + (
+                    self.settings.publish_reconciliation_sweep_poll_seconds
+                )
+                scheduled_reconciliations = schedule_pending_publish_reconciliations(
+                    session,
+                    settings=self.settings,
+                )
+            if scheduled_storage_reconciliations or scheduled_reconciliations:
                 session.commit()
+            if scheduled_storage_reconciliations:
+                logger.info(
+                    "storage reconciliation jobs queued count=%s",
+                    scheduled_storage_reconciliations,
+                )
+            if scheduled_reconciliations:
                 logger.info(
                     "publish reconciliation jobs queued count=%s",
                     scheduled_reconciliations,
                 )
+            manual_review_jobs = fail_expired_manual_review_leases(
+                session,
+                lease_seconds=self.settings.worker_lease_seconds,
+                job_types=self.manual_review_job_types,
+            )
             expired_jobs = fail_exhausted_leases(
                 session,
                 lease_seconds=self.settings.worker_lease_seconds,
             )
-            if expired_jobs:
+            if manual_review_jobs or expired_jobs:
                 expired_job_refs = [
-                    (expired_job.id, expired_job.job_type)
+                    (
+                        expired_job.id,
+                        expired_job.job_type,
+                        JobRecoveryPolicy.MANUAL_REVIEW,
+                    )
+                    for expired_job in manual_review_jobs
+                ] + [
+                    (
+                        expired_job.id,
+                        expired_job.job_type,
+                        JOB_RECOVERY_POLICIES.get(
+                            expired_job.job_type,
+                            JobRecoveryPolicy.REPLAY_SAFE,
+                        ),
+                    )
                     for expired_job in expired_jobs
                 ]
-                session.commit()
-            else:
-                job = claim_next_job(
-                    session,
-                    worker_id=self.worker_id,
-                    lease_seconds=self.settings.worker_lease_seconds,
-                )
-                if job is None:
-                    session.rollback()
-                    return False
-                if self.stop_requested:
-                    session.rollback()
-                    return False
-                session.commit()
-                job_id = job.id
-                attempt = job.attempts
-
-        if expired_job_refs:
-            with self.session_factory() as session:
-                for expired_job_id, _job_type in expired_job_refs:
+                for expired_job_id, _job_type, recovery_policy in expired_job_refs:
                     expired_job = session.get(Job, expired_job_id)
                     if expired_job is not None:
                         mark_domain_failure(
@@ -1298,20 +2179,53 @@ class Worker:
                             expired_job,
                             expired_job.last_error or "",
                             publish_outcome_uncertain=True,
+                            publish_outcome_reason=(
+                                "worker_lease_manual_review"
+                                if recovery_policy == JobRecoveryPolicy.MANUAL_REVIEW
+                                else "worker_lease_exhausted"
+                            ),
                         )
                 session.commit()
-            for expired_job_id, job_type in expired_job_refs:
-                logger.error(
-                    "job lease exhausted id=%s type=%s",
-                    expired_job_id,
-                    job_type,
+            else:
+                job = claim_next_job(
+                    session,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.settings.worker_lease_seconds,
+                    manual_review_job_types=self.manual_review_job_types,
                 )
+                if job is None:
+                    session.rollback()
+                    return False
+                if self.stop_requested:
+                    session.rollback()
+                    return False
+                job_id, attempt, lease_token = job.id, job.attempts, job.lease_token
+                session.commit()
+
+        if expired_job_refs:
+            for expired_job_id, job_type, recovery_policy in expired_job_refs:
+                if recovery_policy == JobRecoveryPolicy.MANUAL_REVIEW:
+                    logger.error(
+                        "job lease replay blocked id=%s type=%s policy=%s",
+                        expired_job_id,
+                        job_type,
+                        recovery_policy.value,
+                    )
+                else:
+                    logger.error(
+                        "job lease exhausted id=%s type=%s policy=%s",
+                        expired_job_id,
+                        job_type,
+                        recovery_policy.value,
+                    )
             return True
 
         with self.session_factory() as session:
             job = session.get(Job, job_id)
             if job is None:
                 return False
+            job_type = job.job_type
+            fence = None
             try:
                 handler = self.handlers.get(job.job_type)
                 if handler is None:
@@ -1322,12 +2236,24 @@ class Worker:
                     worker_id=self.worker_id,
                     attempt=attempt,
                     lease_seconds=self.settings.worker_lease_seconds,
+                    lease_token=lease_token,
                 ) as heartbeat:
-                    result = handler(
-                        session,
-                        dict(job.payload_json),
-                        self.settings,
+                    fence = ExecutionFence(
+                        bind=session.get_bind(), job_id=job_id,
+                        workspace_id=job.workspace_id, worker_id=self.worker_id,
+                        attempt=attempt, lease_seconds=self.settings.worker_lease_seconds,
+                        lease_token=lease_token,
+                        heartbeat_lost=lambda: heartbeat.lost,
                     )
+                    with execution_scope(fence), provider_job_context(job):
+                        result = handler(
+                            session,
+                            dict(job.payload_json),
+                            self.settings,
+                        )
+                        fence.fence_write(session)
+                        session.flush()
+                        fence.check()
                 if heartbeat.lost:
                     raise JobLeaseLost(
                         f"Job lease heartbeat was lost: id={job_id} "
@@ -1339,18 +2265,65 @@ class Worker:
                     result,
                     worker_id=self.worker_id,
                     attempt=attempt,
+                    lease_token=lease_token,
+                    lease_seconds=self.settings.worker_lease_seconds,
                 )
                 session.commit()
                 logger.info("job succeeded id=%s type=%s", job.id, job.job_type)
             except Exception as error:
                 session.rollback()
+                database_error_kind = classify_database_error(error)
+                if database_error_kind == DatabaseErrorKind.AVAILABILITY:
+                    # The claim was already committed in an independent
+                    # transaction. Keep its lease intact and let the lease and
+                    # publish reconciliation protocols decide recovery; a
+                    # database outage is not a domain failure and must not
+                    # make an external side effect look safe to repeat.
+                    raise
                 if isinstance(error, JobLeaseLost):
                     logger.error("stale worker stopped id=%s error=%s", job_id, error)
                     return True
+                if fence is not None:
+                    try:
+                        # Failure is a domain write too. Serialize before any
+                        # failure propagation, including errors wrapping a lost lease.
+                        fence.fence_write(session)
+                    except JobLeaseLost:
+                        session.rollback()
+                        logger.error("stale worker failure ignored id=%s", job_id)
+                        return True
                 job = session.get(Job, job_id)
+                if isinstance(error, AssetWorkSuperseded) and job is not None:
+                    # The handler transaction (including any tentative object
+                    # activation) was rolled back above. Durable staging and
+                    # provider receipts remain; no replay or deletion is implied.
+                    current = lock_asset_for_mutation(session, error.work.workspace_id, error.work.asset_id)
+                    result = {"asset_id": error.work.asset_id,
+                        "status": current.status if current is not None else "missing",
+                        "outcome": "superseded", "reason": "asset_or_content_changed"}
+                    record_audit(session, action="asset.result_superseded", entity_type="asset",
+                        entity_id=error.work.asset_id, workspace_id=error.work.workspace_id,
+                        actor_user_id=None, metadata={"job_id": job_id, "job_type": job_type, **result})
+                    complete_job(session, job, result, worker_id=self.worker_id, attempt=attempt,
+                        lease_token=lease_token, lease_seconds=self.settings.worker_lease_seconds)
+                    session.commit()
+                    logger.info("superseded asset result retained without attachment id=%s", job_id)
+                    return True
                 ai_provenance = getattr(error, "ai_provenance", None)
-                persisted_error: Exception | str = error
-                if job is not None and job.job_type == "prompt_eval.execute":
+                persisted_error: Exception | str = safe_error_receipt(error)
+                if database_error_kind is not None:
+                    persisted_error = sanitized_database_error(error)
+                elif job_type in CONNECTOR_JOB_TYPES:
+                    persisted_error = (
+                        str(error) if type(error) in {
+                            ChannelConfigurationError, PublishManifestConflict,
+                            PublishReconciliationRequired, PublishRetrySafeFailure, JobNotReady,
+                        } else safe_connector_failure(error)
+                    )
+                    if job is not None:
+                        job.result_json = {**dict(job.result_json or {}),
+                            "connector_diagnostic": connector_diagnostic(error)}
+                elif job is not None and job.job_type == "prompt_eval.execute":
                     persisted_error = (
                         f"AI prompt evaluation failed ({type(error).__name__})"
                     )
@@ -1360,13 +2333,53 @@ class Worker:
                     and ai_provenance
                 ):
                     persisted_error = f"AI workflow failed ({type(error).__name__})"
+                elif type(error) is JobNotReady:
+                    persisted_error = "Task is waiting for the remote operation to become ready"
+                elif job_type in {"asset.generate", "asset.poll", "asset.download"}:
+                    persisted_error = (media_configuration_receipt(error)
+                        or validation_error_receipt(error) or persisted_error)
+                persisted_error = resource_limit_receipt(error) or persisted_error
                 if job is not None:
+                    publish_outcome_uncertain = False
+                    if (
+                        database_error_kind is not None
+                        and job.job_type == "publish.dispatch"
+                        and (job.payload_json or {}).get("publish_job_id")
+                    ):
+                        publish_job = session.get(
+                            PublishJob,
+                            job.payload_json["publish_job_id"],
+                        )
+                        publish_outcome_uncertain = (
+                            publish_job is not None
+                            and publish_job.status == "publishing"
+                        )
+                    database_retry_scheduled = database_error_kind in {
+                        DatabaseErrorKind.TRANSACTION_RETRYABLE,
+                        DatabaseErrorKind.LOCK_CONTENTION,
+                        DatabaseErrorKind.QUERY_INTERRUPTED,
+                    }
                     mark_publish_first = (
                         job.job_type == "publish.dispatch"
                         and not isinstance(error, JobNotReady)
+                        and (
+                            database_error_kind is None
+                            or database_error_kind == DatabaseErrorKind.PERMANENT
+                            or publish_outcome_uncertain
+                        )
                     )
                     if mark_publish_first:
-                        mark_domain_failure(session, job, str(error))
+                        mark_domain_failure(
+                            session,
+                            job,
+                            str(persisted_error),
+                            publish_outcome_uncertain=publish_outcome_uncertain,
+                            publish_outcome_reason=(
+                                f"database_{database_error_kind.value}_after_dispatch"
+                                if database_error_kind is not None
+                                else "worker_lease_exhausted"
+                            ),
+                        )
                     try:
                         job = fail_job(
                             session,
@@ -1374,13 +2387,33 @@ class Worker:
                             persisted_error,
                             worker_id=self.worker_id,
                             attempt=attempt,
+                            lease_token=lease_token,
+                            lease_seconds=self.settings.worker_lease_seconds,
                             force_terminal=isinstance(
                                 error,
-                                PublishReconciliationRequired,
+                                (
+                                    PublishReconciliationRequired,
+                                    PublishRetrySafeFailure,
+                                    StorageLedgerInvariantError,
+                                    ExecutionTransactionOpen,
+                                    StorageLedgerUnverified,
+                                    StorageQuotaExceeded,
+                                    ChannelConfigurationError,
+                                    ProviderResourceLimitError,
+                                ),
                             )
+                            or database_error_kind == DatabaseErrorKind.PERMANENT
+                            or publish_outcome_uncertain
                             or (
                                 isinstance(error, MediaProviderError)
                                 and not error.retryable
+                            ),
+                            manual_review_reason_code=(
+                                ("provider_resource_limit" if type(error) is ProviderResourceLimitError
+                                    and error.code != "provider_response_too_large"
+                                    else "provider_outcome_unknown_after_error")
+                                if job.job_type in self.manual_review_job_types
+                                else None
                             ),
                             retry_after_seconds=getattr(
                                 error,
@@ -1396,27 +2429,65 @@ class Worker:
                             lease_error,
                         )
                         return True
-                    if not mark_publish_first and (
-                        not isinstance(error, JobNotReady) or job.status == "failed"
+                    if (
+                        not mark_publish_first
+                        and not (
+                            database_retry_scheduled and job.status == "retry"
+                        )
+                        and (
+                            not isinstance(error, JobNotReady)
+                            or job.status == "failed"
+                        )
                     ):
                         mark_domain_failure(
                             session,
                             job,
                             str(persisted_error),
                             ai_provenance=ai_provenance,
+                            prompt_eval_partial_result=getattr(
+                                error, "prompt_eval_partial_result", None
+                            ),
                         )
                     session.commit()
-                if isinstance(error, JobNotReady):
-                    logger.info("job pending id=%s message=%s", job_id, error)
+                if job_type in CONNECTOR_JOB_TYPES:
+                    # Do not attach an exception chain: even safe wrappers can
+                    # have a cause containing credential-bearing request URLs.
+                    logger.error("platform job failed id=%s type=%s diagnostic=%s",
+                        job_id, job_type, persisted_error)
+                elif isinstance(error, JobNotReady):
+                    logger.info("job pending id=%s", job_id)
                 elif ai_provenance:
                     logger.error(
                         "AI job failed id=%s error_type=%s",
                         job_id,
                         type(error).__name__,
                     )
+                elif database_error_kind is not None:
+                    logger.error(
+                        "job database operation failed id=%s kind=%s "
+                        "sqlstate=%s error_type=%s",
+                        job_id,
+                        database_error_kind.value,
+                        database_error_sqlstate(error) or "unknown",
+                        type(error).__name__,
+                    )
                 else:
-                    logger.exception("job failed id=%s", job_id)
+                    log_exception(logger, "job failed id=%s", job_id)
             return True
+
+    def _database_retry_delay(self, retry_attempt: int) -> float:
+        exponent = min(max(retry_attempt - 1, 0), 30)
+        delay = min(
+            self.settings.worker_database_retry_max_seconds,
+            self.settings.worker_database_retry_initial_seconds * (2**exponent),
+        )
+        jitter = delay * self.settings.worker_database_retry_jitter_ratio
+        if jitter:
+            delay += random.uniform(-jitter, jitter)
+        return min(
+            self.settings.worker_database_retry_max_seconds,
+            max(0.0, delay),
+        )
 
     def run_forever(self) -> None:
         logger.info("worker started id=%s", self.worker_id)
@@ -1424,11 +2495,73 @@ class Worker:
             session_factory=self.session_factory,
             worker_id=self.worker_id,
             interval_seconds=self.settings.worker_heartbeat_seconds,
+            release_sha=self.settings.release_sha,
         )
+        consecutive_database_failures = 0
         try:
             with node_heartbeat:
                 while not self.stop_requested:
-                    worked = self.run_once()
+                    try:
+                        worked = self.run_once()
+                    except Exception as error:
+                        database_error_kind = classify_database_error(error)
+                        if not is_worker_database_retryable_error(error):
+                            raise
+                        consecutive_database_failures += 1
+                        if (
+                            consecutive_database_failures
+                            > self.settings.worker_database_retry_max_attempts
+                        ):
+                            logger.error(
+                                "worker database retries exhausted "
+                                "id=%s attempts=%s kind=%s sqlstate=%s "
+                                "error_type=%s",
+                                self.worker_id,
+                                self.settings.worker_database_retry_max_attempts,
+                                database_error_kind.value,
+                                database_error_sqlstate(error) or "unknown",
+                                type(error).__name__,
+                            )
+                            raise WorkerDatabaseUnavailable(
+                                "worker database retry budget exhausted"
+                            ) from None
+                        # A failed maintenance query must be eligible again as
+                        # soon as the database recovers rather than waiting for
+                        # a deadline that was advanced before the failed call.
+                        self._next_storage_reconciliation_sweep_at = 0.0
+                        self._next_publish_reconciliation_sweep_at = 0.0
+                        delay = self._database_retry_delay(
+                            consecutive_database_failures
+                        )
+                        availability_label = (
+                            "unavailable"
+                            if database_error_kind == DatabaseErrorKind.AVAILABILITY
+                            else "retryable"
+                        )
+                        logger.warning(
+                            "worker database operation %s; retrying "
+                            "id=%s attempt=%s/%s delay_seconds=%.3f "
+                            "kind=%s sqlstate=%s error_type=%s",
+                            availability_label,
+                            self.worker_id,
+                            consecutive_database_failures,
+                            self.settings.worker_database_retry_max_attempts,
+                            delay,
+                            database_error_kind.value,
+                            database_error_sqlstate(error) or "unknown",
+                            type(error).__name__,
+                        )
+                        if self._stop_event.wait(delay):
+                            break
+                        continue
+                    if consecutive_database_failures:
+                        logger.info(
+                            "worker database operation recovered "
+                            "id=%s after_failures=%s",
+                            self.worker_id,
+                            consecutive_database_failures,
+                        )
+                        consecutive_database_failures = 0
                     if not worked:
                         self._stop_event.wait(self.settings.worker_poll_seconds)
         finally:
@@ -1437,6 +2570,7 @@ class Worker:
                 self.worker_id,
                 self._shutdown_signal,
             )
+            self.close()
 
 
 def main() -> None:
@@ -1444,16 +2578,17 @@ def main() -> None:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     settings = get_settings()
+    db.configure_database(settings.database_url)
     if not settings.production:
         from .migrate import upgrade_database
 
         upgrade_database(settings)
         db.configure_database(settings.database_url)
-    db.create_schema()
+    verify_database_schema(db.SessionLocal)
     # Alembic configures logging while migrations run. Re-apply the worker
     # logger afterwards so startup and job failures remain visible.
     configure_worker_logging()
-    worker = Worker(settings=settings)
+    worker = Worker(settings=settings, session_factory=db.SessionLocal)
 
     def stop_worker(signum, _frame) -> None:
         worker.request_stop(signum)

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from publishing_helpers import confirm_publish
+from media_fixtures import png_bytes
+
 import hashlib
 import io
 import tempfile
@@ -35,10 +38,16 @@ class ScriptPublishFlowTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         self.settings = Settings(
+            _env_file=None,
+            environment="development",
             database_url=f"sqlite:///{(root / 'script-publish.db').as_posix()}",
             secret_key="script-publish-test-secret",
             local_storage_dir=root / "storage",
+            storage_backend="local",
             allow_registration=True,
+            require_governed_prompts=False,
+            metrics_enabled=False,
+            embedding_provider="hash",
             text_provider="mock",
             image_provider="mock",
             video_provider="mock",
@@ -90,7 +99,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
             workspace_id=self.workspace_id,
             category="assets",
             filename="approved-cover.png",
-            stream=io.BytesIO(b"\x89PNG\r\napproved-script-cover"),
+            stream=io.BytesIO(png_bytes()),
             content_type="image/png",
         )
         with db.SessionLocal() as session:
@@ -146,7 +155,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
                     storage_uri=stored.uri,
                     mime_type="image/png",
                     size_bytes=stored.size_bytes,
-                    metadata_json={"content_version": 1},
+                    metadata_json={"content_version": 1, "checksum": stored.checksum},
                 )
             )
             session.commit()
@@ -180,8 +189,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
         return {"Authorization": f"Bearer {switched.json()['access_token']}"}
 
     def _schedule(self, *, mode: str = "script", channel_id: str | None = None) -> dict:
-        response = self.client.post(
-            "/api/v1/publishing/jobs",
+        response = confirm_publish(self.client,
             headers=self.headers,
             json={
                 "content_item_id": self.content_id,
@@ -207,6 +215,24 @@ class ScriptPublishFlowTest(unittest.TestCase):
             session.commit()
             return queue_job.id
 
+    def _prepare_script_job(self) -> dict:
+        scheduled = self._schedule()
+        self._make_dispatch_due(scheduled["id"])
+        self.assertTrue(self.worker.run_once())
+        current = self.client.get(
+            "/api/v1/publishing/jobs", headers=self.headers
+        ).json()[0]
+        self.assertEqual(current["status"], "script_ready")
+        return scheduled
+
+    def _upload_json_evidence(self, publish_job_id: str, name: str, data: bytes):
+        return self.client.post(
+            f"/api/v1/publishing/jobs/{publish_job_id}/evidence",
+            headers=self.headers,
+            data={"kind": "platform_export"},
+            files={"file": (name, data, "application/json")},
+        )
+
     def test_script_channel_rejects_credentials_and_remote_test(self):
         credentialed = self.client.post(
             "/api/v1/channels",
@@ -224,6 +250,76 @@ class ScriptPublishFlowTest(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(tested.status_code, 409, tested.text)
+
+    def test_script_evidence_item_quota_rejects_before_object_write(self):
+        self.settings.publish_evidence_max_items = 2
+        scheduled = self._prepare_script_job()
+
+        first = self._upload_json_evidence(
+            scheduled["id"], "first.json", b'{"proof":"first"}'
+        )
+        second = self._upload_json_evidence(
+            scheduled["id"], "second.json", b'{"proof":"second"}'
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual(second.status_code, 201, second.text)
+        files_before = {
+            path
+            for path in self.settings.local_storage_dir.rglob("*")
+            if path.is_file()
+        }
+
+        rejected = self._upload_json_evidence(
+            scheduled["id"], "third.json", b'{"proof":"third"}'
+        )
+
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertIn("item quota", rejected.json()["error"]["message"])
+        evidence = self.client.get(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=self.headers,
+        )
+        self.assertEqual(evidence.status_code, 200, evidence.text)
+        self.assertEqual(len(evidence.json()), 2)
+        files_after = {
+            path
+            for path in self.settings.local_storage_dir.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(files_after, files_before)
+
+    def test_script_evidence_byte_quota_rejects_before_object_write(self):
+        self.settings.publish_evidence_max_bytes = 256
+        self.settings.publish_evidence_max_total_bytes = 300
+        scheduled = self._prepare_script_job()
+        payload = b'{"proof":"' + (b"a" * 180) + b'"}'
+        first = self._upload_json_evidence(scheduled["id"], "first.json", payload)
+        self.assertEqual(first.status_code, 201, first.text)
+        files_before = {
+            path
+            for path in self.settings.local_storage_dir.rglob("*")
+            if path.is_file()
+        }
+
+        rejected = self._upload_json_evidence(
+            scheduled["id"],
+            "second.json",
+            b'{"proof":"' + (b"b" * 180) + b'"}',
+        )
+
+        self.assertEqual(rejected.status_code, 413, rejected.text)
+        self.assertIn("storage quota", rejected.json()["error"]["message"])
+        evidence = self.client.get(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=self.headers,
+        )
+        self.assertEqual(len(evidence.json()), 1)
+        files_after = {
+            path
+            for path in self.settings.local_storage_dir.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(files_after, files_before)
 
     def test_script_schedule_worker_download_and_human_result(self):
         scheduled = self._schedule()
@@ -287,6 +383,17 @@ class ScriptPublishFlowTest(unittest.TestCase):
         self.assertEqual(evidence.status_code, 201, evidence.text)
         evidence_payload = evidence.json()
         self.assertEqual(evidence_payload["mime_type"], "image/png")
+        evidence_list = self.client.get(
+            f"/api/v1/publishing/jobs/{scheduled['id']}/evidence",
+            headers=self.headers,
+            params={"limit": 1},
+        )
+        self.assertEqual(evidence_list.status_code, 200, evidence_list.text)
+        self.assertEqual(evidence_list.headers["x-contentflow-page-limit"], "1")
+        self.assertEqual(
+            [item["id"] for item in evidence_list.json()],
+            [evidence_payload["id"]],
+        )
         evidence_download = self.client.get(
             (
                 f"/api/v1/publishing/jobs/{scheduled['id']}/evidence/"
@@ -400,10 +507,12 @@ class ScriptPublishFlowTest(unittest.TestCase):
         self.assertEqual(rebuilt.status_code, 202, rebuilt.text)
         self.assertEqual(rebuilt.json()["status"], "scheduled")
         self.assertFalse(rebuilt.json()["script_package_available"])
-        with self.assertRaises(FileNotFoundError):
-            storage.read(old_package_uri)
+        self.assertTrue(storage.read(old_package_uri).startswith(b"PK"))
 
         self.assertTrue(self.worker.run_once())
+        self.assertTrue(self.worker.run_once())
+        with self.assertRaises(FileNotFoundError):
+            storage.read(old_package_uri)
         current = next(
             item
             for item in self.client.get(
@@ -431,6 +540,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
             publish_job = session.get(PublishJob, scheduled["id"])
             publish_job.status = "failed"
             publish_job.request_json = {
+                **publish_job.request_json,
                 "content_version": 1,
                 "delivery_mode": "connector",
             }
@@ -633,6 +743,7 @@ class ScriptPublishFlowTest(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(confirmations.status_code, 200, confirmations.text)
+        self.assertEqual(confirmations.headers["x-contentflow-page-limit"], "100")
         confirmation_items = confirmations.json()
         self.assertEqual(len(confirmation_items), 2)
         self.assertEqual(

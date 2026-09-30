@@ -12,6 +12,24 @@ MAX_BODY_LENGTH = {
 }
 
 
+def publication_text_fields(draft: dict[str, Any]) -> list[tuple[str, str]]:
+    """Enumerate persisted/exported text, including nested layout and script fields."""
+    pending = [(key, draft.get(key)) for key in
+        ("title", "body", "hashtags", "call_to_action", "layout")]
+    fields = []
+    while pending:
+        path, value = pending.pop()
+        if isinstance(value, str):
+            fields.append((path, value))
+        elif isinstance(value, dict):
+            fields.extend((f"{path}.<key:{index}>", key)
+                for index, key in enumerate(value) if isinstance(key, str))
+            pending.extend((f"{path}.{key}", item) for key, item in value.items())
+        elif isinstance(value, list):
+            pending.extend((f"{path}[{index}]", item) for index, item in enumerate(value))
+    return fields
+
+
 class RuleReviewer:
     def review(
         self,
@@ -22,6 +40,8 @@ class RuleReviewer:
         title = str(draft.get("title") or "").strip()
         body = str(draft.get("body") or "").strip()
         issues: list[str] = []
+        forbidden_fields = [path for path, value in publication_text_fields(draft)
+            if any(phrase in value for phrase in brief.forbidden_phrases if phrase)]
         checks = {
             "has_title": bool(title),
             "has_body": bool(body),
@@ -31,9 +51,7 @@ class RuleReviewer:
             "contains_required_facts": all(
                 item in body for item in brief.must_include
             ),
-            "avoids_forbidden_phrases": not any(
-                phrase in f"{title}\n{body}" for phrase in brief.forbidden_phrases
-            ),
+            "avoids_forbidden_phrases": not forbidden_fields,
         }
         issue_messages = {
             "has_title": "缺少标题",
@@ -42,7 +60,7 @@ class RuleReviewer:
             "contains_product": "正文未出现产品名",
             "contains_cta": "正文未包含 CTA",
             "contains_required_facts": "正文缺少 brief 中的必含信息",
-            "avoids_forbidden_phrases": "正文包含禁用词",
+            "avoids_forbidden_phrases": "发布字段包含禁用词：" + "、".join(sorted(forbidden_fields)),
         }
         for key, passed in checks.items():
             if not passed:

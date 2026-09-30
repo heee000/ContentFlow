@@ -1,27 +1,42 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..audit import record_audit
+from ..audit import record_audit, verify_audit_chain
 from ..db import get_db
 from ..dependencies import AppSettings, Principal, require_role
 from ..entities import (
+    Asset,
     AuditLog,
     Job,
+    JobManualReview,
+    KnowledgeDocument,
     Membership,
     PromptEvalRun,
     PromptEvalSuite,
     PromptRelease,
+    PublishJob,
+    PublishEvidence,
+    StorageObjectAllocation,
     User,
     WorkerNode,
     Workspace,
+    WorkspaceStorageUsage,
 )
 from ..job_queue import enqueue_job
+from ..provider_resources import ProviderResourceLimits, provider_resource_usage
+from ..pagination import (
+    DEFAULT_PAGE_LIMIT,
+    PageCursor,
+    PageLimit,
+    paginate,
+    paginate_sequence,
+)
 from ..prompt_eval import (
     EvalIntegrityError,
     calculate_suite_hash,
@@ -29,6 +44,7 @@ from ..prompt_eval import (
     get_active_eval_suite,
     normalize_eval_cases,
     require_current_passed_eval,
+    verify_eval_approval_policy,
     verify_eval_suite,
 )
 from ..prompt_governance import (
@@ -38,9 +54,11 @@ from ..prompt_governance import (
     prompt_set_from_release,
     resolve_active_prompt_set,
 )
-from ..prompts import calculate_prompt_hashes
+from ..prompts import BUILTIN_PROMPT_SET, calculate_prompt_hashes
 from ..schemas import (
     AuditLogResponse,
+    AuditIntegrityResponse,
+    JobResponse,
     MemberCreate,
     MemberResponse,
     MemberUpdate,
@@ -53,14 +71,35 @@ from ..schemas import (
     PromptReleaseCreate,
     PromptReleaseResponse,
     PromptReviewRequest,
+    StorageObjectAllocationResponse,
+    StorageReconcileRequest,
+    StorageUsageResponse,
+    StorageStagingDiscardRequest,
     WorkerHealthResponse,
     WorkerQueueHealthResponse,
+)
+from ..storage_ledger import (
+    enqueue_storage_reconciliation,
+    pending_storage_counts,
+    request_storage_deletion,
 )
 
 
 router = APIRouter(prefix="/admin", tags=["administration"])
 Db = Annotated[Session, Depends(get_db)]
 Admin = Annotated[Principal, Depends(require_role("admin"))]
+
+
+@router.get("/provider-resources")
+def get_provider_resource_usage(principal: Admin, session: Db, settings: AppSettings):
+    usage = provider_resource_usage(session, principal.workspace_id)
+    limits = ProviderResourceLimits.from_settings(settings)
+    return {**usage, "limits": {"daily_calls": limits.daily_calls,
+        "daily_input_bytes": limits.daily_input_bytes, "concurrent_requests": limits.concurrent_requests},
+        "remaining_calls": max(0, limits.daily_calls - usage["calls"]),
+        "remaining_input_bytes": max(0, limits.daily_input_bytes - usage["input_bytes"]),
+        "units": "external_requests_and_evidence_bytes", "timezone": "UTC",
+        "monetary_budget": False}
 
 
 def member_response(membership: Membership, user: User) -> MemberResponse:
@@ -123,13 +162,26 @@ def ensure_another_admin(
 
 
 @router.get("/members", response_model=list[MemberResponse])
-def list_members(principal: Admin, session: Db):
-    rows = session.execute(
+def list_members(
+    principal: Admin,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    rows = paginate(
+        session,
         select(Membership, User)
         .join(User, User.id == Membership.user_id)
-        .where(Membership.workspace_id == principal.workspace_id)
-        .order_by(Membership.created_at)
-    ).all()
+        .where(Membership.workspace_id == principal.workspace_id),
+        timestamp_column=Membership.created_at,
+        id_column=Membership.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        ascending=True,
+        scalar=False,
+    )
     return [member_response(membership, user) for membership, user in rows]
 
 
@@ -394,6 +446,7 @@ def list_prompt_releases(principal: Admin, session: Db, settings: AppSettings):
             select(PromptRelease)
             .where(PromptRelease.workspace_id == principal.workspace_id)
             .order_by(PromptRelease.release_number.desc())
+            .limit(DEFAULT_PAGE_LIMIT)
         )
     )
     try:
@@ -409,6 +462,7 @@ def list_prompt_releases(principal: Admin, session: Db, settings: AppSettings):
         settings=settings,
     )
     return PromptGovernanceResponse(
+        approval_policy=settings.prompt_approval_policy_for(principal.workspace_id),
         active={
             "source": active.source,
             "version": active.version,
@@ -416,11 +470,43 @@ def list_prompt_releases(principal: Admin, session: Db, settings: AppSettings):
             "prompts": dict(active.prompts),
             "prompt_hashes": dict(active.hashes),
         },
+        builtin={
+            "source": BUILTIN_PROMPT_SET.source,
+            "version": BUILTIN_PROMPT_SET.version,
+            "release_id": None,
+            "prompts": dict(BUILTIN_PROMPT_SET.prompts),
+            "prompt_hashes": dict(BUILTIN_PROMPT_SET.hashes),
+        },
         governance_required=settings.require_governed_prompts,
         ready_for_generation=ready_for_generation,
         generation_block_reason=generation_block_reason,
         releases=[prompt_release_response(release) for release in releases],
     )
+
+
+@router.get(
+    "/prompt-releases/history",
+    response_model=list[PromptReleaseResponse],
+)
+def list_prompt_release_history(
+    principal: Admin,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    releases = paginate_sequence(
+        session,
+        select(PromptRelease).where(
+            PromptRelease.workspace_id == principal.workspace_id
+        ),
+        sequence_column=PromptRelease.release_number,
+        id_column=PromptRelease.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
+    return [prompt_release_response(release) for release in releases]
 
 
 @router.post(
@@ -500,10 +586,16 @@ def approve_prompt_release(
         release_id=release_id,
         lock=True,
     )
-    if release.created_by_user_id == principal.user_id:
+    policy = settings.prompt_approval_policy_for(principal.workspace_id)
+    self_review = release.created_by_user_id == principal.user_id
+    if self_review and policy == "dual_control":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="创建者不能审批自己的 Prompt 版本",
+        )
+    if self_review and len(payload.note.strip()) < 3:
+        raise HTTPException(
+            status_code=422, detail="单人内测审批必须填写本人确认说明（至少 3 个字符）"
         )
     if release.status != "draft":
         raise HTTPException(
@@ -523,6 +615,8 @@ def approve_prompt_release(
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
         metadata={
+            "approval_policy": policy,
+            "self_review": self_review,
             "release_number": release.release_number,
             "prompt_hashes": dict(release.prompt_hashes_json),
         },
@@ -541,6 +635,7 @@ def reject_prompt_release(
     payload: PromptReviewRequest,
     principal: Admin,
     session: Db,
+    settings: AppSettings,
 ):
     note = payload.note.strip()
     if not note:
@@ -554,7 +649,11 @@ def reject_prompt_release(
         release_id=release_id,
         lock=True,
     )
-    if release.created_by_user_id == principal.user_id:
+    policy = settings.prompt_approval_policy_for(principal.workspace_id)
+    if (
+        release.created_by_user_id == principal.user_id
+        and policy == "dual_control"
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="创建者不能复核自己的 Prompt 版本",
@@ -576,6 +675,8 @@ def reject_prompt_release(
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
         metadata={
+            "approval_policy": policy,
+            "self_review": release.created_by_user_id == principal.user_id,
             "release_number": release.release_number,
             "reason": note,
             "prompt_hashes": dict(release.prompt_hashes_json),
@@ -642,6 +743,8 @@ def activate_prompt_release(
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
         metadata={
+            "approval_policy": settings.prompt_approval_policy_for(principal.workspace_id),
+            "self_review": release.created_by_user_id == release.reviewed_by_user_id,
             "release_number": release.release_number,
             "previous_release_id": previous_release_id,
             "prompt_hashes": dict(release.prompt_hashes_json),
@@ -653,12 +756,13 @@ def activate_prompt_release(
 
 
 @router.get("/prompt-eval", response_model=PromptEvalGovernanceResponse)
-def list_prompt_eval(principal: Admin, session: Db):
+def list_prompt_eval(principal: Admin, session: Db, settings: AppSettings):
     suites = list(
         session.scalars(
             select(PromptEvalSuite)
             .where(PromptEvalSuite.workspace_id == principal.workspace_id)
             .order_by(PromptEvalSuite.version_number.desc())
+            .limit(DEFAULT_PAGE_LIMIT)
         )
     )
     runs = list(
@@ -671,10 +775,61 @@ def list_prompt_eval(principal: Admin, session: Db):
     )
     active = next((suite for suite in suites if suite.status == "active"), None)
     return PromptEvalGovernanceResponse(
+        approval_policy=settings.prompt_approval_policy_for(principal.workspace_id),
         active_suite=(prompt_eval_suite_response(active) if active else None),
         suites=[prompt_eval_suite_response(suite) for suite in suites],
         runs=[prompt_eval_run_response(run) for run in runs],
     )
+
+
+@router.get(
+    "/prompt-eval/suites",
+    response_model=list[PromptEvalSuiteResponse],
+)
+def list_prompt_eval_suites(
+    principal: Admin,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    suites = paginate_sequence(
+        session,
+        select(PromptEvalSuite).where(
+            PromptEvalSuite.workspace_id == principal.workspace_id
+        ),
+        sequence_column=PromptEvalSuite.version_number,
+        id_column=PromptEvalSuite.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
+    return [prompt_eval_suite_response(suite) for suite in suites]
+
+
+@router.get(
+    "/prompt-eval/runs",
+    response_model=list[PromptEvalRunResponse],
+)
+def list_prompt_eval_runs(
+    principal: Admin,
+    session: Db,
+    response: Response,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    runs = paginate(
+        session,
+        select(PromptEvalRun).where(
+            PromptEvalRun.workspace_id == principal.workspace_id
+        ),
+        timestamp_column=PromptEvalRun.created_at,
+        id_column=PromptEvalRun.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
+    return [prompt_eval_run_response(run) for run in runs]
 
 
 @router.post(
@@ -766,6 +921,8 @@ def activate_prompt_eval_suite(
     suite_id: str,
     principal: Admin,
     session: Db,
+    settings: AppSettings,
+    payload: PromptReviewRequest | None = None,
 ):
     lock_workspace(session, principal.workspace_id)
     suite = get_prompt_eval_suite_or_404(
@@ -774,10 +931,16 @@ def activate_prompt_eval_suite(
         suite_id=suite_id,
         lock=True,
     )
-    if suite.created_by_user_id == principal.user_id:
+    policy = settings.prompt_approval_policy_for(principal.workspace_id)
+    self_activation = suite.created_by_user_id == principal.user_id
+    if self_activation and policy == "dual_control":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="创建者不能激活自己的 Prompt Eval 套件",
+        )
+    if self_activation and (payload is None or len(payload.note.strip()) < 3):
+        raise HTTPException(
+            status_code=422, detail="单人内测激活必须填写本人确认说明（至少 3 个字符）"
         )
     if suite.status not in {"draft", "retired"}:
         raise HTTPException(
@@ -815,6 +978,9 @@ def activate_prompt_eval_suite(
         workspace_id=principal.workspace_id,
         actor_user_id=principal.user_id,
         metadata={
+            "approval_policy": policy,
+            "self_activation": self_activation,
+            "confirmation_note": payload.note.strip() if payload else None,
             "version": eval_suite_version(suite.version_number),
             "suite_hash": suite.suite_hash,
             "previous_suite_id": previous_suite_id,
@@ -855,6 +1021,7 @@ def evaluate_prompt_release(
         if suite is None:
             raise ValueError("当前工作区没有生效的 Prompt Eval 套件")
         verify_eval_suite(suite)
+        verify_eval_approval_policy(suite, settings)
     except (EvalIntegrityError, PromptIntegrityError) as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -916,9 +1083,11 @@ def evaluate_prompt_release(
 def list_audit_logs(
     principal: Admin,
     session: Db,
+    response: Response,
     action: str | None = None,
     entity_type: str | None = None,
-    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
 ):
     query = (
         select(AuditLog, User.display_name)
@@ -929,9 +1098,16 @@ def list_audit_logs(
         query = query.where(AuditLog.action == action)
     if entity_type:
         query = query.where(AuditLog.entity_type == entity_type)
-    rows = session.execute(
-        query.order_by(AuditLog.created_at.desc()).limit(limit)
-    ).all()
+    rows = paginate_sequence(
+        session,
+        query,
+        sequence_column=AuditLog.chain_sequence,
+        id_column=AuditLog.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+        scalar=False,
+    )
     return [
         AuditLogResponse(
             id=audit.id,
@@ -942,10 +1118,30 @@ def list_audit_logs(
             actor_display_name=display_name,
             request_id=audit.request_id,
             metadata_json=audit.metadata_json,
+            chain_sequence=audit.chain_sequence,
+            entry_hash=audit.entry_hash,
+            integrity_version=audit.integrity_version,
             created_at=audit.created_at,
         )
         for audit, display_name in rows
     ]
+
+
+@router.get("/audit-integrity", response_model=AuditIntegrityResponse)
+def audit_integrity(principal: Admin, session: Db):
+    result = verify_audit_chain(
+        session,
+        workspace_id=principal.workspace_id,
+    )
+    return AuditIntegrityResponse(
+        valid=result.valid,
+        checked_entries=result.checked_entries,
+        head_sequence=result.head_sequence,
+        head_hash=result.head_hash,
+        first_invalid_sequence=result.first_invalid_sequence,
+        reason=result.reason,
+        verified_at=datetime.now(timezone.utc),
+    )
 
 
 def heartbeat_age_seconds(value: datetime, now: datetime) -> float:
@@ -978,7 +1174,13 @@ def worker_health(
         else:
             active_workers += 1
 
-    queue_counts = {"queued": 0, "retry": 0, "running": 0, "failed": 0}
+    queue_counts = {
+        "queued": 0,
+        "retry": 0,
+        "running": 0,
+        "manual_review": 0,
+        "failed": 0,
+    }
     for job_status, count in session.execute(
         select(Job.status, func.count(Job.id))
         .where(
@@ -1003,12 +1205,25 @@ def worker_health(
         if oldest_ready_at is not None
         else None
     )
+    oldest_manual_review_at = session.scalar(
+        select(func.min(JobManualReview.requested_at)).where(
+            JobManualReview.workspace_id == principal.workspace_id,
+            JobManualReview.resolved_at.is_(None),
+        )
+    )
+    oldest_manual_review_age = (
+        heartbeat_age_seconds(oldest_manual_review_at, now)
+        if oldest_manual_review_at is not None
+        else None
+    )
 
     issues: list[str] = []
     if active_workers == 0:
         issues.append("no_active_workers")
     if stale_workers:
         issues.append("stale_worker_nodes")
+    if queue_counts["manual_review"]:
+        issues.append("manual_review_pending")
     if ready_jobs and active_workers == 0:
         issues.append("ready_jobs_without_active_workers")
     if (
@@ -1042,5 +1257,215 @@ def worker_health(
             oldest_ready_age_seconds=(
                 round(oldest_ready_age, 3) if oldest_ready_age is not None else None
             ),
+            oldest_manual_review_age_seconds=(
+                round(oldest_manual_review_age, 3)
+                if oldest_manual_review_age is not None
+                else None
+            ),
         ),
     )
+
+
+@router.get("/storage/usage", response_model=StorageUsageResponse)
+def storage_usage(
+    principal: Admin,
+    session: Db,
+    settings: AppSettings,
+):
+    usage = session.get(WorkspaceStorageUsage, principal.workspace_id)
+    counts = pending_storage_counts(session, principal.workspace_id)
+    return StorageUsageResponse(
+        used_bytes=usage.used_bytes if usage is not None else 0,
+        used_objects=usage.used_objects if usage is not None else 0,
+        reserved_bytes=usage.reserved_bytes if usage is not None else 0,
+        reserved_objects=usage.reserved_objects if usage is not None else 0,
+        unverified_objects=usage.unverified_objects if usage is not None else 0,
+        max_bytes=settings.workspace_storage_max_bytes,
+        max_objects=settings.workspace_storage_max_objects,
+        delete_pending_objects=counts["delete_pending"],
+        missing_objects=counts["missing"],
+        integrity_error_objects=counts["integrity_error"],
+        staging_objects=counts["staging"],
+        abandoned_reservations=counts["abandoned"],
+        last_reconciled_at=(
+            usage.last_reconciled_at if usage is not None else None
+        ),
+    )
+
+
+@router.get(
+    "/storage/objects",
+    response_model=list[StorageObjectAllocationResponse],
+)
+def list_storage_objects(
+    principal: Admin,
+    session: Db,
+    response: Response,
+    status_filter: str | None = None,
+    attention_only: bool = False,
+    limit: PageLimit = DEFAULT_PAGE_LIMIT,
+    cursor: PageCursor = None,
+):
+    allowed_statuses = {
+        "reserved",
+        "staging",
+        "active",
+        "delete_pending",
+        "missing",
+        "integrity_error",
+        "deleted",
+        "abandoned",
+    }
+    if status_filter is not None and status_filter not in allowed_statuses:
+        raise HTTPException(status_code=422, detail="存储对象状态筛选值无效")
+    if status_filter is not None and attention_only:
+        raise HTTPException(
+            status_code=422,
+            detail="单一状态筛选与异常对象筛选不能同时使用",
+        )
+    query = select(StorageObjectAllocation).where(
+        StorageObjectAllocation.workspace_id == principal.workspace_id
+    )
+    if status_filter is not None:
+        query = query.where(StorageObjectAllocation.status == status_filter)
+    elif attention_only:
+        query = query.where(
+            StorageObjectAllocation.status.in_(
+                ("delete_pending", "missing", "integrity_error", "abandoned", "staging")
+            )
+        )
+    return paginate(
+        session,
+        query,
+        timestamp_column=StorageObjectAllocation.updated_at,
+        id_column=StorageObjectAllocation.id,
+        limit=limit,
+        cursor=cursor,
+        response=response,
+    )
+
+
+def _staging_cleanup_receipt(session: Session, allocation, workspace_id: str):
+    if allocation is not None and allocation.write_job_id and allocation.status in {"delete_pending", "deleted"}:
+        accepted = session.scalar(select(Job).where(Job.workspace_id == workspace_id,
+            Job.job_type == "storage.delete", Job.idempotency_key == f"storage.delete:{allocation.id}"))
+        if accepted is None or (accepted.payload_json or {}).get("allocation_id") != allocation.id:
+            raise HTTPException(status_code=409, detail="清理回执不完整，请人工核对；不会自动补发")
+        return accepted
+    return None
+
+
+@router.post("/storage/objects/{allocation_id}/discard-staged", response_model=JobResponse,
+    status_code=status.HTTP_202_ACCEPTED)
+def discard_staged_storage(allocation_id: str, payload: StorageStagingDiscardRequest,
+        principal: Admin, session: Db, settings: AppSettings):
+    query = select(StorageObjectAllocation).where(StorageObjectAllocation.id == allocation_id,
+        StorageObjectAllocation.workspace_id == principal.workspace_id)
+    observed = session.scalar(query)
+    if observed is None:
+        raise HTTPException(status_code=404, detail="存储对象不存在")
+    accepted = _staging_cleanup_receipt(session, observed, principal.workspace_id)
+    if accepted is not None:
+        return accepted
+    origin = session.scalar(select(Job).where(Job.id == observed.write_job_id,
+        Job.workspace_id == principal.workspace_id).with_for_update().execution_options(populate_existing=True))
+    allocation = session.scalar(query.with_for_update().execution_options(populate_existing=True))
+    accepted = _staging_cleanup_receipt(session, allocation, principal.workspace_id)
+    if accepted is not None:
+        return accepted
+    if origin is None or allocation is None or allocation.status != "staging":
+        raise HTTPException(status_code=409, detail="仅支持核对未完成的 Worker 写入；记录已变化或来源任务缺失")
+    if origin.status not in {"failed", "manual_review", "succeeded"}:
+        raise HTTPException(status_code=409, detail="来源任务仍在排队、重试或执行，禁止清理")
+    origin_updated = origin.updated_at
+    if origin_updated.tzinfo is None:
+        origin_updated = origin_updated.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - origin_updated < timedelta(seconds=settings.storage_orphan_grace_seconds):
+        raise HTTPException(status_code=409, detail="来源任务尚在存储安全等待期内；确认旧 Worker 和在途上传停止后，等待安全期结束再核对")
+    referenced = session.scalar(select(Asset.id).where(Asset.storage_uri == allocation.storage_uri).limit(1))
+    referenced = referenced or session.scalar(select(PublishJob.id).where(
+        PublishJob.external_url == allocation.storage_uri).limit(1))
+    referenced = referenced or session.scalar(select(KnowledgeDocument.id).where(
+        KnowledgeDocument.storage_uri == allocation.storage_uri).limit(1))
+    referenced = referenced or session.scalar(select(PublishEvidence.id).where(
+        PublishEvidence.storage_uri == allocation.storage_uri).limit(1))
+    if referenced:
+        raise HTTPException(status_code=409, detail="对象仍被内容或发布结果引用，禁止清理")
+    allocation, job = request_storage_deletion(session, settings=settings,
+        workspace_id=principal.workspace_id, storage_uri=allocation.storage_uri,
+        owner_type=allocation.owner_type, owner_id=allocation.owner_id,
+        category=allocation.category, filename=allocation.filename,
+        size_bytes=allocation.size_bytes, checksum=allocation.checksum,
+        mime_type=allocation.mime_type, allow_staging=True)
+    record_audit(session, action="storage.staged_write_discard_requested", entity_type="storage_allocation",
+        entity_id=allocation.id, workspace_id=principal.workspace_id, actor_user_id=principal.user_id,
+        metadata={"write_job_id": origin.id, "confirmed_no_inflight_write": True,
+            "note": payload.note, "cleanup_job_id": job.id})
+    session.flush()
+    return job
+
+
+@router.post(
+    "/storage/reconcile",
+    response_model=JobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def reconcile_storage(
+    payload: StorageReconcileRequest,
+    principal: Admin,
+    session: Db,
+    settings: AppSettings,
+):
+    workspace_query = select(Workspace.id).where(
+        Workspace.id == principal.workspace_id
+    )
+    if session.bind and session.bind.dialect.name == "postgresql":
+        workspace_query = workspace_query.with_for_update()
+    if session.scalar(workspace_query) is None:
+        raise HTTPException(status_code=404, detail="工作区不存在")
+    active_job = session.scalar(
+        select(Job)
+        .where(
+            Job.workspace_id == principal.workspace_id,
+            Job.job_type == "storage.reconcile",
+            Job.status.in_(("queued", "retry", "running")),
+        )
+        .order_by(Job.created_at.asc())
+        .limit(1)
+    )
+    if active_job is not None:
+        active_deletes_orphans = (
+            (active_job.payload_json or {}).get("delete_orphans") is True
+        )
+        if payload.delete_orphans and not active_deletes_orphans:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "已有仅核对任务正在运行；请等待完成后再发起孤儿对象清理"
+                ),
+            )
+        return active_job
+
+    requested_at = datetime.now(timezone.utc)
+    job, run_id, _created = enqueue_storage_reconciliation(
+        session,
+        settings=settings,
+        workspace_id=principal.workspace_id,
+        delete_orphans=payload.delete_orphans,
+        trigger="manual",
+        requested_at=requested_at,
+    )
+    record_audit(
+        session,
+        action="storage.reconcile_requested",
+        entity_type="workspace",
+        entity_id=principal.workspace_id,
+        workspace_id=principal.workspace_id,
+        actor_user_id=principal.user_id,
+        metadata={
+            "run_id": run_id,
+            "delete_orphans": payload.delete_orphans,
+            "job_id": job.id,
+        },
+    )
+    return job

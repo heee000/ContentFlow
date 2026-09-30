@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from generation_helpers import request_run
+
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -12,7 +14,15 @@ from sqlalchemy import select
 
 from contentflow import db
 from contentflow.api import create_app
-from contentflow.entities import Job, WorkerNode
+from contentflow.entities import (
+    Job,
+    JobManualReview,
+    ProviderInvocation,
+    ProviderInvocationAttempt,
+    StorageObjectAllocation,
+    WorkerNode,
+    WorkspaceStorageUsage,
+)
 from contentflow.settings import Settings
 
 
@@ -22,10 +32,18 @@ class ObservabilityTest(unittest.TestCase):
         root = Path(self.temp_dir.name)
         self.metrics_token = "metrics-test-token-" + "m" * 32
         self.settings = Settings(
+            _env_file=None,
+            environment="development",
             database_url=f"sqlite:///{(root / 'metrics.db').as_posix()}",
             secret_key="metrics-test-secret",
             local_storage_dir=root / "storage",
+            storage_backend="local",
             allow_registration=True,
+            require_governed_prompts=False,
+            embedding_provider="hash",
+            text_provider="mock",
+            image_provider="mock",
+            video_provider="mock",
             metrics_enabled=True,
             metrics_bearer_token=self.metrics_token,
         )
@@ -77,7 +95,7 @@ class ObservabilityTest(unittest.TestCase):
         )
         self.assertEqual(campaign.status_code, 201, campaign.text)
         campaign_id = campaign.json()["id"]
-        run = self.client.post(
+        run = request_run(self.client,
             f"/api/v1/campaigns/{campaign_id}/runs",
             headers=self.headers,
             json={},
@@ -90,6 +108,83 @@ class ObservabilityTest(unittest.TestCase):
         self.assertEqual(listed.status_code, 200, listed.text)
         now = datetime.now(timezone.utc)
         with db.SessionLocal() as session:
+            usage = session.scalar(select(WorkspaceStorageUsage))
+            self.assertIsNotNone(usage)
+            usage.used_bytes = 12
+            usage.used_objects = 1
+            usage.last_reconciled_at = now - timedelta(days=2)
+            session.add(
+                StorageObjectAllocation(
+                    workspace_id=usage.workspace_id,
+                    owner_type="metrics_test",
+                    owner_id="metrics-object",
+                    category="metrics",
+                    filename="metrics.bin",
+                    status="delete_pending",
+                    storage_uri="file:///metrics-workspace/metrics.bin",
+                    checksum="a" * 64,
+                    size_bytes=12,
+                    size_verified=True,
+                    mime_type="application/octet-stream",
+                    delete_requested_at=now - timedelta(days=2),
+                    updated_at=now - timedelta(days=2),
+                )
+            )
+            session.add(
+                Job(
+                    workspace_id=usage.workspace_id,
+                    job_type="storage.reconcile",
+                    status="failed",
+                    run_at=now - timedelta(days=1),
+                    idempotency_key="metrics-storage-reconcile-failed",
+                )
+            )
+            manual_job = Job(
+                workspace_id=usage.workspace_id,
+                job_type="workflow.execute",
+                status="manual_review",
+                run_at=now - timedelta(hours=2),
+                idempotency_key="metrics-manual-review",
+            )
+            session.add(manual_job)
+            session.flush()
+            session.add(
+                JobManualReview(
+                    workspace_id=usage.workspace_id,
+                    job_id=manual_job.id,
+                    reason_code="provider_outcome_unknown_after_error",
+                    context_json={},
+                    requested_at=now - timedelta(hours=2),
+                )
+            )
+            invocation = ProviderInvocation(
+                workspace_id=usage.workspace_id,
+                job_id=manual_job.id,
+                entity_type="workflow_run",
+                entity_id="metrics-run",
+                provider_kind="text",
+                provider_name="openai-compatible",
+                model_name="metrics-model",
+                operation="text.plan",
+                request_key="b" * 64,
+                request_sha256="c" * 64,
+                request_bytes=512,
+                last_status="outcome_unknown",
+            )
+            session.add(invocation)
+            session.flush()
+            session.add(
+                ProviderInvocationAttempt(
+                    invocation_id=invocation.id,
+                    attempt_number=1,
+                    status="outcome_unknown",
+                    idempotency_key_sent=True,
+                    usage_source="not_reported",
+                    started_at=now - timedelta(hours=2),
+                    completed_at=now - timedelta(hours=2),
+                    error_type="worker_lease_expired",
+                )
+            )
             session.add(
                 WorkerNode(
                     id="metrics-worker",
@@ -127,10 +222,71 @@ class ObservabilityTest(unittest.TestCase):
         )
         self.assertNotIn(campaign_id, body)
         self.assertIn('contentflow_queue_jobs{status="queued"} 1.0', body)
+        self.assertIn(
+            'contentflow_queue_jobs{status="manual_review"} 1.0',
+            body,
+        )
         self.assertIn("contentflow_queue_ready_jobs 1.0", body)
+        manual_review_age = next(
+            float(line.rsplit(" ", 1)[1])
+            for line in body.splitlines()
+            if line.startswith(
+                "contentflow_job_manual_review_oldest_age_seconds "
+            )
+        )
+        self.assertGreater(manual_review_age, 119 * 60)
+        self.assertIn(
+            'contentflow_provider_invocation_attempts{status="outcome_unknown"} 1.0',
+            body,
+        )
+        self.assertIn(
+            "contentflow_provider_invocation_unresolved_outcome_unknown 1.0",
+            body,
+        )
+        provider_unknown_age = next(
+            float(line.rsplit(" ", 1)[1])
+            for line in body.splitlines()
+            if line.startswith(
+                "contentflow_provider_invocation_outcome_unknown_oldest_age_seconds "
+            )
+        )
+        self.assertGreater(provider_unknown_age, 119 * 60)
         self.assertIn('contentflow_worker_nodes{state="active"} 1.0', body)
         self.assertIn('contentflow_worker_nodes{state="stale"} 1.0', body)
         self.assertIn("contentflow_publish_reconciliation_required 0.0", body)
+        self.assertIn(
+            'contentflow_storage_allocations{status="delete_pending"} 1.0',
+            body,
+        )
+        self.assertIn(
+            'contentflow_storage_usage_bytes{state="used"} 12.0',
+            body,
+        )
+        self.assertIn(
+            "contentflow_storage_reconciliation_scheduler_enabled 1.0",
+            body,
+        )
+        self.assertIn(
+            "contentflow_storage_reconciliation_overdue_workspaces 1.0",
+            body,
+        )
+        self.assertIn(
+            "contentflow_storage_reconciliation_failed_jobs 1.0",
+            body,
+        )
+        self.assertIn(
+            "contentflow_storage_delete_pending_oldest_age_seconds",
+            body,
+        )
+        oldest_delete_age = next(
+            float(line.rsplit(" ", 1)[1])
+            for line in body.splitlines()
+            if line.startswith(
+                "contentflow_storage_delete_pending_oldest_age_seconds "
+            )
+        )
+        self.assertGreater(oldest_delete_age, 47 * 60 * 60)
+        self.assertNotIn("metrics-workspace", body)
 
         schema = self.client.get("/openapi.json").json()
         self.assertNotIn("/metrics", schema["paths"])
@@ -164,9 +320,17 @@ class DisabledObservabilityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings = Settings(
+                _env_file=None,
+                environment="development",
                 database_url=f"sqlite:///{(root / 'disabled-metrics.db').as_posix()}",
                 secret_key="disabled-metrics-test-secret",
                 local_storage_dir=root / "storage",
+                storage_backend="local",
+                require_governed_prompts=False,
+                embedding_provider="hash",
+                text_provider="mock",
+                image_provider="mock",
+                video_provider="mock",
                 metrics_enabled=False,
             )
             with TestClient(create_app(settings)) as client:

@@ -46,15 +46,26 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Start pinned MinIO
+      - name: Install pinned Go toolchain for CI-only MinIO
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.24.8"
+          cache: false
+
+      - name: Build and start pinned official MinIO source
+        env:
+          MINIO_ROOT_USER: contentflow-test
+          MINIO_ROOT_PASSWORD: contentflow-test-secret
         run: |
-          docker run --detach --rm \
-            --name contentflow-minio-ci \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER=contentflow-test \
-            --env MINIO_ROOT_PASSWORD=contentflow-test-secret \
-            minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e \
-            server /data --console-address ":9001"
+          # Upstream community images are unavailable. Build verified Go modules
+          # from this immutable upstream commit; never substitute a third-party image.
+          GOBIN="${RUNNER_TEMP}/minio-bin" GOTOOLCHAIN=local \
+            go install github.com/minio/minio@7aac2a2c5b7c882e68c1ce017d8256be2feea27f
+          nohup "${RUNNER_TEMP}/minio-bin/minio" server \
+            "${RUNNER_TEMP}/minio-data" --address 127.0.0.1:9000 \
+            --console-address 127.0.0.1:9001 \
+            > "${RUNNER_TEMP}/minio.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/minio.pid"
           for attempt in $(seq 1 30); do
             if curl --fail --silent \
               http://127.0.0.1:9000/minio/health/ready > /dev/null; then
@@ -62,11 +73,11 @@ jobs:
             fi
             sleep 1
           done
-          docker logs contentflow-minio-ci
+          cat "${RUNNER_TEMP}/minio.log"
           exit 1
 
       - name: Install Python and uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.12.3"
           python-version: "3.12"
@@ -82,6 +93,9 @@ jobs:
 
       - name: Lint Python
         run: uv run --locked ruff check .
+
+      - name: Fail-closed validate public-test deployment assets
+        run: uv run --locked python scripts/validate_public_test_deployment.py
 
       - name: Validate Prometheus configuration and rules
         run: |
@@ -102,7 +116,24 @@ jobs:
             prom/prometheus:v3.13.1-distroless@sha256:214f8427c8fba80c327bb94a75feb802ae12f2d6ca30812aa6e7d22f09bbea80 \
             test rules /etc/prometheus/contentflow.rules.test.yml
 
+      - name: Install and verify video validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Verify media tools and PostgreSQL acceptance regressions first
+        run: >-
+          uv run --locked pytest -q -x
+          tests/test_postgres_schema_readiness.py
+          tests/test_postgres_asset_work.py::test_postgres_final_result_rechecks_after_waiting_for_content_edit
+          tests/test_postgres_integration.py::test_postgres_schedule_and_cover_selection_preserve_release_boundary
+          tests/test_media_contract_v1.py::MediaContractAdapterTest::test_async_generation_persists_media_provider_profile_before_poll
+
       - name: Test against PostgreSQL and MinIO and enforce coverage
+        env:
+          CONTENTFLOW_TEST_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: >-
           uv run --locked pytest -q
           --cov=contentflow
@@ -111,11 +142,14 @@ jobs:
           --cov-fail-under=75
 
       - name: Audit Python dependencies
-        run: uv run --locked pip-audit --strict
+        run: uv run --locked python scripts/supply_chain.py audit-python
 
       - name: Stop MinIO
         if: always()
-        run: docker stop contentflow-minio-ci || true
+        run: |
+          if test -f "${RUNNER_TEMP}/minio.pid"; then
+            kill "$(cat "${RUNNER_TEMP}/minio.pid")" || true
+          fi
 
   frontend:
     name: Frontend, build, and security
@@ -154,6 +188,20 @@ jobs:
       - name: Build production frontend
         run: npm run build
 
+      - name: Prepare isolated browser acceptance API
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.3"
+          python-version: "3.12"
+
+      - name: Install locked test API and headless browser
+        run: |
+          uv sync --project .. --locked --extra test --python 3.12
+          npx playwright install --with-deps chromium --only-shell
+
+      - name: Browser acceptance against isolated real API
+        run: npm run test:e2e
+
       - name: Audit frontend dependencies
         run: npm audit --audit-level=moderate
 
@@ -171,7 +219,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Python and uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.12.3"
           python-version: "3.12"
@@ -194,10 +242,7 @@ jobs:
       - name: Generate normalized CycloneDX inventories
         run: |
           mkdir -p dist
-          uv run --locked pip-audit \
-            --local \
-            --strict \
-            --format cyclonedx-json \
+          uv run --locked python scripts/supply_chain.py audit-python \
             --output "${RUNNER_TEMP}/python.raw.cdx.json"
           npm sbom \
             --prefix web \

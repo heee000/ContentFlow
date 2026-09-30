@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -12,10 +13,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST
-from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
+from .diagnostics import exception_diagnostic
+from .error_boundary import SafeErrorBoundary
+from .database_schema import SchemaCompatibilityError, verify_database_schema
+from .asset_operations import AssetOperationConflict
+from .channel_config import ChannelConfigurationError
+from .publish_manifest import PublishManifestConflict
+from .session_context import SessionContextError
+from .generation_intents import GenerationIntentError
 from .migrate import upgrade_database
 from .object_storage import build_object_storage
 from .observability import ObservabilityMetrics
@@ -33,14 +41,23 @@ from .routers import (
     publishing,
     publish_evidence,
     runs,
+    style_skills,
 )
 from .settings import Settings, get_settings
 
 
 logger = logging.getLogger("contentflow.api")
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+
+
+def normalized_request_id(value: str | None) -> str:
+    if value and REQUEST_ID_PATTERN.fullmatch(value):
+        return value
+    return uuid.uuid4().hex
 
 
 def configure_logging() -> None:
+    logger.disabled = False
     if logging.getLogger().handlers:
         return
     logging.basicConfig(
@@ -64,13 +81,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not settings.production:
             upgrade_database(settings)
             db.configure_database(settings.database_url)
-            db.create_schema()
+        verify_database_schema(db.SessionLocal)
         logger.info(
             json.dumps(
                 {
                     "event": "app.started",
                     "environment": settings.environment,
-                    "database": settings.database_url.split("@")[-1],
+                    "database": db.engine.dialect.name,
                 },
                 ensure_ascii=False,
             )
@@ -84,17 +101,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     application.dependency_overrides[get_settings] = lambda: settings
+    # Inside CORS/request instrumentation, outside route execution. The normal
+    # Exception handler alone is too late: ServerErrorMiddleware rethrows raw
+    # failures even after sending its generic 500 response.
+    application.add_middleware(
+        SafeErrorBoundary, on_error=lambda request, error: unexpected_error(request, error)
+    )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=[
+            "X-ContentFlow-Next-Cursor",
+            "X-ContentFlow-Page-Limit",
+            "X-ContentFlow-Sync-Time",
+        ],
     )
 
     @application.middleware("http")
     async def request_context(request: Request, call_next):
-        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+        request_id = normalized_request_id(request.headers.get("x-request-id"))
         request.state.request_id = request_id
         started = time.perf_counter()
         if observability is not None:
@@ -154,12 +182,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers=error.headers,
             content={
                 "error": {
-                    "code": f"http_{error.status_code}",
+                    "code": error.code if isinstance(error, (SessionContextError, GenerationIntentError)) else f"http_{error.status_code}",
                     "message": error.detail,
                     "request_id": getattr(request.state, "request_id", None),
                 }
             },
         )
+
+    @application.exception_handler(PublishManifestConflict)
+    async def publish_manifest_conflict(request: Request, error: PublishManifestConflict):
+        return JSONResponse(status_code=409, content={"error": {
+            "code": error.code, "message": str(error),
+            "request_id": getattr(request.state, "request_id", None),
+        }})
+
+    @application.exception_handler(AssetOperationConflict)
+    async def asset_conflict(request: Request, error: AssetOperationConflict):
+        return JSONResponse(
+            status_code=409,
+            content={"error": {
+                "code": "asset_operation_conflict",
+                "message": str(error),
+                "request_id": getattr(request.state, "request_id", None),
+            }},
+        )
+
+    @application.exception_handler(ChannelConfigurationError)
+    async def channel_config_error(request: Request, error: ChannelConfigurationError):
+        return JSONResponse(status_code=409, content={"error": {
+            "code": "channel_configuration_invalid", "message": str(error),
+            "request_id": getattr(request.state, "request_id", None),
+        }})
 
     @application.exception_handler(RequestValidationError)
     async def validation_error(request: Request, error: RequestValidationError):
@@ -169,7 +222,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "error": {
                     "code": "validation_error",
                     "message": "请求参数校验失败",
-                    "details": error.errors(),
+                    # Pydantic root validation includes the entire original
+                    # payload (passwords/channel credentials) in input/ctx.
+                    "details": [
+                        {"loc": item["loc"], "type": item["type"], "msg": "字段校验失败"}
+                        for item in error.errors()
+                    ],
                     "request_id": getattr(request.state, "request_id", None),
                 }
             },
@@ -186,10 +244,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "method": request.method,
                     "path": request.url.path,
                     "error_type": type(error).__name__,
+                    "diagnostic": exception_diagnostic(error),
                 },
                 ensure_ascii=False,
             ),
-            exc_info=(type(error), error, error.__traceback__),
         )
         return JSONResponse(
             status_code=500,
@@ -207,6 +265,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(admin.router, prefix=prefix)
     application.include_router(campaigns.router, prefix=prefix)
     application.include_router(runs.router, prefix=prefix)
+    application.include_router(style_skills.router, prefix=prefix)
     application.include_router(knowledge.router, prefix=prefix)
     application.include_router(contents.router, prefix=prefix)
     application.include_router(assets.router, prefix=prefix)
@@ -222,20 +281,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "name": settings.app_name,
             "version": "0.2.0",
+            "release_sha": settings.release_sha,
             "docs": "/docs",
         }
 
     @application.get("/health/live")
     def liveness():
-        return {"status": "ok"}
+        return {"status": "ok", "release_sha": settings.release_sha}
 
     @application.get("/health/ready")
     def readiness():
-        with db.SessionLocal() as session:
-            session.execute(text("SELECT 1"))
-        storage = build_object_storage(settings)
-        storage.check()
-        return {"status": "ready", "database": "ok", "storage": "ok"}
+        result = {
+            "status": "not_ready",
+            "database": "unavailable",
+            "schema": "unknown",
+            "storage": "not_checked",
+            "release_sha": settings.release_sha,
+        }
+        try:
+            verify_database_schema(db.SessionLocal)
+        except SchemaCompatibilityError as error:
+            if error.reason != "database_unavailable":
+                result.update(database="ok", schema="incompatible")
+            logger.warning(json.dumps({"event": "readiness.schema_failed", "reason": error.reason}))
+            return JSONResponse(status_code=503, content=result, headers={"Cache-Control": "no-store"})
+        result.update(database="ok", schema="ok")
+        try:
+            build_object_storage(settings).check()
+        except Exception as error:
+            result["storage"] = "unavailable"
+            logger.warning(json.dumps({"event": "readiness.storage_failed", "error_type": type(error).__name__}))
+            return JSONResponse(status_code=503, content=result, headers={"Cache-Control": "no-store"})
+        result.update(status="ready", storage="ok")
+        return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
 
     @application.get("/metrics", include_in_schema=False)
     def prometheus_metrics(request: Request):
@@ -288,6 +366,3 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     return application
-
-
-app = create_app()
