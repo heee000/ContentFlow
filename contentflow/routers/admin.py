@@ -29,6 +29,7 @@ from ..entities import (
     WorkspaceStorageUsage,
 )
 from ..job_queue import enqueue_job
+from ..provider_resources import ProviderResourceLimits, provider_resource_usage
 from ..pagination import (
     DEFAULT_PAGE_LIMIT,
     PageCursor,
@@ -87,6 +88,18 @@ from ..storage_ledger import (
 router = APIRouter(prefix="/admin", tags=["administration"])
 Db = Annotated[Session, Depends(get_db)]
 Admin = Annotated[Principal, Depends(require_role("admin"))]
+
+
+@router.get("/provider-resources")
+def get_provider_resource_usage(principal: Admin, session: Db, settings: AppSettings):
+    usage = provider_resource_usage(session, principal.workspace_id)
+    limits = ProviderResourceLimits.from_settings(settings)
+    return {**usage, "limits": {"daily_calls": limits.daily_calls,
+        "daily_input_bytes": limits.daily_input_bytes, "concurrent_requests": limits.concurrent_requests},
+        "remaining_calls": max(0, limits.daily_calls - usage["calls"]),
+        "remaining_input_bytes": max(0, limits.daily_input_bytes - usage["input_bytes"]),
+        "units": "external_requests_and_evidence_bytes", "timezone": "UTC",
+        "monetary_budget": False}
 
 
 def member_response(membership: Membership, user: User) -> MemberResponse:

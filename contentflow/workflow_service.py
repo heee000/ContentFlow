@@ -28,6 +28,7 @@ from .text_generation import build_text_provider
 from .workflow import build_asset_tasks
 from .review_evidence import capture_review, local_review
 from .generation_intents import generation_targets
+from .provider_resources import ProviderResourceLimits
 
 
 def campaign_to_brief(campaign: Campaign) -> dict:
@@ -145,7 +146,7 @@ def execute_workflow_run(
     if settings.embedding_provider == "openai-compatible":
         embedder = LedgeredEmbeddingProvider(
             embedder,
-            ledger=ProviderInvocationLedger(session.get_bind()),
+            ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
             workspace_id=run.workspace_id,
             entity_type="workflow_run",
             entity_id=run.id,

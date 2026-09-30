@@ -1986,3 +1986,29 @@ def test_expired_provider_job_requires_manual_review_on_postgres(
             == "worker_lease_expired_provider_outcome_unknown"
         )
         assert manual_review.resolved_at is None
+
+
+@pytest.mark.parametrize("dimension", ["daily_calls", "concurrent_requests"])
+def test_postgres_provider_admission_serializes_last_allowance(postgres_harness: PostgresHarness, dimension):
+    from contentflow.provider_invocations import ProviderInvocationLedger
+    from contentflow.provider_resources import ProviderResourceLimits, ProviderResourceLimitError, provider_resource_usage
+
+    fixture = _create_publish_fixture(postgres_harness, status="cancelled", external_id=None)
+    limits = ProviderResourceLimits(**{dimension: 1})
+    barrier = threading.Barrier(2)
+    def enter(ordinal):
+        ledger = ProviderInvocationLedger(postgres_harness.engine, limits=limits)
+        barrier.wait(timeout=10)
+        try:
+            return ledger.start(workspace_id=fixture["workspace_id"], job_id=None,
+                entity_type="TEST-ONLY", entity_id="postgres-resource", provider_kind="text",
+                provider_name="TEST-ONLY", model_name="TEST-ONLY", operation="text.plan",
+                ordinal=ordinal, request_sha256=f"{ordinal:064x}", request_bytes=100, idempotency_key_sent=False)
+        except ProviderResourceLimitError as error:
+            return error.code
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(enter, [1, 2]))
+    assert len([result for result in results if not isinstance(result, str)]) == 1
+    with postgres_harness.sessions() as session:
+        usage = provider_resource_usage(session, fixture["workspace_id"])
+        assert (usage["calls"], usage["input_bytes"], usage["active_requests"]) == (1, 100, 1)

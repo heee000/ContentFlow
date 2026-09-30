@@ -178,6 +178,8 @@ CONTENTFLOW_LOCAL_EMBEDDING_BATCH_SIZE=8
 
 文本请求默认超时 120 秒，可在 10–300 秒内调整。长文 Agent 会显著增加请求时长和 Token 用量；超时配置是单次请求上限，不会放开修订轮数。可选修订的生成或最终复评失败时，系统保留已经完成编辑/安全评审的原稿并记录失败类型，绝不会采用未经最终复评的修订稿。
 
+文本默认限制输出 8192 Token、请求 256 KiB、响应 4 MiB；HTTP Embedding 每批最多 32 条并限制响应，知识索引最多 2000 个分块。经过调用账本的真实外部操作共享工作区 UTC 日调用/证据输入额度和本地请求并发，管理员可读取 `/api/v1/admin/provider-resources`。单位、配置、未知结果与人工重试边界见 [外部调用资源限制](docs/provider_resource_contract.md)；调用额度不等于金额预算。
+
 开放授权图片搜索默认使用 Openverse 的 Wikimedia 来源，只保留 CC0/PDM/BY/BY-SA 和精确允许的下载域名。页面要求用户打开原始页面核验许可后才能选择；许可元数据是检索线索，不是法律保证：
 
 ```dotenv

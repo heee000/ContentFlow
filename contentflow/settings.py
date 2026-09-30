@@ -127,6 +127,18 @@ class Settings(BaseSettings):
     model_api_key: str | None = None
     text_model: str | None = None
     model_request_timeout_seconds: int = Field(default=120, ge=10, le=300)
+    model_max_output_tokens: int = Field(default=8192, ge=1, le=32768)
+    model_output_limit_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    model_max_request_bytes: int = Field(default=256 * 1024, ge=1024, le=2 * 1024 * 1024)
+    model_max_response_bytes: int = Field(default=4 * 1024 * 1024, ge=1024, le=16 * 1024 * 1024)
+    workspace_provider_daily_calls: int = Field(default=1000, ge=1, le=100_000)
+    workspace_provider_daily_input_bytes: int = Field(default=64 * 1024 * 1024, ge=1024, le=1024**3)
+    workspace_provider_concurrent_requests: int = Field(default=4, ge=1, le=64)
+    embedding_api_batch_size: int = Field(default=32, ge=1, le=128)
+    embedding_max_text_chars: int = Field(default=8192, ge=1, le=32768)
+    embedding_max_request_bytes: int = Field(default=256 * 1024, ge=1024, le=2 * 1024 * 1024)
+    embedding_max_response_bytes: int = Field(default=8 * 1024 * 1024, ge=1024, le=32 * 1024 * 1024)
+    knowledge_max_chunks: int = Field(default=2000, ge=1, le=10_000)
     embedding_api_base: str | None = None
     embedding_api_key: str | None = None
     embedding_model: str | None = None

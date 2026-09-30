@@ -13,6 +13,7 @@ from .generation_intents import utc_timestamp
 
 
 Platform = Literal["xiaohongshu", "douyin", "wechat"]
+BriefText = Annotated[str, StringConstraints(min_length=1, max_length=2048)]
 WorkspaceRole = Literal["viewer", "editor", "reviewer", "admin"]
 EvidenceReason = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
@@ -252,13 +253,13 @@ class CampaignCreate(BaseModel):
     product_name: str = Field(min_length=1, max_length=160)
     objective: str = Field(min_length=5, max_length=4000)
     audience: str = Field(min_length=3, max_length=4000)
-    platforms: list[Platform] = Field(min_length=1)
+    platforms: list[Platform] = Field(min_length=1, max_length=3)
     tone: str = Field(default="清楚、可信、不过度承诺", max_length=200)
     city: str = Field(default="北京", max_length=80)
-    must_include: list[str] = Field(default_factory=list)
-    forbidden_phrases: list[str] = Field(default_factory=list)
+    must_include: list[BriefText] = Field(default_factory=list, max_length=32)
+    forbidden_phrases: list[BriefText] = Field(default_factory=list, max_length=32)
     call_to_action: str = Field(default="", max_length=500)
-    product_facts: list[str] = Field(default_factory=list)
+    product_facts: list[BriefText] = Field(default_factory=list, max_length=32)
     style_skill_id: str = Field(default="builtin:editorial", max_length=80)
     style_notes: str = Field(default="", max_length=2000)
     quality_profile: Literal["standard", "deep"] = "deep"
@@ -271,13 +272,13 @@ class CampaignUpdate(BaseModel):
     product_name: str | None = Field(default=None, min_length=1, max_length=160)
     objective: str | None = Field(default=None, min_length=5, max_length=4000)
     audience: str | None = Field(default=None, min_length=3, max_length=4000)
-    platforms: list[Platform] | None = None
+    platforms: list[Platform] | None = Field(default=None, min_length=1, max_length=3)
     tone: str | None = Field(default=None, max_length=200)
     city: str | None = Field(default=None, max_length=80)
-    must_include: list[str] | None = None
-    forbidden_phrases: list[str] | None = None
+    must_include: list[BriefText] | None = Field(default=None, max_length=32)
+    forbidden_phrases: list[BriefText] | None = Field(default=None, max_length=32)
     call_to_action: str | None = Field(default=None, max_length=500)
-    product_facts: list[str] | None = None
+    product_facts: list[BriefText] | None = Field(default=None, max_length=32)
     style_skill_id: str | None = Field(default=None, max_length=80)
     style_notes: str | None = Field(default=None, max_length=2000)
     quality_profile: Literal["standard", "deep"] | None = None

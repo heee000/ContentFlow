@@ -6,6 +6,7 @@ import logging
 from .diagnostics import log_exception, safe_error_receipt
 from .media_validation import require_video_decoders, validate_media, validation_error_receipt
 from .review_evidence import resolve_brief
+from .provider_resources import ProviderResourceLimitError, ProviderResourceLimits, resource_limit_receipt
 import os
 import random
 import signal
@@ -514,7 +515,7 @@ def handle_knowledge_index(
     if settings.embedding_provider == "openai-compatible":
         embedder = LedgeredEmbeddingProvider(
             embedder,
-            ledger=ProviderInvocationLedger(session.get_bind()),
+            ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
             workspace_id=document.workspace_id,
             entity_type="knowledge_document",
             entity_id=document.id,
@@ -526,6 +527,8 @@ def handle_knowledge_index(
         document,
         embedder=embedder,
         storage=build_object_storage(settings),
+        embedding_batch_size=settings.embedding_api_batch_size,
+        max_chunks=settings.knowledge_max_chunks,
     )
     record_audit(
         session,
@@ -613,7 +616,7 @@ def handle_asset_search(
     query = str(metadata.get("search_query") or "").strip()
     provider = LedgeredSearchProvider(
         build_image_search_provider(settings),
-        ledger=ProviderInvocationLedger(session.get_bind()),
+        ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
         workspace_id=asset.workspace_id,
         entity_id=asset.id,
         model_name="openverse-images-v1",
@@ -710,7 +713,7 @@ def handle_asset_download(
     allowed_hosts = tuple(settings.image_search_download_allowed_hosts)
     call_metadata: dict[str, Any] = {}
     downloader = LedgeredMediaDownloader(
-        ledger=ProviderInvocationLedger(session.get_bind()),
+        ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
         workspace_id=asset.workspace_id,
         entity_id=asset.id,
         provider_name="openverse",
@@ -916,7 +919,7 @@ def _store_generation(
                 settings.image_model if asset.kind == "image" else settings.video_model
             )
             downloader = LedgeredMediaDownloader(
-                ledger=ProviderInvocationLedger(session.get_bind()),
+                ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
                 workspace_id=asset.workspace_id,
                 entity_id=asset.id,
                 provider_name=asset.provider,
@@ -1086,7 +1089,7 @@ def handle_asset_generate(
         )
         provider = LedgeredMediaProvider(
             provider,
-            ledger=ProviderInvocationLedger(session.get_bind()),
+            ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
             workspace_id=asset.workspace_id,
             entity_id=asset.id,
             provider_name=configured_provider,
@@ -1176,7 +1179,7 @@ def handle_asset_poll(
         )
         provider = LedgeredMediaProvider(
             provider,
-            ledger=ProviderInvocationLedger(session.get_bind()),
+            ledger=ProviderInvocationLedger(session.get_bind(), limits=ProviderResourceLimits.from_settings(settings)),
             workspace_id=asset.workspace_id,
             entity_id=asset.id,
             provider_name=configured_provider,
@@ -2335,6 +2338,7 @@ class Worker:
                 elif job_type in {"asset.generate", "asset.poll", "asset.download"}:
                     persisted_error = (media_configuration_receipt(error)
                         or validation_error_receipt(error) or persisted_error)
+                persisted_error = resource_limit_receipt(error) or persisted_error
                 if job is not None:
                     publish_outcome_uncertain = False
                     if (
@@ -2395,6 +2399,7 @@ class Worker:
                                     StorageLedgerUnverified,
                                     StorageQuotaExceeded,
                                     ChannelConfigurationError,
+                                    ProviderResourceLimitError,
                                 ),
                             )
                             or database_error_kind == DatabaseErrorKind.PERMANENT
@@ -2404,7 +2409,9 @@ class Worker:
                                 and not error.retryable
                             ),
                             manual_review_reason_code=(
-                                "provider_outcome_unknown_after_error"
+                                ("provider_resource_limit" if type(error) is ProviderResourceLimitError
+                                    and error.code != "provider_response_too_large"
+                                    else "provider_outcome_unknown_after_error")
                                 if job.job_type in self.manual_review_job_types
                                 else None
                             ),

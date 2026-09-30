@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import threading
 from functools import lru_cache
 from pathlib import Path
@@ -12,6 +13,7 @@ from .providers import PROVIDER_REQUEST_KEY, _provider_request_metadata
 from .rag import HashEmbedding
 from .settings import Settings
 from .execution_fence import assert_execution_active
+from .provider_resources import ProviderResourceLimitError, ProviderResourceLimits
 
 
 class EmbeddingProvider(Protocol):
@@ -158,6 +160,10 @@ class OpenAICompatibleEmbeddingProvider:
         dimensions: int,
         send_dimensions: bool = True,
         client: httpx.Client | None = None,
+        max_batch_size: int = 32,
+        max_text_chars: int = 8192,
+        max_request_bytes: int = 256 * 1024,
+        max_response_bytes: int = 8 * 1024 * 1024,
     ):
         self.endpoint = f"{api_base.rstrip('/')}/embeddings"
         self.api_key = api_key
@@ -165,6 +171,11 @@ class OpenAICompatibleEmbeddingProvider:
         self.dimensions = dimensions
         self.send_dimensions = send_dimensions
         self.client = client or httpx.Client(timeout=60)
+        if any(type(value) is not int or value < 1 for value in
+               (dimensions, max_batch_size, max_text_chars, max_request_bytes, max_response_bytes)):
+            raise ValueError("Embedding limits must be positive integers")
+        self.max_batch_size, self.max_text_chars = max_batch_size, max_text_chars
+        self.max_request_bytes, self.max_response_bytes = max_request_bytes, max_response_bytes
         self.last_call_metadata: dict[str, object] = {"usage_source": "not_reported"}
         self._invocation_key: str | None = None
 
@@ -177,9 +188,23 @@ class OpenAICompatibleEmbeddingProvider:
     def encode(self, text: str) -> list[float]:
         return self.encode_many([text])[0]
 
+    def _payload(self, texts):
+        result = {"model": self.model_name, "input": texts, "encoding_format": "float"}
+        if self.send_dimensions:
+            result["dimensions"] = self.dimensions
+        return result
+
+    def validate_inputs(self, texts):
+        if (len(texts) > self.max_batch_size or any(type(text) is not str
+                or not text.strip() or len(text) > self.max_text_chars for text in texts)):
+            raise ProviderResourceLimitError("embedding_batch_limit")
+        if len(json.dumps(self._payload(texts), ensure_ascii=False).encode("utf-8")) > self.max_request_bytes:
+            raise ProviderResourceLimitError("provider_request_too_large")
+
     def encode_many(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        self.validate_inputs(texts)
         invocation_key = self._invocation_key
         self._invocation_key = None
         self.last_call_metadata = {
@@ -189,28 +214,24 @@ class OpenAICompatibleEmbeddingProvider:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "Accept-Encoding": "identity",
         }
         if invocation_key is not None:
             headers["Idempotency-Key"] = invocation_key
-        payload = {
-            "model": self.model_name,
-            "input": texts,
-            "encoding_format": "float",
-        }
-        if self.send_dimensions:
-            payload["dimensions"] = self.dimensions
+        payload = self._payload(texts)
         try:
             assert_execution_active()
-            response = self.client.post(
-                self.endpoint,
-                headers=headers,
-                json=payload,
-            )
-            self.last_call_metadata.update(
-                _provider_request_metadata(headers=response.headers)
-            )
-            response.raise_for_status()
-            body = response.json()
+            with self.client.stream("POST", self.endpoint, headers=headers, json=payload) as response:
+                self.last_call_metadata.update(_provider_request_metadata(headers=response.headers))
+                response.raise_for_status()
+                if response.headers.get("content-encoding", "identity").lower() != "identity":
+                    raise RuntimeError("Embedding compressed response is not supported")
+                data = bytearray()
+                for chunk in response.iter_bytes(chunk_size=64 * 1024):
+                    if len(data) + len(chunk) > self.max_response_bytes:
+                        raise ProviderResourceLimitError("provider_response_too_large")
+                    data.extend(chunk)
+                body = json.loads(data)
         except httpx.HTTPStatusError as error:
             raise RuntimeError(
                 f"Embedding 调用失败 (HTTP {error.response.status_code})"
@@ -239,7 +260,12 @@ class OpenAICompatibleEmbeddingProvider:
                     }
                 )
         try:
-            items = sorted(body["data"], key=lambda item: item["index"])
+            items = body["data"]
+            if (not isinstance(items, list) or len(items) != len(texts)
+                    or any(not isinstance(item, dict) or type(item.get("index")) is not int for item in items)
+                    or {item["index"] for item in items} != set(range(len(texts)))):
+                raise ValueError("invalid indices")
+            items = sorted(items, key=lambda item: item["index"])
             vectors = [item["embedding"] for item in items]
         except (KeyError, IndexError, TypeError, ValueError) as error:
             raise RuntimeError("Embedding 响应结构错误") from error
@@ -249,11 +275,16 @@ class OpenAICompatibleEmbeddingProvider:
             )
         normalized: list[list[float]] = []
         for vector in vectors:
-            if len(vector) != self.dimensions:
+            if not isinstance(vector, list) or len(vector) != self.dimensions:
                 raise RuntimeError(
-                    f"Embedding 维度不匹配: 预期 {self.dimensions}，实际 {len(vector)}"
+                    "Embedding 维度不匹配"
                 )
-            normalized_vector = [float(value) for value in vector]
+            if any(type(value) not in {int, float} for value in vector):
+                raise RuntimeError("Embedding 响应包含非数值元素")
+            try:
+                normalized_vector = [float(value) for value in vector]
+            except OverflowError as error:
+                raise RuntimeError("Embedding 响应包含非有限数值") from error
             if not all(math.isfinite(value) for value in normalized_vector):
                 raise RuntimeError("Embedding 响应包含非有限数值")
             normalized.append(normalized_vector)
@@ -270,13 +301,19 @@ def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
             or not settings.embedding_model
         ):
             raise ValueError("OpenAI 兼容 Embedding 缺少 API Base、API Key 或模型名")
-        return OpenAICompatibleEmbeddingProvider(
+        result = OpenAICompatibleEmbeddingProvider(
             api_base=settings.resolved_embedding_api_base,
             api_key=settings.resolved_embedding_api_key,
             model=settings.embedding_model,
             dimensions=settings.embedding_dimensions,
             send_dimensions=settings.embedding_send_dimensions,
+            max_batch_size=settings.embedding_api_batch_size,
+            max_text_chars=settings.embedding_max_text_chars,
+            max_request_bytes=settings.embedding_max_request_bytes,
+            max_response_bytes=settings.embedding_max_response_bytes,
         )
+        result.resource_limits = ProviderResourceLimits.from_settings(settings)
+        return result
     if settings.embedding_provider == "bge-m3-local":
         return LocalBGEM3EmbeddingProvider(
             model_name=settings.local_embedding_model,

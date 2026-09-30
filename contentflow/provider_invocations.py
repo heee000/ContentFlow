@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .audit import record_audit
 from .entities import Job, ProviderInvocation, ProviderInvocationAttempt
+from .provider_resources import ProviderResourceLimits, admit_provider_request
 from .execution_fence import (
     PROVIDER_EVIDENCE_SESSION, assert_execution_active, execution_is_stale,
     fence_domain_write,
@@ -184,7 +185,8 @@ def _safe_call_metadata(metadata: Any) -> dict[str, Any]:
 
 
 class ProviderInvocationLedger:
-    def __init__(self, bind: Engine) -> None:
+    def __init__(self, bind: Engine, *, limits: ProviderResourceLimits | None = None) -> None:
+        self.limits = limits or ProviderResourceLimits()
         self._session_factory = sessionmaker(
             bind=bind,
             expire_on_commit=False,
@@ -238,6 +240,7 @@ class ProviderInvocationLedger:
             try:
                 with self._session_factory() as session:
                     fence_domain_write(session)
+                    admitted_at = admit_provider_request(session, workspace_id, request_bytes, self.limits)
                     query = select(ProviderInvocation).where(
                         ProviderInvocation.request_key == request_key
                     )
@@ -349,6 +352,7 @@ class ProviderInvocationLedger:
                         status="started",
                         idempotency_key_sent=idempotency_key_sent,
                         usage_source="not_reported",
+                        started_at=admitted_at,
                     )
                     session.add(attempt)
                     session.flush()
@@ -587,6 +591,9 @@ class LedgeredEmbeddingProvider:
         assert_execution_active()
         if not texts:
             return []
+        preflight = getattr(self.provider, "validate_inputs", None)
+        if callable(preflight):
+            preflight(texts)
         self.ordinal += 1
         request_evidence = {
             "model": self.model_name,

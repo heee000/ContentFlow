@@ -317,3 +317,14 @@
 - 无新迁移，head 仍 f0a1b2c3d4e5。真实 PG/MinIO、Docker/Linux 解码工具、恢复、平台与 CI/部署保持待验；未接触真实配置/业务数据/费用/账号或受保护知识文件。作者仍 John Wang/heee000 noreply，只按授权普通提交推送当前功能分支。本轮阶段关闭后，预算、生成成果检查点和配置身份等余项继续独立排期。
 - 最终完整后端 **1002 passed / 59 skipped / 7 warnings / 228 subtests，565.04 秒**，无失败；新增的真实离线视频探测/解码在本机执行通过。59 项外部服务跳过不记通过；7 条 warning 为 Starlette/httpx 和 SQLite datetime adapter 弃用提示。前端源码/依赖未变，不重复历史 40/40 模块/SSR、lint/类型检查，也不把历史数字冒作本次新成绩。全套开始后仅清除两份新增测试文件的末尾多余空行，无逻辑变化；本次阶段验证全部结束，不重复全套。
 - 按明确清单仅同步 23 个实现/测试/契约/交接文件。实际源码 SHA 与远端同步结果以本功能分支阶段提交和任务交付回执为准；不强推、不创建 PR/合并、不手动触发 CI/部署。受保护知识文件仍未跟踪且不纳入提交；整体产品剩余问题不因此关闭。
+
+## 2026-10-01 第三阶段：资源限制与 HTTP Embedding 校验
+
+- 用户要求总结进度、继续整改，并按日期在每批完成后同步 GitHub。先核实本地/远端已有提交均为 `a0cc44965e985f04a21a15b1410aed7ca9d77426`，没有遗漏待推提交。GitHub 本机代理仍只在单次命令清空，不修改账户或全局配置。保持一个有明确边界的实施包，没有重新全面审计。
+- A12 部分实施：账本调用前按工作区 UTC 日检查 attempt 数、canonical evidence 输入字节、本地 started 并发；锁、计数、attempt 与审计在同一事务，保持 Workspace.updated_at，复用现有表。已预留的失败/未知/迟到/重试计数不退还，结果终态释放本地并发。管理员可读取用量/剩余额度；明确 `monetary_budget=false`。该单位不是金额、供应商 Token、原始 HTTP 请求总量或远端异步任务容量。
+- 文本限制输出 Token 与实际请求/响应字节，输出参数可显式选择 max_tokens/max_completion_tokens；HTTP Embedding 限制批次/文本/请求与流式响应，拒绝压缩编码。知识索引限制读取和总分块，分批嵌入、成功后替换；后续批次失败保留旧索引。Brief 数组最多 32 项、元素最多 2048 字符，平台非空且最多 3 项。API/Worker、样例 env 与 Compose/私测导出同组配置入口已接通，未修改真实环境。
+- A35 HTTP 响应 index 严格整数、唯一/范围/完整覆盖并恢复原顺序，向量严格维度/有限数字，拒绝 bool/字符串/NaN/Infinity/转换溢出。坏批次不覆盖已有索引。资源错误仅持久化固定错误码/指引，拒绝自动重试；实际素材 Worker 在第二次外部调用前停止，沿用失败及人工重试入口。详见 [资源限制契约](provider_resource_contract.md)。
+- 初始 7 项已知失败确认无输出 cap、超大输入仍请求、无界读取和错误 index 接受。首组 58 passed/1 failed/6 subtests 中旧 Embedding FakeClient 缺 stream，更新为保留原断言的 MockTransport 流夹具。扩展组 129 passed/1 failed/16 subtests 是新增用例误期待素材额度拒绝进入人工核对，修正为现有失败策略，保留无第二次调用、额度和错误断言；没有为了通过修改产品策略。后续资源/部署/PG 套件 **87 passed / 33 skipped / 6 subtests**，最终资源/Embedding **42 passed / 6 subtests**。
+- 本批完整后端 **1034 passed / 61 skipped / 7 warnings / 228 subtests，495.13 秒**；本次当前 API、重新构建 Next standalone、Node 24.19 的独立 Edge **44/44，1.8 分钟**，正常退出且专用端口释放。Ruff 无缓存及 diff 检查通过。7 条警告为 Starlette/httpx 与 SQLite datetime adapter 弃用；61 项真实服务用例跳过不算通过。新增两个 PG 竞争用例补正夹具必填参数后重新收集为 **2 skipped / 31 deselected**，未取得真实 PG 结果，未改产品逻辑或重复全套。所有验证句柄已结束。
+- 无新增迁移，真实 PG/MinIO、Docker/Ubuntu、恢复、供应商实际参数支持、同版 CI/部署仍待验。A12 金额定价/预留/结算、积压/公平调度及远端任务容量，A47 部分生成成果检查点、A09 配置身份、A34 去重/并发版本仍开放。当前阶段实现与本地验收完成，不冒称整体交付完成。
+- 普通提交标题使用 `2026-10-01`，仅同步本批明确文件至 `codex/enterprise-media-runtime`；实际 SHA 及 GitHub 同步见分支提交历史/本任务交付回执。不强推、PR、合并、手动 CI/部署或触发真实费用；不读/哈希/修改/暂存受保护知识文件。后续每个已验证实施批次均按用户要求提交并推送，不留下仅本地的完成批次。

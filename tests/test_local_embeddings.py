@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -199,6 +200,12 @@ class LocalEmbeddingTest(unittest.TestCase):
 
     def test_remote_provider_sends_invocation_key_and_captures_bounded_evidence(self):
         class FakeClient:
+            @contextmanager
+            def stream(self, method, url, **kwargs):
+                with httpx.Client(transport=httpx.MockTransport(lambda request: self.post(url, **kwargs))) as client:
+                    with client.stream(method, url, **kwargs) as response:
+                        yield response
+
             def post(self, url, **kwargs):
                 self.url = url
                 self.kwargs = kwargs

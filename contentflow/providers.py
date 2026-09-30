@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from .prompts import PROMPTS
 from .execution_fence import assert_execution_active
+from .provider_resources import ProviderResourceLimitError
 
 
 class Provider(Protocol):
@@ -390,6 +391,10 @@ class OpenAICompatibleProvider:
         model: str,
         timeout_seconds: int = 60,
         provider_name: str = "openai-compatible",
+        max_output_tokens: int = 8192,
+        output_limit_field: str = "max_tokens",
+        max_request_bytes: int = 256 * 1024,
+        max_response_bytes: int = 4 * 1024 * 1024,
     ):
         self.endpoint = f"{api_base.rstrip('/')}/chat/completions"
         self.api_key = api_key
@@ -397,6 +402,13 @@ class OpenAICompatibleProvider:
         self.model_name = model
         self.provider_name = provider_name
         self.timeout_seconds = timeout_seconds
+        if output_limit_field not in {"max_tokens", "max_completion_tokens"}:
+            raise ValueError("Unsupported output token limit field")
+        if any(type(value) is not int or value < 1 for value in
+               (max_output_tokens, max_request_bytes, max_response_bytes)):
+            raise ValueError("Model limits must be positive integers")
+        self.max_output_tokens, self.output_limit_field = max_output_tokens, output_limit_field
+        self.max_request_bytes, self.max_response_bytes = max_request_bytes, max_response_bytes
         self.last_call_metadata: dict[str, Any] = {"usage_source": "not_reported"}
         self._invocation_key: str | None = None
 
@@ -422,6 +434,25 @@ class OpenAICompatibleProvider:
             model=required["CONTENTFLOW_MODEL"] or "",
         )
 
+    def _encoded_request(self, stage, payload, system_prompt=None):
+        if stage not in PROMPTS:
+            raise ValueError(f"没有对应提示词模板: {stage}")
+        request_body = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system_prompt or PROMPTS[stage]},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+            "response_format": {"type": "json_object"},
+            "temperature": {"plan": 0.45, "generate": 0.7, "review": 0.15}.get(stage, 0.3),
+            self.output_limit_field: self.max_output_tokens,
+        }
+        encoded = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
+        if len(encoded) > self.max_request_bytes:
+            raise ProviderResourceLimitError("provider_request_too_large")
+        return encoded
+
+    def validate_request(self, stage, payload, *, system_prompt=None):
+        self._encoded_request(stage, payload, system_prompt)
+
     def complete_json(
         self,
         stage: str,
@@ -435,24 +466,7 @@ class OpenAICompatibleProvider:
             "usage_source": "not_reported",
             "idempotency_key_sent": invocation_key is not None,
         }
-        if stage not in PROMPTS:
-            raise ValueError(f"没有对应提示词模板: {stage}")
-        request_body = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt or PROMPTS[stage]},
-                {
-                    "role": "user",
-                    "content": json.dumps(payload, ensure_ascii=False),
-                },
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": {
-                "plan": 0.45,
-                "generate": 0.7,
-                "review": 0.15,
-            }.get(stage, 0.3),
-        }
+        encoded = self._encoded_request(stage, payload, system_prompt)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -461,7 +475,7 @@ class OpenAICompatibleProvider:
             headers["Idempotency-Key"] = invocation_key
         request = urllib.request.Request(
             self.endpoint,
-            data=json.dumps(request_body).encode("utf-8"),
+            data=encoded,
             headers=headers,
             method="POST",
         )
@@ -472,7 +486,10 @@ class OpenAICompatibleProvider:
                 self.last_call_metadata.update(
                     _provider_request_metadata(headers=getattr(response, "headers", None))
                 )
-                raw = json.loads(response.read().decode("utf-8"))
+                data = response.read(self.max_response_bytes + 1)
+                if len(data) > self.max_response_bytes:
+                    raise ProviderResourceLimitError("provider_response_too_large")
+                raw = json.loads(data.decode("utf-8"))
                 self.last_call_metadata.update(
                     _provider_request_metadata(
                         body=raw,

@@ -80,7 +80,7 @@ class AIProvenanceRecorder:
         ledger_context = (workspace_id, entity_type, entity_id)
         if ledger_session is not None and all(ledger_context):
             self.ledger: ProviderInvocationLedger | None = ProviderInvocationLedger(
-                ledger_session.get_bind()
+                ledger_session.get_bind(), limits=getattr(provider, "resource_limits", None)
             )
             self.workspace_id = workspace_id or ""
             self.entity_type = entity_type or ""
@@ -112,6 +112,9 @@ class AIProvenanceRecorder:
             "input_bytes": input_bytes,
         }
         ledger_handle = None
+        preflight = getattr(self.provider, "validate_request", None)
+        if callable(preflight):
+            preflight(stage, payload, system_prompt=self.prompt_set.prompts[stage])
         if self.ledger is not None:
             ledger_request_sha256, ledger_request_bytes = canonical_evidence(
                 {
