@@ -7,7 +7,13 @@ from contentflow.database_schema import SchemaCompatibilityError, verify_databas
 import test_postgres_integration as pg
 
 
-postgres_harness = pg.postgres_harness
+@pytest.fixture
+def postgres_harness(tmp_path_factory):
+    # These tests commit destructive DDL. Give each case its own disposable
+    # database; a module-scoped database would leak the first DROP into all cases.
+    yield from pg.postgres_harness.__wrapped__(tmp_path_factory)
+
+
 pytestmark = pytest.mark.skipif(not pg.TEST_DATABASE_URL, reason="Dedicated PostgreSQL test URL is required")
 
 

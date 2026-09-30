@@ -690,12 +690,16 @@ def test_postgres_schedule_and_cover_selection_preserve_release_boundary(postgre
         with postgres_harness.sessions() as session:
             session.execute(text("SET LOCAL statement_timeout = '10s'"))
 
-            def observe_capture(session, _context):
-                if any(isinstance(item, PublishJob) for item in session.new):
+            def observe_capture(_connection, _cursor, _statement, _parameters, context, _executemany):
+                # Publication acceptance now uses a Core INSERT for its unique
+                # key; ORM after_flush/session.new no longer observes this row.
+                if context.isinsert and getattr(
+                    getattr(context.compiled.statement, "table", None), "name", None
+                ) == "publish_jobs":
                     captured.set()
                     assert selection_requested.wait(timeout=10)
 
-            event.listen(session, "after_flush", observe_capture)
+            event.listen(session.connection(), "after_cursor_execute", observe_capture)
             job = schedule_publish(PublishScheduleRequest(**intent,
                 preview_token=preview["preview_token"]),
                 principal, session, postgres_harness.settings)

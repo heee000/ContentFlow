@@ -124,11 +124,15 @@ def test_postgres_final_result_rechecks_after_waiting_for_content_edit(postgres_
         try:
             assert provider_started.wait(timeout=10)
             with h.sessions() as editor:
-                edit(h, fixture, editor)
-                editor.flush()
+                # Hold only the parent until the final result acceptance waits.
+                # Editing first also holds the audit/workspace lock and stops the
+                # provider ledger's completion before it can reach this boundary.
+                editor.scalar(select(ContentItem).where(
+                    ContentItem.id == fixture.content_id).with_for_update())
                 release_provider.set()
                 assert locking.wait(timeout=10)
                 wait_for_database_lock(h, observed["pid"])
+                edit(h, fixture, editor)
                 editor.commit()
             assert future.result(timeout=15)
         finally:

@@ -116,6 +116,21 @@ jobs:
             prom/prometheus:v3.13.1-distroless@sha256:214f8427c8fba80c327bb94a75feb802ae12f2d6ca30812aa6e7d22f09bbea80 \
             test rules /etc/prometheus/contentflow.rules.test.yml
 
+      - name: Install and verify video validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Verify media tools and PostgreSQL acceptance regressions first
+        run: >-
+          uv run --locked pytest -q -x
+          tests/test_postgres_schema_readiness.py
+          tests/test_postgres_asset_work.py::test_postgres_final_result_rechecks_after_waiting_for_content_edit
+          tests/test_postgres_integration.py::test_postgres_schedule_and_cover_selection_preserve_release_boundary
+          tests/test_media_contract_v1.py::MediaContractAdapterTest::test_async_generation_persists_media_provider_profile_before_poll
+
       - name: Test against PostgreSQL and MinIO and enforce coverage
         env:
           CONTENTFLOW_TEST_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
