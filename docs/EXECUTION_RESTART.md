@@ -66,6 +66,8 @@
 
 ## 9. 2026-10-01 GitHub 合并与 CI 修复
 
+本节下方是历次修复过程；最新完成状态见第 10 节。
+
 - 用户已授权合并可安全合并的 PR，并允许使用终端修改/测试/合并；此授权取代第 8 节中本轮不合并/不执行 CI 的旧范围。部署、真实供应商费用、业务数据及受保护知识文件边界不变。
 - #12 与 #3 已合并，main 为 `26cffe10b0ce274aa0718b5430d711fac42c4d98`；#16 主体改进等待修复后同版 CI 通过再合并。已在功能分支正常合并 origin/main，解决 uv.lock 冲突，保留本地 Embedding extras 和主分支依赖更新，不 rebase/强推。
 - 当前 CI 失败为官方 MinIO 容器拉取不可用、npm 依赖漏洞、urllib3 2.7.0 三项漏洞。CI 改用固定官方 MinIO 源码 commit 与固定 Go toolchain 构建，仅测试服务；不删真实 S3 测试、不降低安全阈值。Next/eslint-config-next 升至 16.3.8，Undici 7.29.1 override，正常范围更新 brace-expansion/fast-uri；urllib3 锁为 2.8.0。
@@ -76,3 +78,11 @@
 - GitHub `36755633914` 的供应链检查已通过、官方 MinIO 构建及启动成功；前端 37 项通过后，旧页 POST 用例超时：更慢的 CI 中后台 GET 先返回 context 409，客户端已正确拦截，导致待测 POST 根本不发出。仅给该用例旧页模拟后台 visibilityState，隔离周期轮询，并新增 POST 前尚未 blocked 的断言；保留真实 POST/409、草稿和无新增数据断言，相邻用例仍验证主动拦截。修正用例本地连续三次通过（24.2 秒）。不改产品逻辑、不增重试、不放宽超时；最终同版 CI 仍需通过。
 
 - `5b72127` 的 GitHub 前端 40/40 模块、44/44 浏览器和零漏洞通过；后端真实服务完整结果为 1083 passed / 7 failed / 5 skipped / 228 subtests、覆盖率 86.12%。失败为 runner 未安装 ffmpeg/ffprobe、Schema 漂移套件错误复用模块级数据库导致首项 DROP 污染后四项、两个并发用例在新的调用账本/Core INSERT 下观察点过期。修正 CI 安装并验证解码工具；Schema 用例各自生成独立数据库；素材用例先只持有父行并等真实锁阻塞再执行 API 编辑，避免先持有审计 Workspace 锁挡住账本；发布用例观察实际 Core INSERT，保留锁序、清单及无外部派发断言。加入 CI 已知失败专项早停，先签收后再完整覆盖率，避免等十分钟才暴露同类错误。没有降低产品门禁或测试断言。当地相关专项 41 passed / 9 PG skipped / 31 subtests，Ruff 通过；真实 PG 修正等待下一同版 CI。
+
+## 10. 2026-10-01 主分支签收与后续依赖修复
+
+- #16 已合并至 main `a0f84f48b82c145b4c731d97569b995d716a113d`；#3/#10/#12/#15 同样已合并。PR 同版 CI `36759686867`：后端 1095 passed / 0 skipped / 228 subtests，分支覆盖率 86.67%，前端模块 40/40、浏览器 44/44，Python/npm 安全扫描及 SBOM 检查通过。主分支运行 `36761096602`、`36761263124` 均已成功，以上等待状态已结束。
+- 用户授权继续修复和合并有用条目。已从 main 建立 `codex/2026-10-01-dependency-repairs`，普通整合 #17 与 #2，保留原始提交历史；#17 是机器人替代旧 #14 的新条目，不再回退 Next 16.3.8。#2 冲突只协调 pytest-cov 7.1.0 与现有 Ruff 限制，锁文件保持当前其他版本。
+- #17 的实际失败只有 npm 安全门禁；原 PR 构建、模块和 44 项浏览器测试均通过。vinext 0.2.1 引入 image-size 2.0.2，受 GHSA-5p2g-fcmc-qvqq、GHSA-w3rx-r6r6-pgpr 影响。用同主版本官方补丁 2.0.4 override 修复，不执行 audit fix --force、不降安全阈值、不跳过测试。新版本地 lint、40 项模块/SSR、Next 生产构建已通过，npm 安装扫描零漏洞。pytest-cov 7 分支覆盖率专项运行 12/12 通过；完整覆盖率与 PostgreSQL/S3 以此分支最新同版 CI 为准，不能引用 #16 结果替代。
+- #5 暂留：最新 React、jsx-a11y、import 插件 peer 范围仍不含 ESLint 10，旧 CI 的 react/display-name 调用已被移除的 getFilename API 而崩溃；不关闭 React/无障碍规则绕过。#6 暂留：最新 typescript-eslint 的 TypeScript peer 范围为 >=4.8.4 <6.1.0，不能直接接受 TypeScript 7。#7 暂留：CI Node 22.13.0 对应 Node 22 类型；Node 26 类型会允许实际运行环境不存在的 API。三个大版本条目未合并，不把冲突解决等同兼容性通过。
+- 本轮只更新源代码/测试依赖并执行隔离 CI；没有部署、真实供应商调用、付款或业务数据变更。受保护知识文件未读取或暂存。后续按同版检查成功后普通合并并核对远端 main；最终结果以本次 PR/GitHub 回执为准。
